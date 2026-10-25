@@ -157,7 +157,9 @@ impl RunoApp {
             "Context cleared. The next message starts a fresh conversation.".into(),
             std::time::Instant::now(),
         ));
-        self.chat_scroll.scroll_to_bottom();
+        if self.selected == Some(id) {
+            self.jump_to_bottom();
+        }
     }
 
     /// Shrink the conversation: the agent's own `/compact` where its CLI has one, else a
@@ -213,7 +215,9 @@ impl RunoApp {
             ),
             std::time::Instant::now(),
         ));
-        self.chat_scroll.scroll_to_bottom();
+        if self.selected == Some(id) {
+            self.jump_to_bottom();
+        }
     }
 
     /// Put sent message `index` back in the composer; sending replaces it and what follows.

@@ -28,6 +28,8 @@ pub struct AgentOptions {
     /// Claude and Codex: comma-separated extra directories the agent may access.
     pub add_dirs: String,
     pub fallback_model: String,
+    /// Claude: the model its subagents run on; empty lets each use the main model.
+    pub subagent_model: String,
     /// Codex config profile.
     pub profile: String,
     /// OpenCode: model variant (reasoning effort).
@@ -40,6 +42,10 @@ pub struct AgentOptions {
     pub save_to_config: bool,
     /// Default models of single projects, by project id; they win over `model_override`.
     pub project_models: HashMap<String, String>,
+    /// Rules "Always allow" saved for single projects, by project id, comma-separated
+    /// like `allowed_tools`: they apply only there (see `approvals::always_rule`).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub project_tools: HashMap<String, String>,
 }
 
 impl AgentOptions {
@@ -53,7 +59,43 @@ impl AgentOptions {
         {
             opts.model_override = model.trim().to_string();
         }
+        if let Some(rules) = self
+            .project_tools
+            .get(&project.to_string())
+            .filter(|r| !r.trim().is_empty())
+        {
+            opts.allowed_tools = [opts.allowed_tools.trim(), rules.trim()]
+                .into_iter()
+                .filter(|r| !r.is_empty())
+                .collect::<Vec<_>>()
+                .join(",");
+        }
         opts
+    }
+
+    /// Whether these options let the agent run any shell command without asking: a
+    /// bare `Bash` in the allowed tools, as "Always allow" saved before it was narrowed.
+    pub fn allows_any_shell(&self) -> bool {
+        std::iter::once(&self.allowed_tools)
+            .chain(self.project_tools.values())
+            .flat_map(|list| list.split(','))
+            .any(crate::approvals::is_bare_bash)
+    }
+
+    /// Take every bare `Bash` out of the allowed tools.
+    pub fn drop_any_shell(&mut self) {
+        let strip = |list: &str| {
+            list.split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty() && !crate::approvals::is_bare_bash(t))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        self.allowed_tools = strip(&self.allowed_tools);
+        for list in self.project_tools.values_mut() {
+            *list = strip(list);
+        }
+        self.project_tools.retain(|_, list| !list.is_empty());
     }
 }
 
@@ -70,9 +112,14 @@ pub struct AppSettings {
     pub notifications: bool,
     pub confirm_delete: bool,
     pub remove_worktree_on_delete: bool,
+    /// Delete a worktree's build output once its thread is done or merged.
+    pub remove_build_output: bool,
     pub send_on_enter: bool,
     pub autoscroll: bool,
     pub default_mode: String,
+    /// The person was asked about a bare `Bash` an earlier "Always allow" saved, which
+    /// lets an agent run any command in every project (see `AgentOptions::allows_any_shell`).
+    pub any_shell_asked: bool,
     pub default_provider: String,
     /// Shell command run in every new worktree, e.g. `npm install`.
     pub worktree_setup: String,
@@ -86,6 +133,8 @@ pub struct AppSettings {
     pub group_by_status: bool,
     /// Crew's chat keeps a line for each thread that was deleted.
     pub show_deleted_threads: bool,
+    /// A thread number in Crew's chat, such as "#34", shows the thread's title beside it.
+    pub thread_ref_titles: bool,
     /// Places pinned out on the rail beside the main ones, by label, such as "Notes".
     pub rail_pins: Vec<String>,
     /// Translucent window over a blurred desktop: "off", "subtle", "frosted" or "clear".
@@ -172,6 +221,31 @@ pub struct AppSettings {
     pub daily_token_limit_k: u32,
     /// Agents that may run at the same time on this machine; 0 for no cap.
     pub max_running: u32,
+    /// Settings from before 0.5.9: run the checks after each turn at low priority, one
+    /// set at a time across sessions. Read once by `migrate` into the two below.
+    #[serde(skip_serializing)]
+    pub background_checks: bool,
+    /// Post-turn check sets that may run at once across sessions: "auto" (from this
+    /// computer's cores and memory), a number, or "0" for no limit. Empty in settings from
+    /// before 0.5.9 until `migrate` fills it.
+    #[serde(default)]
+    pub checks_at_once: String,
+    /// Run the checks after each turn at low CPU and disk priority.
+    pub checks_low_priority: bool,
+    /// How much Runo checks after each turn when it picks the commands: "quick" (a
+    /// compile, type check or lint) or "full" (tests too). Projects can pick their own.
+    pub check_level: String,
+    /// Settings from before 0.5.9: Crew threads that may run at once, 0 for no cap. Read
+    /// once by `migrate` into `crew_threads`.
+    #[serde(skip_serializing)]
+    pub crew_running: u32,
+    /// Crew threads that may run at the same time, the rest waiting for a slot: "auto",
+    /// a number, or "0" for no cap. Empty before 0.5.9 until `migrate` fills it.
+    #[serde(default)]
+    pub crew_threads: String,
+    /// Percent of an agent plan's usage window past which threads Crew starts and
+    /// playbook runs wait; 0 for never. What you start yourself always goes.
+    pub plan_hold_percent: u32,
     /// Look for a newer Runo on GitHub now and then.
     pub check_runo_updates: bool,
     /// Serve the phone bridge from the app while it is open.
@@ -191,6 +265,8 @@ pub struct AppSettings {
     pub assistant_nudges: bool,
     /// Show Runo in the macOS menu bar with what agents are doing.
     pub menu_bar: bool,
+    /// Count what needs the person on the Dock icon.
+    pub dock_badge: bool,
     /// With the menu bar on, ⌘Q and closing the window hide Runo to it instead of quitting.
     pub run_in_background: bool,
     /// The person was told once that Runo kept running in the menu bar.
@@ -215,6 +291,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             agents: HashMap::new(),
+            any_shell_asked: false,
             usage_detailed: false,
             theme: "dark".into(),
             color_theme: "runo".into(),
@@ -228,6 +305,7 @@ impl Default for AppSettings {
             notifications: true,
             confirm_delete: true,
             remove_worktree_on_delete: true,
+            remove_build_output: true,
             send_on_enter: true,
             autoscroll: true,
             default_mode: "edit".into(),
@@ -239,6 +317,7 @@ impl Default for AppSettings {
                 .into(),
             group_by_status: false,
             show_deleted_threads: false,
+            thread_ref_titles: true,
             rail_pins: Vec::new(),
             glass: "off".into(),
             glass_cards: true,
@@ -277,6 +356,13 @@ impl Default for AppSettings {
             daily_turn_limit: 0,
             daily_token_limit_k: 0,
             max_running: 0,
+            background_checks: true,
+            checks_at_once: "auto".into(),
+            checks_low_priority: true,
+            check_level: "quick".into(),
+            crew_running: 3,
+            crew_threads: "auto".into(),
+            plan_hold_percent: 0,
             check_runo_updates: true,
             phone_bridge: false,
             phone_everywhere: false,
@@ -286,6 +372,7 @@ impl Default for AppSettings {
             assistant_model: String::new(),
             assistant_nudges: true,
             menu_bar: true,
+            dock_badge: true,
             run_in_background: true,
             background_told: false,
         }
@@ -324,7 +411,41 @@ impl AppSettings {
     }
 
     pub fn load() -> Self {
-        crate::store::read_json_or_backup(&settings_path())
+        let mut settings: Self = crate::store::read_json_or_backup(&settings_path());
+        settings.migrate();
+        settings
+    }
+
+    /// Fill settings added since the file was written from the ones they replace. The
+    /// background checks switch on becomes Auto at low priority, off becomes no limit at
+    /// normal priority. A Crew cap of 3, the old default, becomes Auto; any other stays.
+    pub fn migrate(&mut self) {
+        if self.checks_at_once.is_empty() {
+            self.checks_at_once = if self.background_checks { "auto" } else { "0" }.into();
+            self.checks_low_priority = self.background_checks;
+        }
+        if self.crew_threads.is_empty() {
+            self.crew_threads = match self.crew_running {
+                3 => "auto".into(),
+                n => n.to_string(),
+            };
+        }
+    }
+
+    /// Check sets that may run at once on this computer; 0 for no limit.
+    pub fn checks_limit(&self) -> usize {
+        crate::hardware::resolve(
+            &self.checks_at_once,
+            crate::hardware::checks_auto(crate::hardware::here()),
+        )
+    }
+
+    /// Crew threads that may run at once on this computer; 0 for no cap.
+    pub fn crew_limit(&self) -> usize {
+        crate::hardware::resolve(
+            &self.crew_threads,
+            crate::hardware::crew_auto(crate::hardware::here()),
+        )
     }
 
     pub fn save(&self) {
@@ -368,6 +489,7 @@ impl AppSettings {
         NOTIFY.store(self.notifications, Ordering::Relaxed);
         CONFIRM_DELETE.store(self.confirm_delete, Ordering::Relaxed);
         REMOVE_WORKTREE.store(self.remove_worktree_on_delete, Ordering::Relaxed);
+        REMOVE_BUILD_OUTPUT.store(self.remove_build_output, Ordering::Relaxed);
         AUTOSCROLL.store(self.autoscroll, Ordering::Relaxed);
         KEEP_AWAKE.store(self.keep_awake, Ordering::Relaxed);
         crate::mcp::set_shared(&self.mcp_shared);
@@ -384,6 +506,8 @@ impl AppSettings {
         DAILY_TURNS.store(self.daily_turn_limit, Ordering::Relaxed);
         DAILY_TOKENS_K.store(self.daily_token_limit_k, Ordering::Relaxed);
         MAX_RUNNING.store(self.max_running, Ordering::Relaxed);
+        CREW_RUNNING.store(self.crew_limit() as u32, Ordering::Relaxed);
+        PLAN_HOLD.store(self.plan_hold_percent, Ordering::Relaxed);
         CATCH_UP.store(self.playbook_catch_up, Ordering::Relaxed);
         crate::pbrunner::sync_job(self.playbooks_while_closed);
         crate::phone::sync(self.phone_bridge, self.phone_everywhere);
@@ -445,6 +569,7 @@ static ANIMATIONS: AtomicBool = AtomicBool::new(true);
 static NOTIFY: AtomicBool = AtomicBool::new(false);
 static CONFIRM_DELETE: AtomicBool = AtomicBool::new(true);
 static REMOVE_WORKTREE: AtomicBool = AtomicBool::new(true);
+static REMOVE_BUILD_OUTPUT: AtomicBool = AtomicBool::new(true);
 static AUTOSCROLL: AtomicBool = AtomicBool::new(true);
 static KEEP_AWAKE: AtomicBool = AtomicBool::new(true);
 static COVE_TOOLS: AtomicBool = AtomicBool::new(true);
@@ -459,6 +584,8 @@ static SESSION_TURNS: AtomicU32 = AtomicU32::new(0);
 static DAILY_TURNS: AtomicU32 = AtomicU32::new(0);
 static DAILY_TOKENS_K: AtomicU32 = AtomicU32::new(0);
 static MAX_RUNNING: AtomicU32 = AtomicU32::new(0);
+static CREW_RUNNING: AtomicU32 = AtomicU32::new(3);
+static PLAN_HOLD: AtomicU32 = AtomicU32::new(0);
 
 /// Minutes of silence before an agent is flagged as maybe stuck; 0 never.
 pub fn stuck_after_mins() -> u32 {
@@ -494,6 +621,17 @@ pub fn limits() -> Limits {
 /// Agents allowed to run at once; 0 for no cap.
 pub fn max_running() -> usize {
     MAX_RUNNING.load(Ordering::Relaxed) as usize
+}
+
+/// Crew threads allowed to run at once, with Auto worked out for this computer; 0 for
+/// no cap.
+pub fn crew_running() -> usize {
+    CREW_RUNNING.load(Ordering::Relaxed) as usize
+}
+
+/// Percent of a plan window past which automatic starts wait; 0 for never.
+pub fn plan_hold_percent() -> u32 {
+    PLAN_HOLD.load(Ordering::Relaxed)
 }
 static CATCH_UP: AtomicBool = AtomicBool::new(true);
 
@@ -542,6 +680,9 @@ pub fn confirm_delete() -> bool {
 }
 pub fn remove_worktree() -> bool {
     REMOVE_WORKTREE.load(Ordering::Relaxed)
+}
+pub fn remove_build_output() -> bool {
+    REMOVE_BUILD_OUTPUT.load(Ordering::Relaxed)
 }
 pub fn autoscroll() -> bool {
     AUTOSCROLL.load(Ordering::Relaxed)
@@ -1331,9 +1472,29 @@ pub fn discover(project_dir: Option<&str>) -> Discovered {
 mod tests {
     use super::{
         frontmatter, mix, new_skill, parse_quick_commands, scan_hooks, scan_mcp, scan_skills,
-        AppSettings,
+        AgentOptions, AppSettings,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn always_rules_apply_to_their_project_and_a_bare_bash_can_go() {
+        let mut opts = AgentOptions {
+            allowed_tools: "Read,Bash".into(),
+            ..Default::default()
+        };
+        opts.project_tools
+            .insert("7".into(), "Bash(npm test:*)".into());
+        assert_eq!(
+            opts.for_project(7).allowed_tools,
+            "Read,Bash,Bash(npm test:*)"
+        );
+        assert_eq!(opts.for_project(8).allowed_tools, "Read,Bash");
+        assert!(opts.allows_any_shell());
+        opts.drop_any_shell();
+        assert!(!opts.allows_any_shell());
+        assert_eq!(opts.allowed_tools, "Read");
+        assert_eq!(opts.for_project(7).allowed_tools, "Read,Bash(npm test:*)");
+    }
 
     #[test]
     fn quick_commands_parse_names() {
@@ -1513,5 +1674,72 @@ mod tests {
         scan_skills(&dir, "claude", &mut out);
         assert_eq!(out.len(), 2);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cost_controls_default_to_todays_behaviour_but_crew_threads_on_auto() {
+        let mut old: AppSettings = serde_json::from_str(r#"{"max_running": 0}"#).unwrap();
+        old.migrate();
+        assert_eq!(old.crew_threads, "auto");
+        assert_eq!(old.plan_hold_percent, 0);
+        assert_eq!(old.max_running, 0);
+        let claude: super::AgentOptions =
+            serde_json::from_str(r#"{"model_override": "opus"}"#).unwrap();
+        assert!(claude.subagent_model.is_empty());
+    }
+
+    #[test]
+    fn concurrency_settings_from_0_5_8_still_load_and_carry_over() {
+        let load = |json: &str| {
+            let mut s: AppSettings = serde_json::from_str(json).unwrap();
+            s.migrate();
+            s
+        };
+        // Background checks on: Auto, at low priority.
+        let on = load(r#"{"background_checks":true,"crew_running":3}"#);
+        assert_eq!(on.checks_at_once, "auto");
+        assert!(on.checks_low_priority);
+        assert_eq!(on.crew_threads, "auto");
+        // Off: no limit, normal priority.
+        let off = load(r#"{"background_checks":false,"crew_running":0}"#);
+        assert_eq!(off.checks_at_once, "0");
+        assert!(!off.checks_low_priority);
+        assert_eq!(off.checks_limit(), 0);
+        assert_eq!(off.crew_threads, "0");
+        assert_eq!(off.crew_limit(), 0);
+        // A Crew cap other than the old default stays as chosen.
+        let six = load(r#"{"crew_running":6}"#);
+        assert_eq!(six.crew_threads, "6");
+        assert_eq!(six.crew_limit(), 6);
+        // Missing altogether: the old defaults, so Auto at low priority.
+        let none = load("{}");
+        assert_eq!(
+            (none.checks_at_once.as_str(), none.checks_low_priority),
+            ("auto", true)
+        );
+        // Once saved, the new settings win and the old ones aren't written again.
+        let mut chosen = load(r#"{"background_checks":false}"#);
+        chosen.checks_at_once = "2".into();
+        chosen.checks_low_priority = true;
+        let json = serde_json::to_string(&chosen).unwrap();
+        assert!(!json.contains("background_checks") && !json.contains("crew_running"));
+        let again = load(&json);
+        assert_eq!(again.checks_at_once, "2");
+        assert!(again.checks_low_priority);
+        assert_eq!(again.checks_limit(), 2);
+        // A new install starts on Auto.
+        let fresh = AppSettings::default();
+        assert_eq!(
+            (fresh.checks_at_once.as_str(), fresh.crew_threads.as_str()),
+            ("auto", "auto")
+        );
+        assert!(fresh.checks_limit() >= 1 && fresh.crew_limit() >= 2);
+    }
+
+    #[test]
+    fn settings_from_0_5_4_with_the_shared_build_folder_switch_still_load() {
+        let old: AppSettings =
+            serde_json::from_str(r#"{"theme":"dark","share_cargo_target":false}"#).unwrap();
+        assert_eq!(old.theme, "dark");
     }
 }

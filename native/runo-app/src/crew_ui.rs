@@ -31,10 +31,15 @@ pub(crate) fn thread_status(working: bool, s: &Session) -> &'static str {
     let info = s.crew.as_ref();
     if working {
         "working"
-    } else if info.is_some_and(|i| i.decision.is_some()) {
+    } else if info.is_some_and(|i| {
+        i.decision.is_some() || i.watch.as_ref().is_some_and(|w| w.needs.is_some())
+    }) {
         "needs you"
     } else if info.is_some_and(|i| i.resolved) {
         "resolved"
+    } else if info.is_some_and(|i| i.watch.is_some()) {
+        // Done with its turn; Runo watches its pull request and wakes it when needed.
+        "watching"
     } else {
         match s.status {
             Status::Done => "done",
@@ -172,10 +177,10 @@ impl RunoApp {
 
     /// Context that goes ahead of a turn's prompt, unseen in the chat: Crew's rules and
     /// what changed in its threads, or a thread's rules on its first turn.
-    pub(crate) fn crew_preface(&mut self, id: u64) -> Option<String> {
+    pub(crate) fn crew_preface(&mut self, id: u64, prompt: &str) -> Option<String> {
         let s = self.state.session(id)?;
         if s.canvas == crew::CANVAS {
-            return self.chat_preface(id);
+            return self.chat_preface(id, prompt);
         }
         if s.crew.is_none() || s.has_conversation() {
             return None;
@@ -184,7 +189,7 @@ impl RunoApp {
         Some(crew::thread_rules(tools))
     }
 
-    fn chat_preface(&mut self, id: u64) -> Option<String> {
+    fn chat_preface(&mut self, id: u64, prompt: &str) -> Option<String> {
         let s = self.state.session(id)?;
         let pid = s.project_id;
         let first = !s.has_conversation();
@@ -220,10 +225,24 @@ impl RunoApp {
             let roster: Vec<(&str, &str)> =
                 agent::PROVIDERS.iter().map(|p| (p.id, p.name)).collect();
             let default = agent::provider(&s.provider).name;
-            parts.push(crew::rules(&project, &roster, default));
+            let models: Vec<String> = crate::caps::get(&s.provider)
+                .models
+                .iter()
+                .take(8)
+                .map(|m| m.choice.value.clone())
+                .filter(|v| !v.is_empty())
+                .collect();
+            parts.push(crew::rules(&project, &roster, default, &models));
         }
         if !changes.is_empty() {
             parts.push(format!("## Threads\n{}", changes.trim_end()));
+        }
+        let (running, waiting) = self.thread_slots(pid);
+        let cap = settings::crew_running();
+        if cap > 0 && (waiting > 0 || running >= cap) {
+            parts.push(format!(
+                "## Slots\nThreads run {cap} at a time: {running} running, {waiting} waiting. Waiting threads start on their own as others finish."
+            ));
         }
         if let Some(inbox) = self.crew.inbox.remove(&id).filter(|i| !i.is_empty()) {
             parts.push(format!("## From threads\n{}", inbox.join("\n\n")));
@@ -240,7 +259,7 @@ impl RunoApp {
         if let Some(s) = self.state.session_mut(id) {
             s.canvas_context = board.join("\n");
         }
-        (!parts.is_empty()).then(|| format!("{}\n\n## The person says", parts.join("\n\n")))
+        chat_heading(parts, prompt)
     }
 
     /// A message typed in a Crew chat: an @thread goes straight to that thread and the
@@ -294,7 +313,16 @@ impl RunoApp {
             Route::NewThread => {
                 self.crew_note(id, Role::User, text.to_string(), None);
                 let title = crew::title_from(text);
-                match self.start_thread(pid, &title, text, "", None, Origin::Person, cx) {
+                match self.start_thread(
+                    pid,
+                    &title,
+                    text,
+                    "",
+                    None,
+                    crew::ThreadPick::default(),
+                    Origin::Person,
+                    cx,
+                ) {
                     Ok(thread) => self.crew_note(
                         id,
                         Role::System,
@@ -335,6 +363,7 @@ impl RunoApp {
         brief: &str,
         agent_id: &str,
         isolated: Option<bool>,
+        pick: crew::ThreadPick,
         origin: Origin,
         cx: &mut Context<Self>,
     ) -> Result<u64, String> {
@@ -353,6 +382,7 @@ impl RunoApp {
         let is_git = git::is_repo(&project.path);
         // Threads run side by side, so each gets its own worktree unless Crew says not to.
         let isolated = isolated.unwrap_or(true) && is_git;
+        let model = thread_model(agent::PROVIDERS[provider].id, &pick.model);
         let id = self.spawn_session_from(
             &project, provider, "", isolated, is_git, title, None, None, cx,
         )?;
@@ -360,9 +390,19 @@ impl RunoApp {
         if let Some(s) = self.state.session_mut(id) {
             s.title = title.to_string();
             s.connection = connection;
+            if let Some(model) = model {
+                s.set_model(model);
+            }
+            if !pick.effort.is_empty() {
+                s.opts.insert("effort".into(), pick.effort.clone());
+            }
             s.crew = Some(ThreadInfo {
                 origin,
                 brief: brief.to_string(),
+                budget: (pick.budget_usd > 0.0).then_some(crew::Budget {
+                    dollars: pick.budget_usd,
+                    turns: 0,
+                }),
                 ..Default::default()
             });
         }
@@ -523,17 +563,19 @@ impl RunoApp {
         for action in run {
             match action {
                 Action::StartThread {
-                    title,
-                    brief,
-                    agent,
+                    ref title,
+                    ref brief,
+                    ref agent,
                     isolated,
+                    ..
                 } => {
                     match self.start_thread(
                         pid,
-                        &title,
-                        &brief,
-                        &agent,
+                        title,
+                        brief,
+                        agent,
                         isolated,
+                        action.pick(),
                         Origin::Crew { message },
                         cx,
                     ) {
@@ -547,8 +589,24 @@ impl RunoApp {
                         .session(thread)
                         .map(|t| t.title.clone())
                         .unwrap_or_default();
+                    // A message to a thread waiting on a decision answers it: Crew's own
+                    // answer, which the thread's card shows.
+                    let answered = self
+                        .state
+                        .session_mut(thread)
+                        .and_then(|s| s.crew.as_mut())
+                        .is_some_and(|info| {
+                            crew::answer_by_crew(info, &text, crate::workspace::unix_now())
+                        });
                     self.message_thread(thread, text, Vec::new(), cx);
-                    notes.push((format!("Sent a message to {title}."), thread));
+                    notes.push((
+                        if answered {
+                            format!("Answered {title}'s decision.")
+                        } else {
+                            format!("Sent a message to {title}.")
+                        },
+                        thread,
+                    ));
                 }
                 Action::ReadThread { thread } => {
                     let reply = self.state.session(thread).map(|t| {
@@ -576,6 +634,7 @@ impl RunoApp {
                         info.resolved = true;
                         info.attention = None;
                     }
+                    self.queue_build_clean(thread);
                 }
             }
         }
@@ -637,16 +696,25 @@ impl RunoApp {
         };
         let mut started = Vec::new();
         for action in actions {
+            let pick = action.pick();
             if let Action::StartThread {
                 title,
                 brief,
                 agent,
                 isolated,
+                ..
             } = action
             {
-                if let Ok(id) =
-                    self.start_thread(pid, &title, &brief, &agent, isolated, Origin::Person, cx)
-                {
+                if let Ok(id) = self.start_thread(
+                    pid,
+                    &title,
+                    &brief,
+                    &agent,
+                    isolated,
+                    pick,
+                    Origin::Person,
+                    cx,
+                ) {
                     started.push(id);
                 }
             }
@@ -711,6 +779,8 @@ impl RunoApp {
                 .filter(|r| info.reports.len() > reports || r.at >= at.saturating_sub(1))
                 .map(|r| r.summary.clone());
         }
+        // Watched threads read their pull request again; others look for one to watch.
+        self.watch_turn_ended(id, ok && !stopped);
         let Some(s) = self.state.session(id) else {
             return;
         };
@@ -744,6 +814,8 @@ impl RunoApp {
         if events.is_empty() {
             return;
         }
+        // Messages and decisions wake Crew once per thread, after every event is applied.
+        let mut wakes = Vec::new();
         for event in events {
             let Some(s) = self.state.session_mut(event.thread) else {
                 continue;
@@ -760,10 +832,17 @@ impl RunoApp {
             let chat = self.crew_chat(pid).map(|c| c.id);
             match (&event.kind, chat) {
                 (crew::EventKind::Message { text }, Some(chat)) => {
-                    let text = format!("Thread #{} ({title}) says: {text}", event.thread);
-                    self.wake_crew(chat, &title, text, cx);
+                    let wake = crew::Wake::Message(text.clone());
+                    wakes.push((chat, event.thread, title, wake));
                 }
                 (crew::EventKind::Decision(d), Some(chat)) if changed => {
+                    // Crew sees it too and answers it if it can; the person still may.
+                    wakes.push((
+                        chat,
+                        event.thread,
+                        title.clone(),
+                        crew::Wake::Decision(d.clone()),
+                    ));
                     self.crew_note(
                         chat,
                         Role::System,
@@ -790,13 +869,17 @@ impl RunoApp {
                 _ => {}
             }
         }
+        for (chat, thread, text) in crew::wake_prompts(wakes) {
+            self.wake_crew(chat, thread, text, cx);
+        }
         self.save();
         cx.notify();
     }
 
     /// Give Crew a turn of its own to answer a thread, up to `crew::MAX_WAKES` between two
-    /// messages from the person; past that the message waits for the person's next one.
-    fn wake_crew(&mut self, chat: u64, from: &str, text: String, cx: &mut Context<Self>) {
+    /// messages from the person. Past that the message goes into the context of the
+    /// person's next message, which stays theirs and is drawn as typed.
+    fn wake_crew(&mut self, chat: u64, thread: u64, text: String, cx: &mut Context<Self>) {
         let wakes = self.crew.wakes.entry(chat).or_default();
         if *wakes >= crew::MAX_WAKES {
             self.crew.inbox.entry(chat).or_default().push(text);
@@ -807,10 +890,140 @@ impl RunoApp {
             return;
         };
         let opts = cx.global::<AppSettings>().agent(&provider);
-        let before = self.state.session(chat).map_or(0, |s| s.messages.len());
-        self.start_turn(chat, text, Vec::new(), &opts);
-        if self.state.session(chat).map_or(0, |s| s.messages.len()) > before {
-            self.tag_playbook(chat, &format!("From {from}"), "");
+        self.start_from_thread(chat, thread, text, &opts);
+    }
+
+    /// Start a turn with a thread's message, marking it with the thread wherever it lands:
+    /// the conversation, the queue, or a turn waiting for its worktree.
+    pub(crate) fn start_from_thread(
+        &mut self,
+        id: u64,
+        thread: u64,
+        text: String,
+        opts: &AgentOptions,
+    ) {
+        let before = self.state.session(id).map_or(0, |s| s.messages.len());
+        self.start_turn(id, text.clone(), Vec::new(), opts);
+        if let Some(turn) = self.preparing.get_mut(&id).and_then(|w| w.last_mut()) {
+            turn.from_thread = Some(thread);
+        } else if let Some(s) = self.state.session_mut(id) {
+            mark_from_thread(s, before, &text, thread);
         }
+        self.save();
+    }
+}
+
+/// The context ahead of Crew's prompt, ending with a heading for what the prompt says: the
+/// person's words, or a thread's under a heading of its own.
+fn chat_heading(parts: Vec<String>, prompt: &str) -> Option<String> {
+    let heading = crew::prompt_heading(prompt);
+    if parts.is_empty() {
+        return crew::parse_wake(prompt).is_some().then_some(heading);
+    }
+    Some(format!("{}\n\n{heading}", parts.join("\n\n")))
+}
+
+/// Mark what a thread's message to Crew became, given the conversation was `before`
+/// messages long when it was sent: the user message it added, or else the queued prompt
+/// holding it.
+pub(crate) fn mark_from_thread(session: &mut Session, before: usize, text: &str, thread: u64) {
+    if session.messages.len() > before {
+        if let Some(m) = session.messages[before..]
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == Role::User)
+        {
+            m.from_thread = Some(thread);
+        }
+    } else if let Some(q) = session
+        .queue
+        .iter_mut()
+        .rev()
+        .find(|q| q.text == text && q.from_thread.is_none())
+    {
+        q.from_thread = Some(thread);
+    }
+}
+
+/// The model a thread Crew started runs on: the one Crew picked, as its agent's CLI
+/// names it, when the CLI lists it. `None` keeps the agent's default.
+fn thread_model(provider: &str, picked: &str) -> Option<String> {
+    if picked.is_empty() {
+        return None;
+    }
+    let caps = crate::caps::get(provider);
+    let known: Vec<String> = crate::caps::all_models(&caps)
+        .map(|m| m.choice.value.clone())
+        .filter(|v| !v.is_empty())
+        .collect();
+    if known.is_empty() {
+        return Some(picked.to_string());
+    }
+    let lower = picked.to_lowercase();
+    let found = known
+        .iter()
+        .find(|v| v.to_lowercase() == lower)
+        .or_else(|| known.iter().find(|v| v.to_lowercase().contains(&lower)))
+        .cloned();
+    if found.is_none() {
+        crate::applog::info(
+            "crew",
+            format!("thread model {picked:?} isn't one {provider} lists; using its default"),
+        );
+    }
+    found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Queued;
+    use std::prelude::v1::test;
+
+    #[test]
+    fn a_wake_marks_its_message_with_the_thread_not_a_playbook() {
+        let mut chat = Session::default();
+        chat.messages
+            .push(Message::new(Role::User, "Plan the release"));
+        let before = chat.messages.len();
+        let text = crew::wake_text(41, "Refine Arcade: pro + fun", "Ready for review.");
+        chat.messages.push(Message::new(Role::User, text.clone()));
+        mark_from_thread(&mut chat, before, &text, 41);
+        let m = chat.messages.last().unwrap();
+        assert_eq!(m.from_thread, Some(41));
+        assert!(m.playbook.is_empty());
+        assert_eq!(m.thread_origin(|_| false), Some(41));
+        assert_eq!(chat.messages[0].from_thread, None);
+    }
+
+    #[test]
+    fn crews_prompt_heads_a_threads_words_apart_from_the_persons() {
+        let wake = crew::wake_text(3, "Docs", "Ready.");
+        let context = || vec!["## Threads\n#3 Docs: working".to_string()];
+        let person = chat_heading(context(), "Ship it").unwrap();
+        assert!(person.ends_with("\n\n## The person says"));
+        let thread = chat_heading(context(), &wake).unwrap();
+        assert!(thread.ends_with("\n\n## From thread #3 (not the person)"));
+        assert!(!thread.contains("The person says"));
+        // With nothing else to say, a thread's words still get their heading.
+        assert_eq!(
+            chat_heading(Vec::new(), &wake).as_deref(),
+            Some("## From thread #3 (not the person)")
+        );
+        assert_eq!(chat_heading(Vec::new(), "Ship it"), None);
+    }
+
+    #[test]
+    fn a_wake_that_waits_in_the_queue_keeps_its_thread() {
+        let mut chat = Session::default();
+        chat.queue.push(Queued::new("Ship it", Vec::new()));
+        let text = crew::wake_text(9, "Docs", "Done.");
+        chat.queue.push(Queued::new(text.clone(), Vec::new()));
+        mark_from_thread(&mut chat, 0, &text, 9);
+        assert_eq!(chat.queue[0].from_thread, None);
+        assert_eq!(chat.queue[1].from_thread, Some(9));
+        // Saved queues from before still load.
+        let old: Queued = serde_json::from_str(r#"{"text":"hi"}"#).unwrap();
+        assert_eq!(old.from_thread, None);
     }
 }

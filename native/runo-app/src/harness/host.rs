@@ -71,6 +71,18 @@ pub fn run(turn: &Path, program: &str, args: &[String], idle: Duration) -> i32 {
     code
 }
 
+/// A process's exit code, as a shell gives it: 128 + the signal when one ended it.
+pub(crate) fn exit_code(status: std::process::ExitStatus) -> i32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return 128 + signal;
+        }
+    }
+    status.code().unwrap_or(1)
+}
+
 /// Record how the turn ended, for Runo to read from `turn/exit`.
 pub(super) fn finish(turn: &Path, code: i32) {
     let tmp = turn.join("exit.tmp");
@@ -110,7 +122,7 @@ fn host(turn: &Path, program: &str, args: &[String], idle: Duration) -> std::io:
             let _ = writeln!(out, "{line}");
             let _ = out.flush();
             let answered = {
-                let mut p = progress.lock().unwrap();
+                let mut p = progress.lock().unwrap_or_else(|e| e.into_inner());
                 p.last_output = Some(Instant::now());
                 if is_result(&line) {
                     p.results += 1;
@@ -125,7 +137,7 @@ fn host(turn: &Path, program: &str, args: &[String], idle: Duration) -> std::io:
     done.store(true, Ordering::SeqCst);
     close(&stdin);
     let status = child.wait()?;
-    Ok(status.code().unwrap_or(1))
+    Ok(exit_code(status))
 }
 
 /// Whether `line` is the agent's result for a message.
@@ -162,7 +174,7 @@ fn forward(
             // Counted before the input lock is let go, so a result can't close the input
             // while this message is still uncounted.
             let sent = {
-                let mut p = progress.lock().unwrap();
+                let mut p = progress.lock().unwrap_or_else(|e| e.into_inner());
                 p.sent += 1;
                 p.sent
             };
@@ -185,7 +197,7 @@ fn watch_idle(
 ) {
     while !done.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(100));
-        let p = progress.lock().unwrap();
+        let p = progress.lock().unwrap_or_else(|e| e.into_inner());
         let quiet = p.last_output.is_some_and(|t| t.elapsed() >= idle);
         if p.results > 0 && p.sent > p.results && quiet {
             drop(p);

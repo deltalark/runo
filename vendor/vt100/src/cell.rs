@@ -70,10 +70,22 @@ impl Cell {
     #[must_use]
     pub fn contents(&self) -> String {
         let mut s = String::with_capacity(CODEPOINTS_IN_CELL * 4);
-        for c in self.contents.iter().take(self.len()) {
-            s.push(*c);
-        }
+        self.push_contents(&mut s);
         s
+    }
+
+    /// Appends the text contents of the cell to `out`, without allocating a string of its
+    /// own.
+    pub fn push_contents(&self, out: &mut String) {
+        for c in self.contents.iter().take(self.len()) {
+            out.push(*c);
+        }
+    }
+
+    /// The first character of the cell's text, if it has any.
+    #[must_use]
+    pub fn first_char(&self) -> Option<char> {
+        self.contents.iter().take(self.len()).next().copied()
     }
 
     /// Returns whether the cell contains any text data.

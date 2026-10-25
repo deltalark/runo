@@ -14,6 +14,7 @@ pub(crate) enum Run {
     Tour,
     Arcade,
     AddProject,
+    Updates,
 }
 
 pub(crate) struct AppCommand {
@@ -289,6 +290,14 @@ pub(crate) const COMMANDS: &[AppCommand] = &[
         run: Run::Tour,
     },
     AppCommand {
+        id: "check-updates",
+        label: "Check for updates",
+        icon: IconName::Download,
+        keywords: &["update", "upgrade", "new version", "release"],
+        guide: "quit-update",
+        run: Run::Updates,
+    },
+    AppCommand {
         id: "arcade",
         label: "Open the Arcade",
         icon: IconName::Gamepad2,
@@ -314,6 +323,7 @@ impl AppCommand {
             Run::Tour => Jump::Tour,
             Run::Arcade => Jump::Arcade,
             Run::AddProject => Jump::AddProject,
+            Run::Updates => Jump::Updates,
         }
     }
 

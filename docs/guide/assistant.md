@@ -32,7 +32,7 @@ Type `/` for shortcuts that answer straight away, without an agent:
 
 Type `@` to name a session or project; the assistant gets that session's recent conversation with your question, so "what did @fix-login do?" works.
 
-While the assistant is closed, the mark speaks up when something is ready for you: a run you haven't looked at finished, a race is done and ready to compare, or the clash radar found two lines of work changing the same lines. Each nudge has one button for the next step; **Later** hides it until something new happens. Turn nudges off with **Nudges** in Settings.
+While the assistant is closed, the mark speaks up when something is ready for you: a run you haven't looked at finished, a race is done and ready to compare, or the clash radar found two lines of work changing the same lines. Each nudge has one button for the next step; **Later** hides it until something new happens. Turn nudges off with **Nudges** in Settings. If it answers while its panel is closed or Runo is in the background, a count on the mark shows the answers you haven't read; it clears when you open the panel. Everything else that needs you is counted on the Dock icon.
 
 Choose which agent answers, and its model, in **Settings → General → Runo assistant** (**Assistant agent** and **Assistant model**). The agent starts out the same as your default agent for new sessions, and the model starts on a fast default (Haiku on Claude). The line under the input shows which one is answering.
 

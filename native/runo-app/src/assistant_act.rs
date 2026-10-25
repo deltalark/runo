@@ -143,6 +143,73 @@ fn on_off(value: &serde_json::Value) -> Option<bool> {
     }
 }
 
+/// Words in a setting's name or section that mean it guards what agents may do, or holds
+/// a secret. The assistant never offers to change those: an answer can be steered by
+/// text the agent read, so loosening a guard is left to the person, in Settings.
+const GUARDED_WORDS: [&str; 12] = [
+    "permission",
+    "approv",
+    "sandbox",
+    "full access",
+    "trust",
+    "bypass",
+    "dangerous",
+    "token",
+    "api key",
+    "password",
+    "secret",
+    "environment",
+];
+
+/// The buttons in Settings the assistant may press: each only checks, detects, tests or
+/// shows something, or picks a model. Signing in or out, installing, pairing, setting up
+/// and removing stay with the person.
+const PRESSABLE: [&str; 8] = [
+    "Check now",
+    "Take the tour",
+    "Re-detect",
+    "Test",
+    "Use as default",
+    "Use the CLI's default",
+    "Scan",
+    "Scan again",
+];
+
+/// Why the assistant won't change the setting `title` (in `section` on `page`), or
+/// press its button `button`, or nothing when it may offer to.
+fn guarded(
+    page: crate::settings_ui::SettingsPage,
+    section: &str,
+    title: &str,
+    button: Option<&str>,
+) -> Option<String> {
+    use crate::settings_ui::SettingsPage;
+    let place = crate::settings_ui::place(page);
+    let why = || Some(format!("{title} is in {place}; change it there yourself."));
+    // Safety holds the limits and permission level; Connections and Phone decide what
+    // can reach this computer and what agents may run elsewhere.
+    if matches!(
+        page,
+        SettingsPage::Safety | SettingsPage::Connections | SettingsPage::Phone
+    ) {
+        return why();
+    }
+    let words = format!("{section} {title}").to_lowercase();
+    if GUARDED_WORDS.iter().any(|w| words.contains(w)) {
+        return why();
+    }
+    match button {
+        Some(label)
+            if !PRESSABLE
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(label.trim())) =>
+        {
+            Some(format!("{label} in {place} is for you to press there."))
+        }
+        _ => None,
+    }
+}
+
 /// A line of text cut to `max` characters, on one line.
 fn excerpt(text: &str, max: usize) -> String {
     let one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -243,6 +310,13 @@ impl RunoApp {
         let found = crate::settings_ui::find_setting(page, name, &data, cx)
             .ok_or_else(|| format!("Settings has nothing called {name}."))?;
         let place = crate::settings_ui::place(found.page);
+        let button = match &found.knob {
+            Knob::Button(label, _) => Some(label.as_str()),
+            _ => None,
+        };
+        if let Some(why) = guarded(found.page, &found.section, &found.title, button) {
+            return Err(why);
+        }
         let title = found.title;
         match found.knob {
             Knob::Switch(now, set) => {
@@ -253,9 +327,10 @@ impl RunoApp {
                         if on { "on" } else { "off" }
                     ));
                 }
+                let word = |b: bool| if b { "On" } else { "Off" };
                 Ok((
                     format!("Turn {} {}", title, if on { "on" } else { "off" }),
-                    place,
+                    format!("{place} · {} → {}", word(now), word(on)),
                     Apply::Bool(set, on),
                 ))
             }
@@ -279,7 +354,20 @@ impl RunoApp {
                 if v == now {
                     return Err(format!("{title} is already {label}."));
                 }
-                Ok((format!("Set {title} to {label}"), place, Apply::Str(set, v)))
+                let was = opts
+                    .iter()
+                    .find(|(v, _)| *v == now)
+                    .map(|(_, l)| l.as_str())
+                    .unwrap_or(if now.is_empty() {
+                        "Default"
+                    } else {
+                        now.as_str()
+                    });
+                Ok((
+                    format!("Set {title} to {label}"),
+                    format!("{place} · {was} → {label}"),
+                    Apply::Str(set, v),
+                ))
             }
             Knob::Text(_) => Err(format!(
                 "{title} is typed in {place}; open it there to change it."
@@ -463,15 +551,32 @@ impl RunoApp {
             }
             Action::Setting { key, value, .. } => {
                 let (title, detail) = match setting(key, value)? {
-                    SettingChange::Theme(t) => ("Change the theme".to_string(), t),
-                    SettingChange::Animations(on) => (
-                        format!("Turn animations {}", if on { "on" } else { "off" }),
-                        String::new(),
+                    SettingChange::Theme(t) => (
+                        "Change the theme".to_string(),
+                        format!("{} → {t}", cx.global::<AppSettings>().theme),
                     ),
-                    SettingChange::DefaultAgent(i) => (
-                        "Change the default agent".to_string(),
-                        agent::PROVIDERS[i].name.to_string(),
-                    ),
+                    SettingChange::Animations(on) => {
+                        let word = |b: bool| if b { "On" } else { "Off" };
+                        (
+                            format!("Turn animations {}", if on { "on" } else { "off" }),
+                            format!(
+                                "{} → {}",
+                                word(cx.global::<AppSettings>().animations),
+                                word(on)
+                            ),
+                        )
+                    }
+                    SettingChange::DefaultAgent(i) => {
+                        let now = &cx.global::<AppSettings>().default_provider;
+                        let was = agent::PROVIDERS
+                            .iter()
+                            .find(|p| p.id == now)
+                            .map_or(now.as_str(), |p| p.name);
+                        (
+                            "Change the default agent".to_string(),
+                            format!("{was} → {}", agent::PROVIDERS[i].name),
+                        )
+                    }
                 };
                 change(IconName::Settings, title, detail)
             }
@@ -884,6 +989,47 @@ mod tests {
                 value: serde_json::json!("dark"),
             })
         );
+    }
+
+    #[test]
+    fn guards_and_secrets_stay_with_the_person() {
+        use crate::settings_ui::SettingsPage as P;
+        // Whole pages that decide what can reach this computer, or what agents may do.
+        for page in [P::Safety, P::Connections, P::Phone] {
+            assert!(guarded(page, "Limits", "Turns per day", None).is_some());
+        }
+        // Rows about permissions or secrets, on any page.
+        assert!(guarded(P::Agent("claude"), "Permissions", "Default mode", None).is_some());
+        assert!(guarded(P::General, "", "Wait for permission answers", None).is_some());
+        assert!(guarded(P::Agent("codex"), "Run", "Sandbox", None).is_some());
+        assert!(guarded(P::Mcp, "", "API key", None).is_some());
+        // Buttons outside the short list.
+        assert!(guarded(P::Agent("claude"), "", "Signed in", Some("Sign out")).is_some());
+        assert!(guarded(P::Providers, "", "Codex", Some("Install…")).is_some());
+        // The everyday ones still work.
+        assert!(guarded(P::Appearance, "Window", "Font smoothing", None).is_none());
+        assert!(guarded(
+            P::General,
+            "Updates",
+            "Check for updates",
+            Some("Check now")
+        )
+        .is_none());
+        assert!(guarded(P::Agent("claude"), "Defaults", "Default effort", None).is_none());
+    }
+
+    #[test]
+    fn tokens_and_pairing_links_are_hidden_from_the_agent() {
+        use crate::settings_ui::redact;
+        let link = crate::phone::pair_link("http://100.64.0.2:7631", &"ab12".repeat(16));
+        assert_eq!(redact(&link), "[hidden]");
+        assert_eq!(
+            redact("Key sk-ant-api03-abcdefghijklmnop1234567890 is set."),
+            "Key [hidden] is set."
+        );
+        // Ordinary words, versions and paths stay.
+        let plain = "Runo 0.5.11 keeps its data in ~/.runo/sessions, see https://runo.dev/guide";
+        assert_eq!(redact(plain), plain);
     }
 
     #[test]

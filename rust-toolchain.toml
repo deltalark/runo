@@ -1,0 +1,8 @@
+# The Rust release every build uses: CI, releases and local builds (rustup reads this file
+# and installs it on first use). Bump it in its own pull request, about once a month, and
+# fix whatever new clippy lints it brings there, so a new stable can't break an unrelated
+# pull request or make two runs of one tag differ.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

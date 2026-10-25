@@ -77,6 +77,19 @@ pub(crate) fn with_recap(brief: &str, from: &str, recap: &str) -> String {
     }
 }
 
+/// Keep `.runo/` out of `git status`, once per folder while Runo runs.
+fn exclude_runo(dir: &str) {
+    static DONE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let Ok(mut done) = DONE.lock() else {
+        return;
+    };
+    if done.iter().any(|d| d == dir) {
+        return;
+    }
+    git::exclude(dir, "/.runo/");
+    done.push(dir.to_string());
+}
+
 /// What the brief is built from.
 pub(crate) struct BriefInput<'a> {
     pub from: &'a str,
@@ -515,29 +528,41 @@ impl RunoApp {
         };
         // What was cleared or compacted away stays out of it.
         let messages = &session.messages[crate::chatctl::context_from(&session.messages)..];
-        if exchanges(messages).is_empty() || !git::is_repo(&session.dir) {
+        if exchanges(messages).is_empty() {
             return;
         }
-        let files = git::changes(&session.dir);
-        let files: Vec<git::Change> = files
-            .into_iter()
-            .filter(|f| !f.path.starts_with(".runo/"))
-            .collect();
-        let text = memory_text(&brief(&BriefInput {
-            from: agent::provider(&session.provider).name,
-            dir: &session.dir,
-            branch: &session.branch,
-            messages,
-            files: &files,
-            commits: &git::recent_commits(&session.dir, 5),
-            notes: &read_notes(&session.dir),
-        }));
-        let path = std::path::Path::new(&session.dir).join(MEMORY_FILE);
-        git::exclude(&session.dir, "/.runo/");
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(path, text);
+        let messages = messages.to_vec();
+        let from = agent::provider(&session.provider).name;
+        let dir = session.dir.clone();
+        let branch = session.branch.clone();
+        // A handful of git commands and file writes: off the UI thread, at every turn end.
+        self.bg(
+            move || {
+                if !git::is_repo(&dir) {
+                    return;
+                }
+                let files: Vec<git::Change> = git::changes(&dir)
+                    .into_iter()
+                    .filter(|f| !f.path.starts_with(".runo/"))
+                    .collect();
+                let text = memory_text(&brief(&BriefInput {
+                    from,
+                    dir: &dir,
+                    branch: &branch,
+                    messages: &messages,
+                    files: &files,
+                    commits: &git::recent_commits(&dir, 5),
+                    notes: &read_notes(&dir),
+                }));
+                let path = std::path::Path::new(&dir).join(MEMORY_FILE);
+                exclude_runo(&dir);
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(path, text);
+            },
+            |_, _, _| {},
+        );
     }
 
     /// Hand a session to another agent at once, with a brief of the work so far for its
@@ -770,9 +795,10 @@ impl RunoApp {
                     .rounded_full()
                     .bg(rgb(c_blue()))
                     .shadow_md()
-                    .with_animation(
+                    .looping(
                         ("switch-pulse", i as usize),
                         Animation::new(Duration::from_millis(1500)).repeat(),
+                        0.,
                         move |el, d| {
                             let t = (d + i as f32 / 3.).fract();
                             let fade = (t * std::f32::consts::PI).sin();

@@ -135,8 +135,12 @@ fn windows_shell() -> Option<Program> {
 
 /// Reap `child` and store 1 or 2 in `outcome`. The lock is not held while waiting,
 /// so the shell can still be killed. Returns without a status if waiting fails.
-/// Safe to call from more than one thread; the first status wins.
+/// Safe to call from more than one thread; the first status wins. It looks again after
+/// 10 ms, then less and less often, up to once a second: the read ending (Unix) calls it
+/// again and finds the status at once, so the slow looks only matter where the read never
+/// ends (Windows), and a quiet terminal doesn't wake 100 times a second.
 fn record_exit(child: &Mutex<Box<dyn Child + Send + Sync>>, outcome: &AtomicU8) {
+    let mut wait = std::time::Duration::from_millis(10);
     loop {
         if outcome.load(Ordering::Acquire) != 0 {
             return;
@@ -153,7 +157,10 @@ fn record_exit(child: &Mutex<Box<dyn Child + Send + Sync>>, outcome: &AtomicU8) 
                 let _ = outcome.compare_exchange(0, value, Ordering::Release, Ordering::Relaxed);
                 return;
             }
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Ok(None) => {
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(std::time::Duration::from_secs(1));
+            }
             Err(_) => return,
         }
     }
@@ -200,6 +207,7 @@ impl Shell {
         program: Option<Program>,
         wake: impl Fn(u64) + Send + 'static,
     ) -> Result<Self, String> {
+        crate::shellenv::ready();
         let (rows, cols) = (rows.max(2), cols.max(10));
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -318,7 +326,9 @@ impl Shell {
                 Arc::clone(&wake),
             );
             std::thread::spawn(move || {
-                let mut buf = [0u8; 8192];
+                // Large reads, so a flood of output takes the parser's lock (which the
+                // view needs to draw) fewer times.
+                let mut buf = vec![0u8; 64 * 1024];
                 let mut queries = Queries::default();
                 loop {
                     match reader.read(&mut buf) {
@@ -914,6 +924,10 @@ pub fn mouse_report(
 
 /// Web links in a line of terminal text, as character columns `[start, end)` and the URL.
 pub fn links(line: &str) -> Vec<(usize, usize, String)> {
+    // Most lines have none: say so before collecting the line's characters.
+    if !line.contains("://") {
+        return Vec::new();
+    }
     let chars: Vec<char> = line.chars().collect();
     let text: String = chars.iter().collect();
     let mut found = Vec::new();

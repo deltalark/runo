@@ -106,16 +106,16 @@ impl RunoApp {
     /// A project's sessions as the sidebar lists them: live ones matching the filter,
     /// pinned first.
     pub(crate) fn project_sessions(&self, project: &Project, filter: &str) -> Vec<&Session> {
+        // A project whose name matches shows all its sessions.
+        let all = filter.is_empty() || project.name.to_lowercase().contains(filter);
         let mut sessions: Vec<&Session> = self
             .state
             .sessions
             .iter()
             .filter(|s| s.project_id == project.id && !s.archived && s.canvas.is_empty())
             .filter(|s| {
-                filter.is_empty()
-                    || s.title.to_lowercase().contains(filter)
+                all || s.title.to_lowercase().contains(filter)
                     || s.branch.to_lowercase().contains(filter)
-                    || project.name.to_lowercase().contains(filter)
             })
             .collect();
         sessions.sort_by_key(|s| !s.pinned);
@@ -848,10 +848,6 @@ pub(crate) fn unheld_limits(provider: &str, permissions: &[String]) -> Vec<&'sta
     }
     let may = |what: &str| permissions.iter().any(|p| p == what);
     let mut out = Vec::new();
-    // Read-only runs in each agent's plan or read-only mode; Grok's CLI has none.
-    if !may("edit") && provider == "grok" {
-        out.push("change files");
-    }
     // Shell: Claude Code and OpenCode turn it off, Copilot denies it, and Gemini and
     // Qwen ask for every command, which a run nobody watches refuses.
     if !may("shell")
@@ -994,7 +990,6 @@ mod tests {
         assert!(unheld_limits("claude", &read).is_empty());
         assert!(unheld_limits("codex", &read).contains(&"run commands"));
         assert!(!unheld_limits("codex", &read).contains(&"use the network"));
-        assert!(unheld_limits("grok", &read).contains(&"change files"));
         assert_eq!(
             unheld_limits("claude", &may(&["read", "edit", "shell"])),
             ["use the network"]

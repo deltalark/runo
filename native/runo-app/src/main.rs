@@ -15,11 +15,16 @@ mod assistant_cmds;
 mod assistant_deck;
 mod assistant_mem;
 mod assistant_ref;
+mod bench;
 mod branches;
 mod browser;
 mod browser_engine;
+mod buildclean;
 mod caps;
+mod chat_follow;
+mod chat_list;
 mod chatctl;
+mod checks;
 mod clashes;
 mod cleanup;
 mod cliview;
@@ -45,29 +50,37 @@ mod design;
 mod designdraw;
 mod desktop_notify;
 mod detach;
+mod diff_list;
+mod dock;
 mod explain;
 mod files;
 mod fileview;
 mod fixes;
+mod framestats;
 mod gemini;
 mod git;
 mod githistory;
 mod github;
 mod gitplace;
 mod handoff;
+mod hardware;
 mod harness;
 mod health;
 mod history;
 mod home;
+mod idle;
 mod inbox;
 mod install;
 mod keymap;
+mod lightbox;
 mod mcp;
 mod memory_mcp;
 mod menubar;
 mod modelcheck;
 mod models;
+mod motion;
 mod notes;
+mod panes;
 mod parts;
 mod pattern;
 mod pbfile;
@@ -75,15 +88,19 @@ mod pbrunner;
 mod pbshare;
 mod persist;
 mod phone;
+mod planlimit;
 mod playbooks;
+mod procs;
 mod projects;
 mod proof;
 mod proof_ui;
+mod prwatch;
 mod pty;
 mod radar;
 mod registry;
 mod review;
 mod reviewable;
+mod safefs;
 mod schedule;
 mod seatbelt;
 mod session_header;
@@ -94,16 +111,25 @@ mod shell;
 mod shellenv;
 mod ship;
 mod signin;
+mod space_ui;
+mod startup;
 mod store;
 mod stream;
 mod terminal;
+#[cfg(test)]
+mod testwait;
 mod themes;
+mod thread_refs;
+mod thumb;
 mod timemachine;
 mod tour;
+mod turnend;
 mod turns;
 mod updater;
 mod usage;
 mod usage_ui;
+mod wake;
+mod working;
 mod workspace;
 
 use agent::{Event, Handle, Target};
@@ -130,6 +156,7 @@ actions!(
     [
         NewSession,
         OpenSettings,
+        CheckForUpdates,
         StopAgent,
         TogglePanel,
         ToggleTerminal,
@@ -186,6 +213,8 @@ enum View {
     AllSessions,
     History,
     Worktrees,
+    /// A project's worktrees and the disk space they take.
+    WorktreeSpace,
     Settings,
     Notes,
     Activity,
@@ -209,6 +238,8 @@ enum Jump {
     Session(u64),
     File(String),
     Tour,
+    /// Check GitHub for a newer Runo and show the result in Settings.
+    Updates,
     Arcade,
     /// Run a playbook in the current project.
     Playbook(u64),
@@ -316,16 +347,19 @@ struct RunoApp {
     threads_done_shut: bool,
     /// The Crew thread open in the Threads tab, beside Crew's chat.
     peek: Option<u64>,
-    peek_scroll: ScrollHandle,
+    /// The thread's conversation in the Threads tab, as a list that lays out only what is in view.
+    peek_list: ListState,
+    peek_rows: std::cell::RefCell<chat_list::ChatRows>,
     /// What the person writes to the thread open in the Threads tab.
     peek_prompt: Entity<TextareaState>,
     /// The Threads tab lists every finished thread, not only the latest few.
     threads_done_all: bool,
     /// Projects whose finished Crew threads are unfolded in the sidebar.
     sidebar_done_open: HashSet<u64>,
-    /// The Browser is open as a tab beside the session tabs, and whether it is the one shown.
-    browser_open: bool,
-    browser_main: bool,
+    /// Of those, projects listing every finished thread, not only the latest few.
+    sidebar_done_all: HashSet<u64>,
+    /// The Browser tab: whether it is open and shown, its address field, and its engine.
+    browser: browser::BrowserTab,
     /// Interactive shells, across all sessions.
     shells: Vec<pty::Shell>,
     /// The shell tab shown in the terminal panel, when one is selected.
@@ -403,17 +437,7 @@ struct RunoApp {
     diff: String,
     files: Vec<String>,
     /// The file shown in the Files tab (or the main area), and its editor.
-    open_file: Option<fileview::OpenFile>,
-    pending_file: Option<String>,
-    file_editor: Entity<gpui_kit::component::input::EditorState>,
-    file_preview: bool,
-    file_dirty: bool,
-    /// The editor's text while it has unsaved changes.
-    file_text: String,
-    /// Waiting on a Save / Discard answer before opening another file or closing.
-    file_leave: Option<fileview::Leave>,
-    /// The open file changed on disk while it had unsaved changes.
-    file_conflict: bool,
+    file: fileview::FileEditor,
     /// Unsaved edits of sessions switched away from, with their files.
     unsaved: HashMap<u64, (fileview::OpenFile, String)>,
     /// Where the main-area editor returns to.
@@ -423,29 +447,38 @@ struct RunoApp {
     terminal: HashMap<u64, Vec<String>>,
     handles: HashMap<Target, Handle>,
     tx: Sender<Event>,
-    chat_scroll: ScrollHandle,
+    /// Shells with new output, or that exited, by id; see `pty_woke`.
+    pty_tx: async_channel::Sender<u64>,
+    /// The chat as a list that lays out only the rows in view; see `chat_list`.
+    chat_list: ListState,
+    /// The window's parts as cached views; see `panes`.
+    panes: Option<panes::Panes>,
+    /// The session the chat pane shows, and the one floating over a canvas.
+    chat_shown: [std::cell::Cell<Option<u64>>; 2],
+    chat_rows: std::cell::RefCell<chat_list::ChatRows>,
+    /// Parsed Markdown of the messages of recently shown chats.
+    md_cache: std::cell::RefCell<chat_list::MarkdownCache>,
+    /// Whether the chat follows the bottom; see `chat_follow`.
+    chat_follow: chat_follow::ChatFollow,
+    /// Whether the thread open in the Threads tab follows its bottom.
+    peek_follow: chat_follow::ChatFollow,
     /// Recent error output of each session's run, for failure messages and the log.
     stderr: HashMap<u64, Vec<String>>,
     /// Each session's running turn: its parser, event log, start time and how it stands.
     turns: HashMap<u64, harness::turn::Turn>,
+    /// Turns that just ended on their own, by session: when, and how long they took, for
+    /// the chat's "Worked" row.
+    finished: HashMap<u64, (std::time::Instant, Duration)>,
     search: Entity<InputState>,
     prompt: Entity<TextareaState>,
     new_task: Entity<TextareaState>,
     branch: Entity<InputState>,
-    address: Entity<InputState>,
-    browser_recent: Vec<String>,
-    browser_ports: Vec<u16>,
-    browser_scanning: bool,
     /// Dev-server ports found where each session on a connection runs, or why not.
     remote_ports: HashMap<u64, Result<Vec<u16>, String>>,
     remote_scanning: std::collections::HashSet<u64>,
     /// Ports on connections forwarded to this machine: (session, port there).
     forwards: HashMap<(u64, u16), connections::Forward>,
     forwarding: Option<(u64, u16)>,
-    /// The headless Chromium behind the Browser tab, started on first use.
-    browser: Option<std::sync::Arc<browser_engine::Engine>>,
-    browser_view: browser::BrowserView,
-    browser_focus: FocusHandle,
     new_provider: usize,
     new_project: Option<u64>,
     new_isolated: bool,
@@ -471,6 +504,10 @@ struct RunoApp {
     /// Popups the person hid ("s:<session>:<message>" or "u:<agent>:<version>").
     alerts_hidden: std::collections::HashSet<String>,
     alerts_expanded: bool,
+    /// Whether the window has focus, so the session on screen counts as seen.
+    window_active: bool,
+    /// The idle loop's pacing and what it keeps between runs.
+    idle: idle::Idle,
     /// Permission requests agents are waiting on mid-turn.
     approvals: Vec<approvals::Request>,
     /// Tools the person always allowed for a session, answered without asking again.
@@ -478,6 +515,12 @@ struct RunoApp {
     /// Tools the person refused during a session's turn; they don't come back as
     /// "Allow" cards when the turn ends.
     refused: HashMap<u64, Vec<String>>,
+    /// Sessions whose turn failed with a sign-in error, while Runo checks the sign-in.
+    sign_in_checks: std::collections::HashSet<u64>,
+    /// Turns sent whose agent waits for the checkpoint being taken off the UI thread.
+    starting: HashMap<u64, turns::Starting>,
+    /// Sessions whose running turn is the one retry after a sign-in error.
+    sign_in_retried: std::collections::HashSet<u64>,
     /// Switching agents, waiting for the person to confirm.
     switch_plan: Option<handoff::SwitchPlan>,
     switch_preview: bool,
@@ -532,6 +575,10 @@ struct RunoApp {
     term_escape: Option<std::time::Instant>,
     /// Agent replies whose step list is expanded, by (session, message index).
     open_steps: std::collections::HashSet<(u64, usize)>,
+    /// Threads' messages to Crew shown in full, by (Crew chat, message index).
+    open_wakes: std::collections::HashSet<(u64, usize)>,
+    /// Sessions whose Working line lists its helper agents.
+    open_helpers: std::collections::HashSet<u64>,
     show_sidebar: bool,
     /// When each panel last opened or closed, so it can slide instead of snapping.
     panel_anim: HashMap<&'static str, (bool, std::time::Instant)>,
@@ -575,12 +622,19 @@ struct RunoApp {
     turn_files: HashMap<u64, usize>,
     /// Sessions whose checks are running after their last turn.
     proving: std::collections::HashSet<u64>,
+    /// Worktree sizes and build output being freed.
+    space: space_ui::Space,
+    /// Post-turn checks taking turns, as many at once as Settings allows.
+    check_queue: crate::proof::CheckQueue,
     /// Sessions waiting on a second opinion, with the agent giving it.
     reviewing: HashMap<u64, &'static str>,
     /// Crew's chats and threads while the app runs.
     crew: crew_ui::CrewState,
     /// Images attached to each session's unsent prompt.
     attachments: HashMap<u64, Vec<String>>,
+    /// The image viewer, while a picture from a chat is open large.
+    lightbox: Option<lightbox::Lightbox>,
+    lightbox_focus: FocusHandle,
     /// Images that go with a new session's first prompt.
     launch_images: HashMap<u64, Vec<String>>,
     /// Context from Design or Architecture for the session the New session dialog starts.
@@ -624,6 +678,12 @@ struct RunoApp {
     all_diffs: Vec<(String, String)>,
     /// Folded unchanged runs the person opened, by (path, first row).
     diff_expanded: std::collections::HashSet<(String, usize)>,
+    /// The diff as a list that lays out only the lines in view; see `diff_list`.
+    diff_list: ListState,
+    diff_rows: std::cell::RefCell<diff_list::DiffRows>,
+    /// The Output tab's text, by session, line count and last line; see `output_text`.
+    #[allow(clippy::type_complexity)]
+    output_md: std::cell::RefCell<Option<((u64, usize, u64), SharedString)>>,
     notes_input: Entity<TextareaState>,
     notes_project: Option<u64>,
     /// True while the notes box is filled programmatically, so it is not saved back.
@@ -675,6 +735,8 @@ struct RunoApp {
     /// Each session's pull request, and the sessions whose PR is being looked up.
     pr_status: HashMap<u64, github::PrStatus>,
     pr_loading: std::collections::HashSet<u64>,
+    /// When each Crew thread's watched pull request is read next.
+    pr_watch: prwatch::Polls,
     /// The merge methods each project's GitHub repository allows, read once a run, and
     /// the projects being read.
     merge_methods: HashMap<u64, Vec<github::MergeMethod>>,
@@ -715,13 +777,15 @@ thread_local! {
 /// as it ends up rather than played in, so a switch lands at once instead of rows and
 /// cards rising and fading in, which reads as a blink.
 fn page_settling() -> bool {
-    SWITCHED_AT
-        .get()
-        .is_some_and(|at| at.elapsed() < Duration::from_millis(700))
+    chat_list::ROW_SETTLED.get()
+        || SWITCHED_AT
+            .get()
+            .is_some_and(|at| at.elapsed() < Duration::from_millis(700))
 }
 
 /// `with_animation` that is skipped entirely when animations are switched off, and that
-/// starts at its end while a page switch is settling (see `page_settling`).
+/// starts at its end while a page switch is settling (see `page_settling`). Loops in the
+/// main window run on its shared clock (see `motion`) instead of their own.
 trait Animate: IntoElement + Sized + 'static {
     fn animated(
         self,
@@ -729,7 +793,14 @@ trait Animate: IntoElement + Sized + 'static {
         animation: Animation,
         f: impl Fn(Self, f32) -> Self + 'static,
     ) -> AnyElement {
-        if anim_on() {
+        if !animation.oneshot && motion::drawing() {
+            if motion::moving() {
+                let t = (animation.easing)(motion::phase(animation.duration));
+                f(self, t).into_any_element()
+            } else {
+                self.into_any_element()
+            }
+        } else if anim_on() {
             // A one-shot animation drawn during a switch shows its end. Every one-shot
             // `animated` is shorter than the settling time, so by the time settling ends
             // it has run out anyway and stays at its end. Loops (a pulse, a spinner)
@@ -741,6 +812,27 @@ trait Animate: IntoElement + Sized + 'static {
             .into_any_element()
         } else {
             self.into_any_element()
+        }
+    }
+
+    /// `animated`, for a loop whose content `f` draws: while loops hold still it shows
+    /// the loop's frame at `rest` rather than leaving `f` out.
+    fn looping(
+        self,
+        id: impl Into<ElementId>,
+        animation: Animation,
+        rest: f32,
+        f: impl Fn(Self, f32) -> Self + 'static,
+    ) -> AnyElement {
+        let moves = if motion::drawing() {
+            motion::moving()
+        } else {
+            anim_on()
+        };
+        if moves || animation.oneshot {
+            self.animated(id, animation, f)
+        } else {
+            f(self, rest).into_any_element()
         }
     }
 }
@@ -1024,109 +1116,6 @@ fn stagger<E: IntoElement + Styled + 'static>(
     )
 }
 
-/// "Working" row: a small orbit (a comet circling a breathing core) and the label with
-/// a soft accent glint sweeping across it, then the elapsed time. With animations off
-/// both hold still: the comet rests on the ring and the label is plain.
-fn working_indicator(elapsed: Option<String>) -> impl IntoElement {
-    const BOX: f32 = 16.;
-    const RING: f32 = 6.;
-    // Brighter in dark mode, where the accent alone sits too close to the canvas.
-    let accent = if is_dark() {
-        mix(c_blue(), 0xffffff, 0.6)
-    } else {
-        c_blue()
-    };
-    // Where a point `t` of the way round the orbit sits, as the top-left of a dot of `size`.
-    let at = |t: f32, size: f32| {
-        let a = (t - 0.25) * std::f32::consts::TAU;
-        let c = BOX / 2. - size / 2.;
-        (px(c + RING * a.cos()), px(c + RING * a.sin()))
-    };
-    let mut orbit = div()
-        .relative()
-        .flex_none()
-        .size(px(BOX))
-        .child(
-            div()
-                .absolute()
-                .left(px(BOX / 2. - RING))
-                .top(px(BOX / 2. - RING))
-                .size(px(RING * 2.))
-                .rounded_full()
-                .border_1()
-                .border_color(rgb(mix(accent, c_canvas(), 0.22))),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(BOX / 2. - 2.))
-                .top(px(BOX / 2. - 2.))
-                .size(px(4.))
-                .rounded_full()
-                .bg(rgb(accent))
-                .animated(
-                    "working-core",
-                    Animation::new(Duration::from_millis(1600))
-                        .repeat()
-                        .with_easing(pulsating_between(0.35, 1.)),
-                    |el, t| el.opacity(t),
-                ),
-        );
-    // The comet: a head and a fading tail a few steps behind it.
-    for (i, (lag, size, alpha)) in [(0., 3.5, 1.), (0.07, 2.6, 0.55), (0.14, 1.8, 0.28)]
-        .into_iter()
-        .enumerate()
-    {
-        let (x, y) = at(-lag, size);
-        orbit = orbit.child(
-            div()
-                .absolute()
-                .left(x)
-                .top(y)
-                .size(px(size))
-                .rounded_full()
-                .bg(rgb(accent))
-                .opacity(alpha)
-                .animated(
-                    ("working-comet", i),
-                    Animation::new(Duration::from_millis(1100))
-                        .repeat()
-                        .with_easing(ease_in_out_cubic),
-                    move |el, t| {
-                        let (x, y) = at(t - lag, size);
-                        el.left(x).top(y)
-                    },
-                ),
-        );
-    }
-    // The label, one letter at a time so a glint can pass along it.
-    let word = "Working";
-    let base = c_secondary();
-    let n = word.chars().count() as f32;
-    let mut label = div().flex().items_center();
-    for (i, ch) in word.chars().enumerate() {
-        label = label.child(div().text_color(rgb(base)).child(ch.to_string()).animated(
-            ("working-glint", i),
-            Animation::new(Duration::from_millis(2000)).repeat(),
-            move |el, t| {
-                // The glint travels from before the first letter to past the last one.
-                let pos = t * (n + 6.) - 3.;
-                let near = (1. - (i as f32 - pos).abs() / 2.5).max(0.);
-                el.text_color(rgb(mix(accent, base, near * near)))
-            },
-        ));
-    }
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(orbit)
-        .child(label)
-        .when_some(elapsed, |row, e| {
-            row.child(div().text_color(rgb(c_muted())).child(format!("· {e}")))
-        })
-}
-
 /// Most files listed for a folder that is not a git repository; the Files tab says so
 /// when a folder has more.
 const PLAIN_FILES_MAX: usize = 20_000;
@@ -1193,8 +1182,9 @@ fn elapsed(d: Duration) -> String {
     }
 }
 
-/// "38k tokens · 19% context" for an agent turn.
-fn usage_label(usage: &store::Usage) -> String {
+/// "38k tokens · 19% context" for an agent turn, against a window of `known` when the
+/// turn didn't report its own.
+fn usage_label(usage: &store::Usage, known: u64) -> String {
     let k = |n: u64| {
         if n >= 1000 {
             format!("{:.0}k", n as f64 / 1000.0)
@@ -1202,37 +1192,9 @@ fn usage_label(usage: &store::Usage) -> String {
             n.to_string()
         }
     };
-    let window = if usage.window > 0 {
-        usage.window
-    } else {
-        200_000
-    };
+    let window = usage.window_or(known);
     let pct = (usage.context() as f64 / window as f64 * 100.0).round() as u64;
     format!("{} tokens · {pct}% context", k(usage.context()))
-}
-
-/// Runs of more than 8 unchanged lines, as (first, end) row indexes, keeping 3 lines of
-/// context next to each change so long unchanged stretches can be folded away.
-fn collapsible_runs(rows: &[git::DiffRow]) -> Vec<(usize, usize)> {
-    const KEEP: usize = 3;
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < rows.len() {
-        if rows[i].kind != git::LineKind::Context {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < rows.len() && rows[i].kind == git::LineKind::Context {
-            i += 1;
-        }
-        let lead = if start == 0 { 0 } else { KEEP };
-        let tail = if i == rows.len() { 0 } else { KEEP };
-        if i - start > lead + tail + 2 {
-            out.push((start + lead, i - tail));
-        }
-    }
-    out
 }
 
 fn icon(name: IconName, size: f32, color: u32) -> Icon {
@@ -1244,23 +1206,18 @@ impl RunoApp {
         caps::refresh();
         // Find MCP servers in every app's config, so shared ones reach the first run.
         std::thread::spawn(|| {
+            shellenv::ready();
             settings::discover(None);
         });
         let (tx, rx) = channel::<Event>();
         let (ui_tx, ui_rx) = channel::<ship::UiJob>();
-        // Background git work hands its results back here.
+        // Background git work hands its results back here, as soon as they arrive.
+        let ui_rx = wake::Inbox::new(ui_rx);
         cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(30))
-                .await;
-            let mut jobs = Vec::new();
-            loop {
-                match ui_rx.try_recv() {
-                    Ok(job) => jobs.push(job),
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
-                }
-            }
+            ui_rx.wait().await;
+            let Some(jobs) = ui_rx.take() else {
+                return;
+            };
             if jobs.is_empty() {
                 continue;
             }
@@ -1275,90 +1232,89 @@ impl RunoApp {
             }
         })
         .detach();
-        let mut ticks = 0u32;
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(50))
-                .await;
-            ticks = ticks.wrapping_add(1);
-            let events: Vec<Event> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-            if events.is_empty() {
-                // Repaint about once a second while agents run, for their elapsed time.
-                let tick = ticks.is_multiple_of(20);
-                let repaint = caps::take_updated();
-                // Every ~2s, re-read git status for the session being watched while its
-                // agent works, so the Changes panel fills in as files are edited.
-                let rescan = ticks.is_multiple_of(40);
-                // Every ~10s when idle, so terminal git commands and outside edits show
-                // up; the pull request's checks every minute.
-                let idle_scan = ticks.is_multiple_of(200);
-                let pr_check = ticks % 1200 == 600;
-                let check = ticks % 1200 == 2;
-                // Ten seconds in, once agents are detected, then every five minutes: each agent's plan usage for the status bar.
-                if ticks % 6000 == 200 {
-                    usage::refresh(true);
+        // A shell's output draws as it arrives, at most once a frame: the shell wakes this
+        // once after each time it is drawn (see `pty::Shell::take_dirty`).
+        let (pty_tx, pty_rx) = async_channel::unbounded::<u64>();
+        cx.spawn(async move |this, cx| {
+            while let Ok(id) = pty_rx.recv().await {
+                let mut ids = vec![id];
+                while let Ok(id) = pty_rx.try_recv() {
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
                 }
-                let alive = this.update(cx, |this, cx| {
-                    if check {
-                        this.maybe_check_updates();
-                    }
-                    // Every ~5s, look for dev servers so the header's Browser button
-                    // appears once the app is being served, and goes when it stops.
-                    if ticks % 100 == 50
-                        && this.view == View::Session
-                        && this.selected.is_some()
-                        && cx.global::<AppSettings>().browser_enabled
-                    {
-                        this.scan_ports();
-                    }
-                    let watching = this.view == View::Session
-                        && this.selected.is_some_and(|id| this.turns.contains_key(&id));
-                    let on_session = this.view == View::Session && this.selected.is_some();
-                    if pr_check && on_session {
-                        if let Some(id) = this.selected {
-                            this.load_pr_status(id);
-                        }
-                    }
-                    if tick {
-                        let before = (this.file_conflict, this.pending_file.is_some());
-                        this.watch_open_file();
-                        if before != (this.file_conflict, this.pending_file.is_some()) {
-                            cx.notify();
-                        }
-                    }
-                    if (rescan && watching) || (idle_scan && on_session) {
-                        this.refresh();
-                        cx.notify();
-                    } else if repaint
-                        || (tick
-                            && (!this.turns.is_empty()
-                                || this.info.is_some()
-                                || this.git_toast.is_some()))
-                        || (ticks.is_multiple_of(5)
-                            && this.update_runs.values().any(|r| r.failed.is_none()))
-                    {
-                        this.prune_update_runs();
-                        cx.notify();
-                    }
-                });
-                if alive.is_err() {
+                if this.update(cx, |this, cx| this.pty_woke(ids, cx)).is_err() {
                     break;
                 }
+            }
+        })
+        .detach();
+        // Agents' output and other events: woken when they arrive, then a moment's wait
+        // so a busy agent's lines are handled together.
+        let rx = wake::Inbox::new(rx);
+        cx.spawn(async move |this, cx| loop {
+            rx.wait().await;
+            cx.background_executor().timer(EVENT_BATCH).await;
+            let Some(events) = rx.take() else {
+                return;
+            };
+            if events.is_empty() {
                 continue;
             }
             let alive = this.update(cx, |this, cx| {
+                // Agents' output only changes their conversation, the sidebar and the
+                // status bar. Output streaming into the open chat draws that conversation
+                // at once; the rest of the window, and anything from sessions not on
+                // screen, is drawn a few times a second rather than with every batch, so
+                // busy agents don't redraw the whole window 20 times a second. Anything
+                // else, such as a turn ending, draws the window at once.
+                let at_once = events
+                    .iter()
+                    .any(|e| this.event_shown(e) && !this.event_streamed(e));
+                let streamed = events.iter().any(|e| this.event_streamed(e));
+                // Only the thread beside Crew's chat streams into the side panel.
+                let peeked = events.iter().any(|e| match e {
+                    Event::Line(Target::Session(id), _) | Event::Json(Target::Session(id), ..) => {
+                        this.peeked(*id)
+                    }
+                    _ => false,
+                });
+                let output = events
+                    .iter()
+                    .any(|e| matches!(e, Event::Line(Target::Terminal(_), _)));
                 for event in events {
                     this.handle_event(event, cx);
                 }
-                cx.notify();
+                this.after_events(at_once, streamed, peeked, output, cx);
             });
             if alive.is_err() {
                 break;
             }
         })
         .detach();
+        // Elapsed times, git rescans, dev-server ports, pull request checks and the rest:
+        // about once a second while the window is on screen, every few seconds while it
+        // is hidden.
+        cx.spawn(async move |this, cx| {
+            let mut clock = idle::Clock::new();
+            loop {
+                let Ok(wait) = this.update(cx, |this, _| this.housekeeping_pace()) else {
+                    break;
+                };
+                cx.background_executor().timer(wait).await;
+                if this
+                    .update(cx, |this, cx| this.housekeeping(&mut clock, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
 
+        startup::mark("RunoApp::new begins");
         let state = State::load();
+        startup::mark("store opened");
         let selected = state.sessions.first().map(|s| s.id);
 
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Filter sessions"));
@@ -1491,10 +1447,11 @@ impl RunoApp {
                         *secondary
                     }
                 }
-                // Repaint so the send button reflects whether there is anything to send.
+                // The composer and its send button are in the window's own frame, which
+                // the keystroke draws again anyway; notifying the app would draw every
+                // pane too (see `panes`).
                 InputEvent::Change => {
                     this.update_mention(cx);
-                    cx.notify();
                     false
                 }
                 _ => false,
@@ -1540,6 +1497,8 @@ impl RunoApp {
             window_place: None,
             term_escape: None,
             open_steps: Default::default(),
+            open_helpers: Default::default(),
+            open_wakes: Default::default(),
             show_sidebar: true,
             panel_anim: HashMap::new(),
             was_settings: false,
@@ -1601,12 +1560,13 @@ impl RunoApp {
             right_tab: RightTab::Changes,
             threads_done_shut: false,
             peek: None,
-            peek_scroll: ScrollHandle::new(),
+            peek_list: chat_list::new_list_state(),
+            peek_rows: Default::default(),
             peek_prompt,
             threads_done_all: false,
             sidebar_done_open: HashSet::new(),
-            browser_open: false,
-            browser_main: false,
+            sidebar_done_all: HashSet::new(),
+            browser: browser::BrowserTab::new(address, cx.focus_handle()),
             shells: Vec::new(),
             shell_tab: None,
             next_shell: 0,
@@ -1663,23 +1623,24 @@ impl RunoApp {
             selected_file: None,
             diff: String::new(),
             files: Vec::new(),
-            open_file: None,
-            pending_file: None,
-            file_editor,
-            file_preview: false,
-            file_dirty: false,
-            file_text: String::new(),
-            file_leave: None,
-            file_conflict: false,
+            file: fileview::FileEditor::new(file_editor),
             unsaved: HashMap::new(),
             editor_back: View::Session,
             new_back: View::Session,
             terminal,
             handles: HashMap::new(),
             tx,
-            chat_scroll: ScrollHandle::new(),
+            pty_tx,
+            chat_list: chat_list::new_list_state(),
+            panes: None,
+            chat_shown: Default::default(),
+            chat_rows: Default::default(),
+            md_cache: Default::default(),
+            chat_follow: Default::default(),
+            peek_follow: Default::default(),
             stderr: HashMap::new(),
             turns: HashMap::new(),
+            finished: HashMap::new(),
             search,
             prompt,
             new_task: cx.new(|cx| {
@@ -1689,17 +1650,10 @@ impl RunoApp {
             branch: cx.new(|cx| {
                 InputState::new(window, cx).placeholder("Branch (optional, named after the task)")
             }),
-            address,
-            browser_recent: Vec::new(),
-            browser_ports: Vec::new(),
-            browser_scanning: false,
             remote_ports: HashMap::new(),
             remote_scanning: Default::default(),
             forwards: HashMap::new(),
             forwarding: None,
-            browser: None,
-            browser_view: browser::BrowserView::default(),
-            browser_focus: cx.focus_handle(),
             new_provider: agent::PROVIDERS
                 .iter()
                 .position(|p| p.id == cx.global::<AppSettings>().default_provider)
@@ -1716,9 +1670,14 @@ impl RunoApp {
             update_checked: None,
             alerts_hidden: Default::default(),
             alerts_expanded: false,
+            window_active: window.is_window_active(),
+            idle: idle::Idle::default(),
             approvals: Vec::new(),
             always_allowed: Default::default(),
             refused: HashMap::new(),
+            sign_in_checks: Default::default(),
+            starting: Default::default(),
+            sign_in_retried: Default::default(),
             switch_plan: None,
             switch_preview: false,
             ctx_menu: None,
@@ -1755,9 +1714,13 @@ impl RunoApp {
             header_width: std::rc::Rc::new(std::cell::Cell::new(f32::INFINITY)),
             turn_files: HashMap::new(),
             proving: Default::default(),
+            space: Default::default(),
+            check_queue: Default::default(),
             reviewing: HashMap::new(),
             crew: Default::default(),
             attachments: HashMap::new(),
+            lightbox: None,
+            lightbox_focus: cx.focus_handle(),
             launch_images: HashMap::new(),
             new_context: None,
             new_model: None,
@@ -1818,6 +1781,7 @@ impl RunoApp {
             diff_against: "HEAD".into(),
             pr_status: HashMap::new(),
             pr_loading: Default::default(),
+            pr_watch: Default::default(),
             merge_methods: HashMap::new(),
             merge_methods_loading: Default::default(),
             pr_form: None,
@@ -1842,6 +1806,9 @@ impl RunoApp {
             diff_wrap: false,
             all_diffs: Vec::new(),
             diff_expanded: Default::default(),
+            diff_list: diff_list::new_list_state(),
+            diff_rows: Default::default(),
+            output_md: Default::default(),
             _subscriptions: vec![
                 search_sub,
                 peek_sub,
@@ -2002,12 +1969,23 @@ impl RunoApp {
         ]);
         // Coming back to the window picks up git commands run elsewhere.
         let activation_sub = cx.observe_window_activation(window, |this, window, cx| {
-            if window.is_window_active() {
+            this.window_active = window.is_window_active();
+            if this.window_active {
+                // An answer that came in behind the window is read once it's back in front.
+                if this.assistant.open {
+                    this.assistant.unread = 0;
+                }
                 this.refresh();
                 cx.notify();
             }
         });
         app._subscriptions.push(activation_sub);
+        // Hidden, minimized or covered: periodic work that only changes the window stops
+        // until it is on screen again (see `idle`). Taken as shown until told otherwise.
+        let visibility_sub = cx.observe_window_visibility(window, |this, visibility, _, cx| {
+            this.window_shown(visibility.is_visible(), cx);
+        });
+        app._subscriptions.push(visibility_sub);
         app._subscriptions.push(home_sub);
         app._subscriptions.extend(design_subs);
         app._subscriptions.extend(assistant_subs);
@@ -2016,20 +1994,25 @@ impl RunoApp {
         cx.set_global(MainApp(cx.entity().downgrade(), window.window_handle()));
         app.init_github(window, cx);
         app.restore_layout();
-        // The Browser tab's live page: pick up frames at display rate while it is open.
+        // The Dock icon's count. Events and approvals update it as they come; this timer
+        // catches the rest (render can't, since a minimised or hidden window doesn't
+        // draw), every second, or every five while the window is hidden. AppKit only
+        // hears about a change.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
-                .timer(Duration::from_millis(16))
+                .timer(wake::pace(Duration::from_secs(1), Duration::from_secs(5)))
                 .await;
-            if this.update(cx, |this, cx| this.pump_browser(cx)).is_err() {
+            if this.update(cx, |this, cx| this.show_dock(cx)).is_err() {
                 break;
             }
         })
         .detach();
         // Chromium would exit when its pipe closes, but stop it right away.
         cx.on_app_quit(|this, _| {
-            this.browser = None;
+            this.browser.engine = None;
             this.before_quit();
+            // Events still on their way to the turn logs.
+            harness::log::drain();
             async {}
         })
         .detach();
@@ -2064,20 +2047,28 @@ impl RunoApp {
                 })
                 .unwrap_or(true)
         });
-        // Saves, turns waiting for a slot, crash reports and Runo updates.
+        // Saves, turns waiting for a slot, crash reports and Runo updates; every two
+        // seconds while the window is hidden.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
-                .timer(Duration::from_millis(500))
+                .timer(wake::pace(
+                    Duration::from_millis(500),
+                    Duration::from_secs(2),
+                ))
                 .await;
             if this.update(cx, |this, cx| this.health_tick(cx)).is_err() {
                 return;
             }
         })
         .detach();
-        // Agents asking for permission mid-turn are shown within half a second.
+        // Agents asking for permission mid-turn are shown within half a second, or a
+        // second while the window is hidden. With nothing running, nothing can ask.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
-                .timer(Duration::from_millis(500))
+                .timer(wake::pace(
+                    Duration::from_millis(500),
+                    Duration::from_secs(1),
+                ))
                 .await;
             if this.update(cx, |this, cx| this.poll_approvals(cx)).is_err() {
                 return;
@@ -2085,15 +2076,20 @@ impl RunoApp {
         })
         .detach();
         // Playbooks agents asked for and requests from the phone start within a couple of
-        // seconds; scheduled playbooks are checked twice a minute.
+        // seconds (five while the window is hidden); scheduled playbooks are checked about
+        // twice a minute.
         cx.spawn(async move |this, cx| loop {
-            for _ in 0..15 {
-                cx.background_executor().timer(Duration::from_secs(2)).await;
+            let started = std::time::Instant::now();
+            while started.elapsed() < Duration::from_secs(29) {
+                cx.background_executor()
+                    .timer(wake::pace(Duration::from_secs(2), Duration::from_secs(5)))
+                    .await;
                 if this
                     .update(cx, |this, cx| {
                         this.take_playbook_requests(cx);
                         this.take_phone_requests(cx);
                         this.crew_tick(cx);
+                        this.pr_watch_tick();
                     })
                     .is_err()
                 {
@@ -2102,8 +2098,19 @@ impl RunoApp {
             }
             if this
                 .update(cx, |this, cx| {
+                    // Redraw only when a run started or came in, or for the times shown
+                    // on Home and Automations.
+                    let mark = |this: &Self| {
+                        let runs = this.state.automations.iter().map(|a| a.last_run);
+                        (this.state.sessions.len(), runs.sum::<u64>())
+                    };
+                    let before = mark(this);
                     this.run_due_automations(cx);
-                    cx.notify();
+                    let on_screen =
+                        wake::shown() && matches!(this.view, View::Home | View::Automations);
+                    if on_screen || mark(this) != before {
+                        cx.notify();
+                    }
                 })
                 .is_err()
             {
@@ -2118,12 +2125,25 @@ impl RunoApp {
         if let Some(id) = app.selected.filter(|id| !app.tabs.contains(id)) {
             app.tabs.push(id);
         }
-        app.resume_remote_turns();
         app.resume_local_turns();
-        app.send_waiting_queues(cx);
         app.refresh();
-        app.chat_scroll.scroll_to_bottom();
+        // Turns on connections and queued messages start programs, so they wait for the
+        // login shell's PATH, off the UI thread, while the window shows what was saved.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async { shellenv::ready() })
+                .await;
+            startup::mark("login shell environment");
+            let _ = this.update(cx, |this, cx| {
+                this.resume_remote_turns();
+                this.send_waiting_queues(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        app.jump_to_bottom();
         window.focus(&app.focus, cx);
+        startup::mark("RunoApp built");
         app
     }
 
@@ -2241,12 +2261,15 @@ impl RunoApp {
     /// Re-read the selected session's git state (changes, files, branch, races) on a
     /// background thread; the results land a moment later.
     fn refresh(&mut self) {
-        let Some(session) = self.current() else {
+        let Some((id, dir)) = self.current().map(|s| (s.id, s.dir.clone())) else {
             self.changes.clear();
             self.files.clear();
             return;
         };
-        let id = session.id;
+        self.scan_started();
+        let Some(session) = self.current() else {
+            return;
+        };
         let racers: Vec<(u64, String)> = if session.race != 0 {
             self.state
                 .sessions
@@ -2258,7 +2281,7 @@ impl RunoApp {
             Vec::new()
         };
         let request = ship::ScanRequest {
-            dir: session.dir.clone(),
+            dir: dir.clone(),
             touched: session.touched(),
             base: session.base.clone(),
             since_base: self.diff_base,
@@ -2273,6 +2296,9 @@ impl RunoApp {
         self.bg(
             move || ship::scan(request),
             move |this, scan, _| {
+                // git's files as the scan left them: `git status` may have rewritten the
+                // index, and that isn't a change to look at again.
+                this.scan_done(id, &dir);
                 if this.refresh_seq == seq && this.selected == Some(id) {
                     this.apply_scan(id, scan, asked);
                 }
@@ -2301,10 +2327,34 @@ impl RunoApp {
     }
 
     fn open_change(&mut self, path: &str) {
-        if let Some(dir) = self.current().map(|s| s.dir.clone()) {
-            self.diff = self.load_diff(&dir, path);
+        if self.selected_file.as_deref() != Some(path) {
+            self.diff.clear();
         }
         self.selected_file = Some(path.to_string());
+        if let Some(dir) = self.current().map(|s| s.dir.clone()) {
+            self.load_diff_bg(dir, path.to_string());
+        }
+    }
+
+    /// Read one file's diff off the UI thread (a few git commands each); it shows if the
+    /// file is still the one picked.
+    fn load_diff_bg(&self, dir: String, path: String) {
+        let whole = self.diff_whole;
+        let against = self.diff_against.clone();
+        let (d, p, a) = (dir.clone(), path.clone(), against.clone());
+        self.bg(
+            move || git::file_diff_context(&d, &p, whole, &a),
+            move |this, diff, cx| {
+                let same = this.diff_whole == whole && this.diff_against == against;
+                if same
+                    && this.selected_file.as_deref() == Some(path.as_str())
+                    && this.current().is_some_and(|s| s.dir == dir)
+                {
+                    this.diff = diff;
+                    cx.notify();
+                }
+            },
+        );
     }
 
     fn close_tab(&mut self, id: u64) {
@@ -2333,7 +2383,7 @@ impl RunoApp {
             self.stash_open_file(old);
         }
         self.selected = Some(id);
-        self.browser_main = false;
+        self.browser.main = false;
         if !self.tabs.contains(&id) {
             self.tabs.push(id);
         }
@@ -2354,8 +2404,8 @@ impl RunoApp {
         self.view = View::Session;
         self.selected_file = None;
         self.diff.clear();
-        if self.open_file.is_some() && !self.file_dirty {
-            self.open_file = None;
+        if self.file.open.is_some() && !self.file.dirty {
+            self.file.open = None;
         }
         self.confirm_delete = None;
         self.confirm_discard = None;
@@ -2366,11 +2416,44 @@ impl RunoApp {
         self.confirm_git = None;
         self.file_hits = None;
         self.refresh();
+        // The worktree chip's size, unless it was measured lately.
+        self.space_tick(false);
         self.load_pr_status(id);
-        self.chat_scroll.scroll_to_bottom();
+        self.jump_to_bottom();
+    }
+
+    /// Whether `event` changes what is on screen beyond the sidebar and status bar: anything
+    /// but output from an agent whose chat isn't open, and Runo's own output, which only
+    /// the terminal panel shows.
+    fn event_shown(&self, event: &Event) -> bool {
+        match event {
+            Event::Line(Target::Session(id), _)
+            | Event::Json(Target::Session(id), ..)
+            | Event::Err(Target::Session(id), _) => {
+                self.selected == Some(*id) || self.peek == Some(*id)
+            }
+            Event::Line(Target::Terminal(_), _) => false,
+            _ => true,
+        }
+    }
+
+    /// Whether `event` is output streaming into the open chat, or the thread open beside
+    /// Crew's chat, which only changes that conversation.
+    fn event_streamed(&self, event: &Event) -> bool {
+        match event {
+            Event::Line(Target::Session(id), _) | Event::Json(Target::Session(id), ..) => {
+                self.selected == Some(*id) || self.peek == Some(*id)
+            }
+            _ => false,
+        }
     }
 
     fn handle_event(&mut self, event: Event, cx: &mut Context<Self>) {
+        // A JSON line arrives already parsed by the thread that read it.
+        let (event, mut parsed) = match event {
+            Event::Json(target, line, json) => (Event::Line(target, line), Some(json)),
+            other => (other, None),
+        };
         self.health.saw(&event);
         match event {
             Event::Line(Target::Session(id), line) => {
@@ -2378,7 +2461,7 @@ impl RunoApp {
                     self.sign_in_wait(id, &line);
                 }
                 let (updates, plain) = match self.turns.get_mut(&id) {
-                    Some(turn) => (turn.feed(&line), turn.plain()),
+                    Some(turn) => (turn.feed_parsed(&line, parsed.take()), turn.plain()),
                     None => (vec![AgentEvent::Text(line)], true),
                 };
                 // Crew's chat and its threads have Runo's blocks taken out as they stream.
@@ -2401,6 +2484,11 @@ impl RunoApp {
                         other => Some(other),
                     })
                     .collect();
+                for update in &updates {
+                    if let AgentEvent::Limit(limit) = update {
+                        self.note_plan_limit(id, limit);
+                    }
+                }
                 let refused = self.refused.get(&id).cloned().unwrap_or_default();
                 // The reply's run summary names the model it ran on.
                 let model = updates
@@ -2425,22 +2513,16 @@ impl RunoApp {
                         }
                     }
                 }
-                if self.selected == Some(id) && autoscroll() {
-                    self.chat_scroll.scroll_to_bottom();
+                if self.selected == Some(id) {
+                    self.follow_bottom();
                 }
-                if self.peek == Some(id) && autoscroll() {
-                    self.peek_scroll.scroll_to_bottom();
+                if self.peek == Some(id) {
+                    self.peek_follow_bottom();
                 }
             }
             Event::Err(Target::Session(id), line) => {
                 if agent::waits_for_sign_in(&line) {
                     self.sign_in_wait(id, &line);
-                }
-                // Grok names its conversation on stderr; the next turn continues it.
-                if let Some(session) = self.state.session_mut(id) {
-                    if let Some(found) = agent::stderr_conversation(&session.provider, &line) {
-                        session.agent_session = found;
-                    }
                 }
                 let log = self.stderr.entry(id).or_default();
                 log.push(line);
@@ -2449,6 +2531,8 @@ impl RunoApp {
                 }
             }
             Event::Err(..) => {}
+            // Made a `Line` above.
+            Event::Json(..) => {}
             Event::Line(Target::Terminal(id), line) => {
                 let log = self.terminal.entry(id).or_default();
                 log.push(line);
@@ -2465,6 +2549,12 @@ impl RunoApp {
                 }
                 let stopped = turn.as_ref().is_some_and(|t| t.stopping);
                 let took = turn.as_ref().map(|t| t.started.elapsed());
+                self.finished
+                    .retain(|_, (at, _)| at.elapsed() < working::FINISH);
+                let failed = turn.as_ref().is_some_and(|t| t.failed || t.signed_out);
+                if let Some(took) = took.filter(|_| ok && !stopped && !failed) {
+                    self.finished.insert(id, (std::time::Instant::now(), took));
+                }
                 self.handles.remove(&Target::Session(id));
                 self.end_approvals(id);
                 if let Some(start) = turn.as_ref().map(|t| t.started) {
@@ -2492,6 +2582,10 @@ impl RunoApp {
                 // Some CLIs report a failed turn in their output and still exit cleanly.
                 let reported = turn.as_ref().is_some_and(|t| t.failed);
                 let mut hold = false;
+                // This turn was the one retry after a sign-in error.
+                let retried = self.sign_in_retried.remove(&id);
+                let mut checking = false;
+                let exit = detach::last_exit(id);
                 let sync_warning = self.sync_warning(id);
                 if let Some(session) = self.state.session_mut(id) {
                     for m in session
@@ -2507,10 +2601,16 @@ impl RunoApp {
                     let silent = session.messages.last().is_some_and(|m| {
                         m.role == Role::Agent && m.text.is_empty() && m.steps.is_empty()
                     });
-                    let errors: String = session.messages
-                        [session.messages.len().saturating_sub(3)..]
+                    // Only the CLI's own error output: the errors it reported this turn and
+                    // its stderr, never Runo's notes or an earlier turn's messages.
+                    let asked = session
+                        .messages
                         .iter()
-                        .filter(|m| m.role == Role::System)
+                        .rposition(|m| m.role == Role::User)
+                        .map_or(0, |i| i + 1);
+                    let errors: String = session.messages[asked..]
+                        .iter()
+                        .filter(|m| m.role == Role::System && m.meta.is_empty())
                         .map(|m| m.text.as_str())
                         .chain(all.iter().map(String::as_str))
                         .collect::<Vec<_>>()
@@ -2531,7 +2631,32 @@ impl RunoApp {
                     } else {
                         None
                     };
-                    let ok = ok && sign_in.is_none() && !reported;
+                    // A sign-in error is checked before it is believed: with several runs at
+                    // once, one can fail for a moment while another renews the login token.
+                    // A CLI that asked for a browser login, a turn that was already the
+                    // retry, or one on another machine is believed as before.
+                    checking = sign_in.is_some() && !signed_out && !retried && !session.elsewhere();
+                    // A CLI that stopped without a word, and why where that can be told.
+                    // Claude Code always ends a turn with a result, so an empty one is a
+                    // fault; other agents may finish quietly, unless the disk is full.
+                    let compacted = session
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.role == Role::User)
+                        .is_some_and(|m| m.text.starts_with("/compact"));
+                    let no_reply =
+                        if silent && !reported && !stopped && !compacted && sign_in.is_none() {
+                            let name = agent::provider(&session.provider).name;
+                            let free = turnend::free_space(&session.dir);
+                            let why = turnend::no_reply(name, exit, &all.join("\n"), free);
+                            let quiet =
+                                ok && session.provider != "claude" && !why.contains("disk is full");
+                            (!quiet).then_some(why)
+                        } else {
+                            None
+                        };
+                    let ok = ok && sign_in.is_none() && !reported && no_reply.is_none();
                     // A reply that never started is dropped, leaving the error.
                     if reported {
                         let at = session
@@ -2582,18 +2707,35 @@ impl RunoApp {
                     } else {
                         "Agent failed"
                     };
-                    desktop_notify::send(cx, Some(id), &session.title, body);
+                    // While the sign-in is checked the turn may yet be retried: nothing is said.
+                    if !checking {
+                        desktop_notify::send(cx, Some(id), &session.title, body);
+                    }
                     if let Some(warning) = sync_warning {
                         session.messages.push(warning);
                     }
                     if !stopped && !session.elsewhere() {
-                        if sign_in.is_some() {
+                        if sign_in.is_some() && !checking {
                             signin::turn_showed(&session.provider, false);
                         } else if ok {
                             signin::turn_showed(&session.provider, true);
                         }
                     }
-                    if let Some(hint) = sign_in {
+                    if checking {
+                        // The queue waits for the check, and for the retry if there is one.
+                        hold = true;
+                        // The CLI's error stays, quietly, under a note saying what happens.
+                        for m in session.messages[asked..]
+                            .iter_mut()
+                            .filter(|m| m.role == Role::System && m.meta.is_empty())
+                        {
+                            m.meta = "warning".into();
+                        }
+                        let mut note =
+                            Message::new(Role::System, turnend::checking(&session.provider));
+                        note.meta = "note".into();
+                        session.messages.push(note);
+                    } else if let Some(hint) = sign_in {
                         hold = true;
                         let turn = session
                             .messages
@@ -2627,13 +2769,15 @@ impl RunoApp {
                         } else {
                             tail.join("\n")
                         };
-                        let mut text = String::from(if stopped {
-                            "Stopped."
+                        let mut text = if stopped {
+                            "Stopped.".to_string()
                         } else if reported {
-                            ""
+                            String::new()
+                        } else if let Some(why) = &no_reply {
+                            why.clone()
                         } else {
-                            "The agent stopped with an error."
-                        });
+                            "The agent stopped with an error.".to_string()
+                        };
                         if !log.trim().is_empty() && !stopped && !reported {
                             text.push_str(&format!(
                                 "\n```text\n{}\n```",
@@ -2661,41 +2805,25 @@ impl RunoApp {
                 if let Some(turn) = turn {
                     turn.end(ok);
                 }
-                self.log_turn_end(id, ok, stopped, hold, took, &all);
-                self.finish_turn(id, ok, stopped, hold, cx);
-                self.design_turn_done(id, stopped, cx);
-                self.playbook_turn_done(id, ok);
+                self.log_turn_end(id, ok, stopped, hold && !checking, took, &all);
+                if checking {
+                    self.check_sign_in(id);
+                } else {
+                    self.finish_turn(id, ok, stopped, hold, cx);
+                    self.design_turn_done(id, stopped, cx);
+                    self.playbook_turn_done(id, ok);
+                }
                 self.write_memory(id);
                 self.save();
                 if self.selected == Some(id) {
                     self.refresh();
-                    if autoscroll() {
-                        self.chat_scroll.scroll_to_bottom();
-                    }
+                    self.follow_bottom();
                 }
             }
             Event::Output(key, result) => {
                 self.handle_output(key, result);
             }
             Event::Partial(key, text) => self.assistant_partial(key, text),
-            // A shell printed or exited; repaint it.
-            Event::Pty(id) => {
-                self.cli_exited(id);
-                self.sign_in_exited(id);
-                if self.setups.contains_key(&id) {
-                    self.setup_exited(id, cx);
-                }
-                // A quick command's tab says how it went in its own words.
-                self.task_exited(id);
-                if let Some(shell) = self.shells.iter().find(|s| s.id == id && s.exited()) {
-                    if self.shell_tab == Some(id) && !self.tasks.contains_key(&id) {
-                        self.info = Some((
-                            format!("{} exited.", shell.title),
-                            std::time::Instant::now(),
-                        ));
-                    }
-                }
-            }
             Event::Done(Target::Terminal(id), ok) => {
                 self.handles.remove(&Target::Terminal(id));
                 if !ok {
@@ -2747,7 +2875,16 @@ impl RunoApp {
 
     /// Show a file of the current session in the Files tab; applied on the next frame.
     fn open_preview(&mut self, path: &str) {
-        self.pending_file = Some(path.to_string());
+        self.file.pending = Some(path.to_string());
+    }
+
+    /// Check for a newer Runo and open Settings filtered to Updates, where the result shows.
+    fn show_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings();
+        self.settings_page = SettingsPage::General;
+        self.settings_search
+            .update(cx, |s, cx| s.set_value("updates", window, cx));
+        self.check_runo_now(cx);
     }
 
     pub(crate) fn open_settings(&mut self) {
@@ -2805,6 +2942,11 @@ impl RunoApp {
 
     /// Stop a session's agent, and everything it started.
     pub(crate) fn stop_session(&mut self, id: u64) {
+        self.cancel_checks(id);
+        // Not started yet: it ends once its checkpoint is in, without running the agent.
+        if let Some(start) = self.starting.get_mut(&id) {
+            start.stopped = true;
+        }
         if let Some(handle) = self.handles.get(&Target::Session(id)) {
             if let Some(turn) = self.turns.get_mut(&id) {
                 turn.stopping = true;
@@ -2870,6 +3012,7 @@ impl RunoApp {
         match jump {
             Jump::Action => {}
             Jump::Tour => self.start_tour(),
+            Jump::Updates => self.show_update_check(window, cx),
             Jump::Arcade => self.open_arcade(window, cx),
             Jump::Playbook(id) => {
                 let here = self.current_project();
@@ -3198,6 +3341,9 @@ impl RunoApp {
         session.archived = !session.archived;
         let (archived, title) = (session.archived, session.title.clone());
         self.save();
+        if archived {
+            self.queue_build_clean(id);
+        }
         self.info = Some((
             if archived {
                 format!("Archived “{title}”. Find it under All sessions.")
@@ -3692,17 +3838,13 @@ impl RunoApp {
         let provider = agent::provider(past.provider);
         // The conversation's earlier turns, read from the CLI's transcript, so the chat
         // shows where it left off.
-        let prefix = format!("{}/", past.cwd.trim_end_matches('/'));
-        let mut earlier: Vec<Message> = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .and_then(|home| {
-                history::transcript(std::path::Path::new(&home), past.provider, &past.id)
-            })
+        let mut earlier: Vec<Message> = store::home_dir()
+            .and_then(|home| history::transcript(&home, past.provider, &past.id))
             .map(|path| history::turns(past.provider, &history::read_from(&path, 0)))
             .unwrap_or_default();
         for m in &mut earlier {
             for step in &mut m.steps {
-                step.label = step.label.replace(&prefix, "");
+                step.label = cliview::without_dir(&step.label, &past.cwd);
             }
         }
         let picked_up = format!(
@@ -3881,6 +4023,7 @@ impl RunoApp {
     }
 
     fn delete_session(&mut self, id: u64) {
+        self.cancel_checks(id);
         if let Some(handle) = self.handles.remove(&Target::Session(id)) {
             handle.kill();
         }
@@ -3898,6 +4041,7 @@ impl RunoApp {
         self.pending_start.remove(&id);
         self.preparing.remove(&id);
         self.pr_status.remove(&id);
+        self.starting.remove(&id);
         connections::cleanup_session(&session);
         // The worktree, the branch when nothing in it is unmerged, and Undo snapshots.
         self.remove_session_files(&session, false);
@@ -4537,10 +4681,12 @@ impl RunoApp {
         let filter = self.search.read(cx).value().to_lowercase();
         let mut projects = div().v_flex().pb_2();
         let mut first = true;
-        for project in &self.state.projects {
+        // Grouped by what needs the person or by status, the list is made another way.
+        let by_project = !self.needs_filter && !cx.global::<AppSettings>().group_by_status;
+        for project in self.state.projects.iter().filter(|_| by_project) {
             let pid = project.id;
             let open = self.expanded.contains(&pid);
-            let missing = !std::path::Path::new(&project.path).is_dir();
+            let missing = !checks::is_dir(&project.path);
             let sessions = self.project_sessions(project, &filter);
             if !filter.is_empty() && sessions.is_empty() {
                 continue;
@@ -4703,13 +4849,13 @@ impl RunoApp {
                 // Sessions sit a step in from their project's name.
                 let mut rows = div().v_flex().gap(px(2.)).mt(px(2.)).mb_1().pl(px(15.));
                 let crew_on = self.crew_mode(pid);
-                // Crew's threads and each race's agents sit under their parent, not in
-                // the list.
+                // Crew's threads, resolved ones too, and each race's agents sit under
+                // their parent, not in the list.
                 let threads: Vec<&Session> = if crew_on {
                     sessions
                         .iter()
                         .copied()
-                        .filter(|s| s.crew.as_ref().is_some_and(|i| !i.resolved))
+                        .filter(|s| s.crew.is_some())
                         .collect()
                 } else {
                     Vec::new()
@@ -4723,8 +4869,25 @@ impl RunoApp {
                 let sessions: Vec<&Session> = sessions
                     .iter()
                     .copied()
-                    .filter(|s| !threads.iter().any(|t| t.id == s.id))
+                    .filter(|s| !crew_on || s.crew.is_none())
                     .collect();
+                if crew_on && !sessions.is_empty() {
+                    // Air and a quiet label, not a rule, set Crew's block apart from the
+                    // sessions the person started themselves, like the Inbox's sections.
+                    rows = rows.child(
+                        div()
+                            .mt(px(14.))
+                            .h(px(20.))
+                            .px_2()
+                            .pb(px(4.))
+                            .flex()
+                            .items_end()
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(c_muted()))
+                            .child("SESSIONS"),
+                    );
+                }
                 let mut raced: Vec<u64> = Vec::new();
                 if sessions.is_empty() && !crew_on {
                     rows = rows.child(
@@ -4959,7 +5122,7 @@ impl RunoApp {
                 div()
                     .truncate()
                     .text_color(rgb(c_secondary()))
-                    .child(text.to_string()),
+                    .child(thumb::short_paths(text).into_owned()),
             )
     }
 
@@ -5132,27 +5295,45 @@ impl RunoApp {
                 |el, delta| el.opacity(delta).mt(px((1.0 - delta) * 6.0)),
             )
         };
-        let markdown = |text: String| {
-            TextView::markdown(
-                SharedString::from(format!("body-{}-{}", self.selected.unwrap_or(0), index)),
-                text,
-            )
-            .selectable(true)
+        // In Crew's chat, thread numbers such as "#34" open their thread.
+        let links = self.thread_links(cx);
+        let sid = self.selected.unwrap_or(0);
+        let markdown = |text: &str, cx: &mut Context<Self>| {
+            self.markdown_view(sid, index, 0, text, links.as_ref(), cx)
         };
         if message.role == Role::User {
             let sid = self.selected.unwrap_or(0);
             let can_undo = !message.checkpoint.is_empty() && !working;
             let mut images = div().flex().flex_wrap().justify_end().gap_2();
-            for path in &message.images {
+            for (k, path) in message.images.iter().enumerate() {
+                // Sized from the picture's header so the row is the right height before
+                // the picture loads; kept inside that box whatever the picture's size.
+                let dims = thumb::dimensions(path);
+                let (w, h) = thumb::fit(dims, 220., 160.);
                 images = images.child(
-                    img(std::path::PathBuf::from(path))
-                        .max_w(px(220.))
-                        .max_h(px(160.))
-                        .rounded_lg()
-                        .object_fit(ObjectFit::Contain),
+                    self.viewable(
+                        SharedString::from(format!("msg-img-{sid}-{index}-{k}")),
+                        sid,
+                        lightbox::Pick::Message(index, k),
+                        img(std::path::PathBuf::from(path))
+                            .w(px(w))
+                            .h(px(h))
+                            .object_fit(if dims.is_some() {
+                                ObjectFit::Cover
+                            } else {
+                                ObjectFit::Contain
+                            }),
+                        cx,
+                    )
+                    .w(px(w))
+                    .h(px(h))
+                    .rounded_lg()
+                    .overflow_hidden(),
                 );
             }
             let group = SharedString::from(format!("user-msg-{sid}-{index}"));
+            let origin =
+                message.thread_origin(|name| self.state.automations.iter().any(|a| a.name == name));
             return fade(
                 shell::reveal_group(div().id(("message", index)), group.clone())
                     .group("user-msg")
@@ -5206,7 +5387,16 @@ impl RunoApp {
                                     group.clone(),
                                 ))
                             })
-                            .child(if message.playbook.is_empty() {
+                            .child(if let Some(thread) = origin {
+                                let said = crew::parse_wake(&message.text)
+                                    .map_or(message.text.as_str(), |(_, said)| said);
+                                let body = if self.open_wakes.contains(&(sid, index)) {
+                                    Some(markdown(said, cx).into_any_element())
+                                } else {
+                                    None
+                                };
+                                self.thread_message(index, thread, said, body, cx)
+                            } else if message.playbook.is_empty() {
                                 div()
                                     .max_w(px(560.))
                                     .px(px(14.))
@@ -5216,7 +5406,7 @@ impl RunoApp {
                                     .text_size(px(13.5))
                                     .text_color(rgb(c_text()))
                                     .whitespace_normal()
-                                    .child(markdown(message.text.clone()))
+                                    .child(markdown(&message.text, cx))
                                     .into_any_element()
                             } else {
                                 self.playbook_message(index, message, cx)
@@ -5285,12 +5475,7 @@ impl RunoApp {
                             .pt(px(2.))
                             .child(icon(IconName::TriangleAlert, 14., c_red())),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(markdown(message.text.clone())),
-                    ),
+                    .child(div().flex_1().min_w_0().child(markdown(&message.text, cx))),
             )
             .into_any_element();
         }
@@ -5369,7 +5554,7 @@ impl RunoApp {
                             .whitespace_normal()
                             .text_size(px(13.5))
                             .text_color(rgb(c_text()))
-                            .child(markdown(message.text.clone())),
+                            .child(markdown(&message.text, cx)),
                     )
                 })
                 .when(!message.plan.is_empty(), |el| {
@@ -5440,7 +5625,10 @@ impl RunoApp {
                                 el.child("·").child(message.meta.clone())
                             })
                             .when(!message.usage.is_empty(), |el| {
-                                el.child("·").child(usage_label(&message.usage))
+                                let known = self
+                                    .current()
+                                    .map_or(0, |s| store::known_window(&s.messages));
+                                el.child("·").child(usage_label(&message.usage, known))
                             })
                             .when(!live, |el| {
                                 let sid = self.selected.unwrap_or(0);
@@ -5616,7 +5804,8 @@ impl RunoApp {
         let provider = agent::provider(&session.provider);
         let working = self.handles.contains_key(&Target::Session(session.id));
         let id = session.id;
-        let list = self.chat_list(session, working, false, cx);
+        self.chat_shown[0].set(Some(id));
+        let list = self.part(panes::Part::Chat, StyleRefinement::default().size_full());
         let header = self.session_header(session, working, cx);
         // Chat and CLI are two views of one conversation; the swap crossfades.
         let cli = session.cli;
@@ -5629,14 +5818,24 @@ impl RunoApp {
                 .v_flex()
                 .child(
                     div()
-                        .id("chat")
+                        .relative()
                         .flex_1()
                         .min_h_0()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.chat_scroll)
-                        .child(list),
+                        .v_flex()
+                        .child(
+                            div()
+                                .id("chat")
+                                .flex_1()
+                                .min_h_0()
+                                .on_scroll_wheel(cx.listener(
+                                    |this, e: &ScrollWheelEvent, window, _| {
+                                        this.chat_wheel(e, window)
+                                    },
+                                ))
+                                .child(list),
+                        )
+                        .children(self.new_messages_pill(session, cx)),
                 )
-                .children(self.crew_route_bar(session, cx))
                 .child(self.composer(provider, working, cx))
                 .into_any_element()
         };
@@ -5657,135 +5856,180 @@ impl RunoApp {
             .into_any_element()
     }
 
-    /// A session's conversation, top to bottom, ending with what the agent is doing while
-    /// it works. `compact` is the narrower spacing of the panel floating over a canvas.
-    fn chat_list(
-        &self,
-        session: &Session,
-        working: bool,
-        compact: bool,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let id = session.id;
-        let provider = agent::provider(&session.provider);
-        let last_agent = session.messages.iter().rposition(|m| m.role == Role::Agent);
-        let mut list = div()
-            .w_full()
-            .when_some(cx.global::<AppSettings>().content_max_width(), |el, w| {
-                el.max_w(px(w))
-            })
-            .mx_auto()
-            .v_flex()
-            .gap_6()
-            .when(compact, |el| el.px_4().pt_4().pb_4())
-            .when(!compact, |el| el.px_8().pt_6().pb_8());
-        if session.race != 0 {
-            list = list.child(self.race_strip(session, cx));
-        }
-        if let Some(card) = self.kept_card(id, cx) {
-            list = list.child(card);
-        }
-        if let Some(first) = session.messages.first().filter(|m| !m.time.is_empty()) {
-            list = list.child(
-                div()
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .text_xs()
-                    .text_color(rgb(c_muted()))
-                    .text_size(px(11.5))
-                    .child(format!("Started {}", first.time)),
-            );
-        }
-        if let Some(strip) = self.thread_strip(session, false, cx) {
-            list = list.child(strip);
-        }
-        // Crew's news rows in a row sit close together, as one list.
-        let mut news: Vec<AnyElement> = Vec::new();
-        let close = |news: &mut Vec<AnyElement>| {
-            (!news.is_empty()).then(|| div().v_flex().gap(px(2.)).children(news.drain(..)))
+    /// The status bar along the window's foot: what just happened, the agents running,
+    /// usage and cost, the branch, and where agents run.
+    fn status_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.log_notice();
+        let (status, status_color, status_icon) = if let Some(notice) = &self.notice {
+            (notice.clone(), c_red(), Some(IconName::CircleAlert))
+        } else if let Some((info, _)) = &self.info {
+            (info.clone(), c_blue(), Some(IconName::Check))
+        } else {
+            (String::new(), c_muted(), None)
         };
-        for (i, message) in session.messages.iter().enumerate() {
-            if self.crew_card_hidden(session, i, cx) {
-                continue;
-            }
-            if let Some(card) = self.crew_card(session.id, i, message, cx) {
-                if matches!(message.crew, Some(crew::Card::News { .. })) {
-                    news.push(card);
-                } else {
-                    list = list.children(close(&mut news)).child(card);
-                }
-                continue;
-            }
-            list = list.children(close(&mut news));
-            let show = Some(i) == last_agent && !self.turn_changes(message).is_empty();
-            list = list.child(
+        let running = self.turns.len();
+        let (where_name, where_color, _) = self.runs_on();
+        let summary = match self.state.sessions.len() {
+            0 => String::new(),
+            n => format!("{n} session{}", if n == 1 { "" } else { "s" }),
+        };
+        div()
+            .id("status")
+            .w_full()
+            .h(px(24.))
+            .flex_none()
+            .px_3()
+            .flex()
+            .items_center()
+            .justify_between()
+            .bg(settings::frame())
+            .relative()
+            .children(pattern::chrome())
+            .text_size(px(11.5))
+            .gap_4()
+            .child(fade(
                 div()
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        self.on_context(ctxmenu::CtxTarget::Message(i), cx),
-                    )
-                    .child(self.message_view(
-                        i,
-                        message,
-                        handoff::provider_at(session, i),
-                        show,
-                        working && Some(i) == last_agent,
-                        cx,
-                    )),
-            );
-        }
-        list = list.children(close(&mut news));
-        if let Some(task) = self.pending_start.get(&session.id) {
-            list = list.child(
-                div()
-                    .p_4()
-                    .v_flex()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
                     .gap_2()
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(divider())
-                    .bg(tint(c_subtle()))
+                    .text_color(rgb(status_color))
+                    .when_some(status_icon, |el, i| el.child(icon(i, 12., status_color)))
+                    .child(div().truncate().child(status.clone()))
+                    .when(self.notice.is_some(), |el| {
+                        el.child(
+                            div()
+                                .id("dismiss-notice")
+                                .px_1()
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .hover(|el| el.bg(tint(c_subtle())))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.notice = None;
+                                    cx.notify();
+                                }))
+                                .child(icon(IconName::X, 11., c_muted())),
+                        )
+                    }),
+                SharedString::from(format!("status-{status}")),
+                300,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_3()
+                    .text_color(rgb(c_muted()))
+                    .children(self.usage_status(cx))
+                    .when(running > 0, |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(5.))
+                                .text_color(rgb(c_secondary()))
+                                .child(self.status_dot(Status::Working, "sb-run", 6.))
+                                .child(format!("{running} running")),
+                        )
+                    })
+                    .when_some(
+                        self.current()
+                            .filter(|_| self.view == View::Session)
+                            .map(|s| s.branch.clone())
+                            .filter(|b| !b.is_empty()),
+                        |el, branch| {
+                            el.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(icon(IconName::GitBranch, 11., c_muted()))
+                                    .child(branch),
+                            )
+                        },
+                    )
+                    .when_some(
+                        self.current()
+                            .filter(|_| self.view == View::Session)
+                            .and_then(|s| {
+                                s.messages
+                                    .iter()
+                                    .rev()
+                                    .find(|m| !m.usage.is_empty())
+                                    .map(|m| {
+                                        let mut u = m.usage;
+                                        u.window = u.window_or(store::known_window(&s.messages));
+                                        u
+                                    })
+                                    .map(|u| {
+                                        let cost: f64 =
+                                            s.messages.iter().map(|m| m.usage.cost_cents).sum();
+                                        let reports = agent::reports_cost(&s.provider);
+                                        let about = agent::cost_limit_note(&s.provider)
+                                            .unwrap_or_else(|| {
+                                                format!("session cost ${:.2}", cost / 100.0)
+                                            });
+                                        (u, cost, reports, about)
+                                    })
+                            }),
+                        |el, (usage, cost, reports, about)| {
+                            let window = usage.window;
+                            let pct = (usage.context() as f32 / window as f32).min(1.0);
+                            el.child(
+                                div()
+                                    .id("ctx-meter")
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .tooltip(move |window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(format!(
+                                            "Context used by the latest turn · {about}"
+                                        ))
+                                        .build(window, cx)
+                                    })
+                                    .child(
+                                        div()
+                                            .w(px(48.))
+                                            .h(px(4.))
+                                            .rounded_full()
+                                            .bg(tint(c_active()))
+                                            .child(
+                                                div().h_full().rounded_full().w(px(48. * pct)).bg(
+                                                    rgb(if pct > 0.8 {
+                                                        c_amber()
+                                                    } else {
+                                                        c_secondary()
+                                                    }),
+                                                ),
+                                            ),
+                                    )
+                                    .child(format!("{:.0}%", pct * 100.))
+                                    .when(cost > 0.0, |el| {
+                                        el.child(format!("· ${:.2}", cost / 100.0))
+                                    })
+                                    .when(!reports, |el| el.child("· no cost reported")),
+                            )
+                        },
+                    )
+                    .when(!summary.is_empty(), |el| el.child(summary))
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(icon(IconName::Loader, 14., c_blue()))
-                            .child("Preparing the worktree"),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(c_secondary()))
-                            .child(format!(
-                                "The setup command is running in the Setup terminal tab, where you can answer what it asks. {} starts on “{}” when it finishes.",
-                                provider.name,
-                                task.lines().next().unwrap_or_default()
-                            )),
+                            .gap(px(5.))
+                            .child(div().size(px(6.)).rounded_full().bg(rgb(where_color)))
+                            .child(where_name),
                     ),
-            );
-        }
-        // While the agent works, the chat ends with what it is doing and for how long.
-        if working && !self.pending_start.contains_key(&id) {
-            let since = self
-                .turns
-                .get(&id)
-                .map(|t| &t.started)
-                .map(|start| elapsed(start.elapsed()));
-            list = list.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .text_size(px(13.))
-                    .child(working_indicator(since))
-                    .child(self.arcade_chip(cx)),
-            );
-        }
-        list
+            )
+            .into_any_element()
+    }
+
+    /// The "Worked" row for a session whose turn just ended, while it shows.
+    fn finished_row(&self, id: u64) -> Option<AnyElement> {
+        let (at, took) = self.finished.get(&id)?;
+        working::finished(*at, *took)
     }
 
     fn menu_button(
@@ -6228,6 +6472,7 @@ impl RunoApp {
             .pb_3()
             .v_flex()
             .gap(px(6.))
+            .children(self.crew_route_bar(session, cx))
             .children(self.composer_extras(cx))
             .child(
                 div()
@@ -6916,7 +7161,7 @@ impl RunoApp {
         let project = self
             .new_project
             .and_then(|id| self.state.projects.iter().find(|p| p.id == id));
-        let is_git = project.is_some_and(|p| git::is_repo(&p.path));
+        let is_git = project.is_some_and(|p| checks::is_repo(&p.path));
         let racing = self.racing() && is_git;
         let isolated = (self.new_isolated || racing) && is_git;
         let typed = git::sanitize_branch(&self.branch.read(cx).value());
@@ -7534,43 +7779,6 @@ impl RunoApp {
             })
     }
 
-    /// The selected file's diff, or every changed file one after another.
-    fn diff_view(&self, cx: &mut Context<Self>) -> Div {
-        if !self.diff_all {
-            let path = self.selected_file.clone().unwrap_or_default();
-            return self.diff_lines(&path, &self.diff, cx);
-        }
-        let mut col = div().v_flex();
-        for (path, diff) in &self.all_diffs {
-            let id = path.clone();
-            col = col
-                .child(
-                    div()
-                        .id(SharedString::from(format!("all-{path}")))
-                        .h(px(28.))
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .border_y_1()
-                        .border_color(divider())
-                        .bg(inset(c_sidebar()))
-                        .cursor_pointer()
-                        .text_size(px(12.))
-                        .font_family(self.mono_font.clone())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.diff_all = false;
-                            this.open_change(&id);
-                            cx.notify();
-                        }))
-                        .child(icon(IconName::File, 12., c_muted()))
-                        .child(path.clone()),
-                )
-                .child(self.diff_lines(path, diff, cx));
-        }
-        col
-    }
-
     fn diff_toggle(
         &self,
         id: &'static str,
@@ -7589,253 +7797,44 @@ impl RunoApp {
             }))
     }
 
-    fn load_diff(&self, dir: &str, path: &str) -> String {
-        git::file_diff_context(dir, path, self.diff_whole, &self.diff_against)
-    }
-
-    /// Re-read the diff after a view option changed.
+    /// Re-read the diff after a view option changed, off the UI thread: with every file
+    /// shown that is a few git commands per changed file.
     fn reload_diff(&mut self) {
         let Some(dir) = self.current().map(|s| s.dir.clone()) else {
             return;
         };
         if let Some(path) = self.selected_file.clone() {
-            self.diff = self.load_diff(&dir, &path);
+            self.load_diff_bg(dir.clone(), path);
         }
-        self.all_diffs = if self.diff_all {
-            self.changes
-                .iter()
-                .map(|c| (c.path.clone(), self.load_diff(&dir, &c.path)))
-                .collect()
-        } else {
-            Vec::new()
-        };
-    }
-
-    fn diff_lines(&self, path: &str, diff: &str, cx: &mut Context<Self>) -> Div {
-        use git::LineKind;
-        let path = path.to_string();
-        let notes: Vec<(usize, Note)> = self
-            .current()
-            .map(|s| {
-                s.notes
-                    .iter()
-                    .cloned()
-                    .enumerate()
-                    .filter(|(_, n)| n.path == path)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut col = div()
-            .v_flex()
-            .py_1()
-            .font_family(self.mono_font.clone())
-            .text_xs();
-        let rows = git::diff_rows(diff);
-        let hidden = collapsible_runs(&rows);
-        let mut skip_to = 0;
-        // Element ids must stay unique when several files are shown together.
-        let base = self
-            .changes
-            .iter()
-            .position(|c| c.path == path)
-            .unwrap_or(0)
-            * 100_000;
-        const MAX_ROWS: usize = 4000;
-        let more = rows.len().saturating_sub(MAX_ROWS);
-        for (local, row) in rows.into_iter().enumerate().take(MAX_ROWS) {
-            let i = base + local;
-            if local < skip_to {
-                continue;
-            }
-            if let Some(&(start, end)) = hidden.iter().find(|(s, _)| *s == local) {
-                let key = (path.clone(), start);
-                if !self.diff_expanded.contains(&key) {
-                    skip_to = end;
-                    col = col.child(
-                        div()
-                            .id(("dl-fold", i))
-                            .h(px(22.))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .cursor_pointer()
-                            .bg(tint(c_subtle()))
-                            .text_color(rgb(c_muted()))
-                            .hover(|el| el.text_color(rgb(c_text())))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.diff_expanded.insert(key.clone());
-                                cx.notify();
-                            }))
-                            .child(icon(IconName::ChevronsUpDown, 12., c_muted()))
-                            .child(format!("{} unchanged lines", end - start)),
-                    );
-                    continue;
-                }
-            }
-            if row.kind == LineKind::Hunk {
-                col = col.child(
-                    div()
-                        .id(("dl", i))
-                        .mt_1()
-                        .px_3()
-                        .py(px(3.))
-                        .text_color(rgb(c_blue()))
-                        .bg(tint(c_selected()))
-                        .whitespace_nowrap()
-                        .child(row.text),
-                );
-                continue;
-            }
-            let (bg, mark, color) = match row.kind {
-                LineKind::Added => (Some(c_add()), "+", c_add()),
-                LineKind::Removed => (Some(c_del()), "−", c_del()),
-                LineKind::Note => (None, "", c_muted()),
-                _ => (None, " ", c_text()),
-            };
-            let line = row.number.unwrap_or(0);
-            let can_note = row.kind != LineKind::Note && row.number.is_some();
-            let code = format!("{mark}{}", row.text);
-            let target = (path.clone(), line, code);
-            let writing = self.note_at.as_ref() == Some(&target);
-            col = col.child(
-                div()
-                    .id(("dl", i))
-                    .group("diff-line")
-                    .flex()
-                    .min_h(px(19.))
-                    .when_some(bg, |el, bg| el.bg(diff_fill(bg)))
-                    .when(can_note, |el| {
-                        el.cursor_pointer()
-                            .hover(|el| el.bg(tint(c_selected())))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.note_at = Some(target.clone());
-                                this.note_input
-                                    .update(cx, |input, cx| input.focus(window, cx));
-                                cx.notify();
-                            }))
+        if !self.diff_all {
+            self.all_diffs = Vec::new();
+            return;
+        }
+        let paths: Vec<String> = self.changes.iter().map(|c| c.path.clone()).collect();
+        let whole = self.diff_whole;
+        let against = self.diff_against.clone();
+        let (d, a) = (dir.clone(), against.clone());
+        self.bg(
+            move || {
+                paths
+                    .into_iter()
+                    .map(|p| {
+                        let diff = git::file_diff_context(&d, &p, whole, &a);
+                        (p, diff)
                     })
-                    .child(
-                        div()
-                            .w(px(44.))
-                            .flex_none()
-                            .px_2()
-                            .text_right()
-                            .text_color(rgb(c_muted()))
-                            .child(row.number.map(|n| n.to_string()).unwrap_or_default()),
-                    )
-                    .child(
-                        div()
-                            .w(px(14.))
-                            .flex_none()
-                            .text_color(rgb(color))
-                            .child(mark),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .when(!self.diff_wrap, |el| el.whitespace_nowrap())
-                            .when(self.diff_wrap, |el| el.whitespace_normal())
-                            .text_color(rgb(color))
-                            .when(row.kind == LineKind::Note, |el| el.italic())
-                            .child(row.text),
-                    )
-                    .when(can_note, |el| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .px_2()
-                                .opacity(0.)
-                                .group_hover("diff-line", |el| el.opacity(1.))
-                                .child(icon(IconName::MessageSquarePlus, 12., c_blue())),
-                        )
-                    }),
-            );
-            for (index, note) in notes
-                .iter()
-                .filter(|(_, n)| n.line == line && can_note && n.code.starts_with(mark))
-            {
-                let index = *index;
-                col = col.child(
-                    div()
-                        .mx_2()
-                        .my_1()
-                        .ml(px(58.))
-                        .px_3()
-                        .py_2()
-                        .flex()
-                        .items_start()
-                        .gap_2()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(divider())
-                        .bg(rgb(c_canvas()))
-                        .font_family(cx.theme().font_family.clone())
-                        .child(icon(IconName::MessageSquareText, 13., c_blue()))
-                        .child(div().flex_1().text_xs().child(note.text.clone()))
-                        .child(
-                            div()
-                                .id(("note-x", index))
-                                .rounded_sm()
-                                .cursor_pointer()
-                                .hover(|el| el.bg(tint(c_subtle())))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.remove_note(index);
-                                    cx.notify();
-                                }))
-                                .child(icon(IconName::X, 12., c_muted())),
-                        ),
-                );
-            }
-            if writing {
-                col = col.child(
-                    div()
-                        .ml(px(58.))
-                        .mr_2()
-                        .my_1()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .font_family(cx.theme().font_family.clone())
-                        .child(
-                            div()
-                                .flex_1()
-                                .child(Input::new(&self.note_input).bordered(true).h(px(30.))),
-                        )
-                        .child(
-                            div()
-                                .id("note-cancel")
-                                .px_2()
-                                .py_1()
-                                .rounded_md()
-                                .text_xs()
-                                .cursor_pointer()
-                                .text_color(rgb(c_secondary()))
-                                .hover(|el| el.bg(tint(c_subtle())))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.note_at = None;
-                                    cx.notify();
-                                }))
-                                .child("Cancel"),
-                        ),
-                );
-            }
-        }
-        if more > 0 {
-            col = col.child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_color(rgb(c_muted()))
-                    .italic()
-                    .child(format!(
-                        "{more} more line{} not shown. Open the file to see all of it.",
-                        if more == 1 { "" } else { "s" }
-                    )),
-            );
-        }
-        col
+                    .collect::<Vec<_>>()
+            },
+            move |this, diffs, cx| {
+                if this.diff_all
+                    && this.diff_whole == whole
+                    && this.diff_against == against
+                    && this.current().is_some_and(|s| s.dir == dir)
+                {
+                    this.all_diffs = diffs;
+                    cx.notify();
+                }
+            },
+        );
     }
 
     fn changes_tab(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -7890,9 +7889,8 @@ impl RunoApp {
                     .when(selected, |el| el.bg(tint(c_active())))
                     .when(!selected, |el| el.hover(|el| el.bg(tint(c_subtle()))))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(dir) = this.current().map(|s| s.dir.clone()) {
-                            this.diff = this.load_diff(&dir, &path);
-                            this.selected_file = Some(path.clone());
+                        if this.current().is_some() {
+                            this.open_change(&path);
                         }
                         cx.notify();
                     }))
@@ -8302,8 +8300,9 @@ impl RunoApp {
                             div()
                                 .flex_1()
                                 .min_h_0()
-                                .overflow_y_scrollbar()
-                                .child(self.diff_view(cx)),
+                                .relative()
+                                .child(self.diff_view(cx))
+                                .vertical_scrollbar(&self.diff_list),
                             SharedString::from(format!(
                                 "diff-{}-{}",
                                 self.selected.unwrap_or(0),
@@ -8433,13 +8432,7 @@ impl RunoApp {
                 {
                     self.term_scroll.scroll_to_bottom();
                 }
-                let text: Vec<&str> = self.terminal[&id]
-                    .iter()
-                    .rev()
-                    .take(300)
-                    .rev()
-                    .map(String::as_str)
-                    .collect();
+                let text = self.output_text(id);
                 fade(
                     div()
                         .flex_1()
@@ -8460,10 +8453,7 @@ impl RunoApp {
                                         .child(
                                             TextView::markdown(
                                                 SharedString::from(format!("term-{id}")),
-                                                format!(
-                                                    "```text\n{}\n```",
-                                                    text.join("\n").replace("```", "'''")
-                                                ),
+                                                text,
                                             )
                                             .selectable(true),
                                         ),
@@ -8477,9 +8467,8 @@ impl RunoApp {
             }
             None => self.terminal_empty(cx),
         };
-        let panel = div()
-            .h(px(self.term_height()))
-            .flex_none()
+        div()
+            .size_full()
             .relative()
             .child(tour::anchor(&self.anchors, "terminal"))
             .v_flex()
@@ -8655,25 +8644,56 @@ impl RunoApp {
                             cx.notify();
                         }),
                     ),
-            );
-        // Expand and shrink ease between the two heights.
+            )
+    }
+
+    /// The last 300 lines of what Runo printed for session `id`, as the Markdown the
+    /// Output tab shows, made again only when a line comes.
+    fn output_text(&self, id: u64) -> SharedString {
+        let lines = self
+            .terminal
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let key = (id, lines.len(), chat_list::hash(lines.last()));
+        let mut kept = self.output_md.borrow_mut();
+        if let Some((_, text)) = kept.as_ref().filter(|(k, _)| *k == key) {
+            return text.clone();
+        }
+        let text: Vec<&str> = lines
+            .iter()
+            .rev()
+            .take(300)
+            .rev()
+            .map(String::as_str)
+            .collect();
+        let text = SharedString::from(format!(
+            "```text\n{}\n```",
+            text.join("\n").replace("```", "'''")
+        ));
+        *kept = Some((key, text.clone()));
+        text
+    }
+
+    /// `el` at the terminal panel's height, easing between the two heights as it expands
+    /// or shrinks.
+    fn term_sized(&self, el: Div) -> AnyElement {
+        let el = el.h(px(self.term_height()));
         match self.panel_motion("term") {
             Some((tall, at)) => {
                 let (from, to) = (self.term_from, self.term_h);
-                panel
-                    .animated(
-                        SharedString::from(format!("term-size-{tall}-{at:?}")),
-                        Animation::new(Duration::from_millis(PANEL_MS))
-                            .with_easing(ease_in_out_cubic),
-                        move |el, d| el.h(px(from + (to - from) * d)),
-                    )
-                    .into_any_element()
+                el.animated(
+                    SharedString::from(format!("term-size-{tall}-{at:?}")),
+                    Animation::new(Duration::from_millis(PANEL_MS)).with_easing(ease_in_out_cubic),
+                    move |el, d| el.h(px(from + (to - from) * d)),
+                )
+                .into_any_element()
             }
-            None => panel.into_any_element(),
+            None => el.into_any_element(),
         }
     }
 
-    fn right_pane(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn right_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // Switching tabs shows the other tab at once; keyed so each keeps its own state.
         let body = div()
             .id(SharedString::from(format!(
@@ -8749,7 +8769,8 @@ impl RunoApp {
                             .flex_1()
                             .min_h_0(),
                     )
-                    .child(self.terminal_panel(window, cx)),
+                    // Room for the terminal, drawn over it as a pane of its own.
+                    .child(self.term_sized(div().flex_none())),
             )
             .child(
                 // Drag the gutter to make the panel narrower or wider.
@@ -8806,11 +8827,51 @@ impl RunoApp {
     }
 }
 
+/// The settings the window's frame reads.
+struct FrameSettings {
+    theme: String,
+    font: String,
+    send_on_enter: bool,
+    browser_enabled: bool,
+}
+
 impl Render for RunoApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        framestats::begin();
+        let ticker = self.panes(cx).ticker.clone();
+        motion::begin(self.window_active, ticker.entity_id(), cx);
+        static FIRST: std::sync::Once = std::sync::Once::new();
+        FIRST.call_once(|| {
+            if bench::on() {
+                self.bench_start(window, cx);
+            }
+            startup::mark("first render");
+            window.on_next_frame(|_, cx| {
+                startup::mark("first frame painted");
+                cx.spawn(async |cx| {
+                    startup::mark("responsive");
+                    if startup::exit_when_ready() {
+                        cx.update(|cx| cx.quit());
+                    }
+                })
+                .detach();
+            });
+        });
         self.prepare_playbook_run(window, cx);
         self.prepare_playbook_editor(window, cx);
-        let st = cx.global::<AppSettings>().clone();
+        // The Browser tab's live page: frames at display rate only while it is on screen.
+        self.ensure_browser_pump(cx);
+        self.update_chat_follow();
+        // Only what this frame needs, rather than a copy of every setting each frame.
+        let st = {
+            let s = cx.global::<AppSettings>();
+            FrameSettings {
+                theme: s.theme.clone(),
+                font: s.font.clone(),
+                send_on_enter: s.send_on_enter,
+                browser_enabled: s.browser_enabled,
+            }
+        };
         // Opening or leaving Settings swaps the whole window, so it happens without motion.
         let in_settings = self.view == View::Settings;
         let settings_snap = in_settings != self.was_settings;
@@ -8841,16 +8902,16 @@ impl Render for RunoApp {
         if window.focused(cx).is_none() {
             window.focus(&self.focus, cx);
         }
-        if let Some(path) = self.pending_file.take() {
+        if let Some(path) = self.file.pending.take() {
             self.open_or_ask(&path, window, cx);
         }
         self.home_focus(window, cx);
         self.restore_open_file(window, cx);
         if !st.browser_enabled {
-            self.browser_open = false;
-            self.browser_main = false;
+            self.browser.open = false;
+            self.browser.main = false;
         }
-        if self.browser_main {
+        if self.browser.main {
             self.sync_browser_address(window, cx);
         }
         // Design and Architecture follow the project in the top bar.
@@ -9001,7 +9062,7 @@ impl Render for RunoApp {
             View::Architecture => self.architecture_view(cx),
             View::Data => self.data_view(cx),
             // The Browser tab takes the work area while it is the tab shown.
-            View::Session if self.browser_main && self.current().is_some() => div()
+            View::Session if self.browser.main && self.current().is_some() => div()
                 .flex_1()
                 .min_w_0()
                 .h_full()
@@ -9013,6 +9074,7 @@ impl Render for RunoApp {
             View::AllSessions => self.list_view(View::AllSessions, cx),
             View::History => self.history_view(cx),
             View::Worktrees => self.list_view(View::Worktrees, cx),
+            View::WorktreeSpace => self.worktree_space_view(cx),
             View::Settings => self.settings_view(window, cx),
             View::Notes => self.notes_view(cx),
             View::Activity => self.activity_view(cx),
@@ -9065,7 +9127,7 @@ impl Render for RunoApp {
             show_left,
             self.sidebar_width,
             true,
-            || self.sidebar(cx).into_any_element(),
+            || self.part(panes::Part::Sidebar, StyleRefinement::default().size_full()),
         )
         .map(|el| page_fade(el, "sidebar-page"));
         let right = panel_slide(
@@ -9074,7 +9136,28 @@ impl Render for RunoApp {
             show_right,
             self.panel_width,
             false,
-            || self.right_pane(window, cx).into_any_element(),
+            || {
+                // The terminal is a pane of its own over the side panel's foot, which leaves
+                // room for it, so a shell's output draws only the terminal.
+                div()
+                    .size_full()
+                    .relative()
+                    .child(self.part(panes::Part::Right, StyleRefinement::default().size_full()))
+                    .child(
+                        self.term_sized(
+                            div()
+                                .absolute()
+                                .left(px(shell::GUTTER))
+                                .right_0()
+                                .bottom_0()
+                                .child(self.part(
+                                    panes::Part::Terminal,
+                                    StyleRefinement::default().size_full(),
+                                )),
+                        ),
+                    )
+                    .into_any_element()
+            },
         )
         .map(|el| page_fade(el, "right-page"));
         if self
@@ -9091,20 +9174,6 @@ impl Render for RunoApp {
         {
             self.git_toast = None;
         }
-        self.log_notice();
-        let (status, status_color, status_icon) = if let Some(notice) = &self.notice {
-            (notice.clone(), c_red(), Some(IconName::CircleAlert))
-        } else if let Some((info, _)) = &self.info {
-            (info.clone(), c_blue(), Some(IconName::Check))
-        } else {
-            (String::new(), c_muted(), None)
-        };
-        let running = self.turns.len();
-        let (where_name, where_color, _) = self.runs_on();
-        let summary = match self.state.sessions.len() {
-            0 => String::new(),
-            n => format!("{n} session{}", if n == 1 { "" } else { "s" }),
-        };
         let palette = self
             .palette
             .clone()
@@ -9241,6 +9310,9 @@ impl Render for RunoApp {
                 this.open_settings();
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
+                this.show_update_check(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &StopAgent, _, cx| {
                 this.stop();
                 cx.notify();
@@ -9308,7 +9380,9 @@ impl Render for RunoApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
-                if this.tour.is_some() {
+                if this.lightbox.is_some() {
+                    this.close_lightbox(window, cx);
+                } else if this.tour.is_some() {
                     this.end_tour(cx);
                 } else if this.arcade_open {
                     this.close_arcade(window, cx);
@@ -9463,13 +9537,25 @@ impl Render for RunoApp {
             .font_family(cx.theme().font_family.clone())
             .children(pattern::backdrop())
             .children(pattern::under())
-            .child(self.top_bar(cx))
+            .child(ticker)
+            .child(self.part(
+                panes::Part::TopBar,
+                StyleRefinement::default().w_full().h(px(44.)).flex_none(),
+            ))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(self.mode_rail(cx))
+                    .child(
+                        self.part(
+                            panes::Part::Rail,
+                            StyleRefinement::default()
+                                .w(px(shell::RAIL_WIDTH))
+                                .h_full()
+                                .flex_none(),
+                        ),
+                    )
                     .child(
                         // Everything beside the rail sits on the frame as islands, with a
                         // gutter of the frame's grey along the right and bottom.
@@ -9490,167 +9576,15 @@ impl Render for RunoApp {
                             .child(shell::gutter().h(px(shell::GUTTER)).w_full()),
                     ),
             )
-            .child(
-                div()
-                    .id("status")
-                    .h(px(24.))
-                    .flex_none()
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .bg(settings::frame())
-                    .relative()
-                    .children(pattern::chrome())
-                    .text_size(px(11.5))
-                    .gap_4()
-                    .child(fade(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .min_w_0()
-                            .items_center()
-                            .gap_2()
-                            .text_color(rgb(status_color))
-                            .when_some(status_icon, |el, i| el.child(icon(i, 12., status_color)))
-                            .child(div().truncate().child(status.clone()))
-                            .when(self.notice.is_some(), |el| {
-                                el.child(
-                                    div()
-                                        .id("dismiss-notice")
-                                        .px_1()
-                                        .rounded_sm()
-                                        .cursor_pointer()
-                                        .hover(|el| el.bg(tint(c_subtle())))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.notice = None;
-                                            cx.notify();
-                                        }))
-                                        .child(icon(IconName::X, 11., c_muted())),
-                                )
-                            }),
-                        SharedString::from(format!("status-{status}")),
-                        300,
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap_3()
-                            .text_color(rgb(c_muted()))
-                            .children(self.usage_status(cx))
-                            .when(running > 0, |el| {
-                                el.child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(5.))
-                                        .text_color(rgb(c_secondary()))
-                                        .child(self.status_dot(Status::Working, "sb-run", 6.))
-                                        .child(format!("{running} running")),
-                                )
-                            })
-                            .when_some(
-                                self.current()
-                                    .filter(|_| self.view == View::Session)
-                                    .map(|s| s.branch.clone())
-                                    .filter(|b| !b.is_empty()),
-                                |el, branch| {
-                                    el.child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .child(icon(IconName::GitBranch, 11., c_muted()))
-                                            .child(branch),
-                                    )
-                                },
-                            )
-                            .when_some(
-                                self.current()
-                                    .filter(|_| self.view == View::Session)
-                                    .and_then(|s| {
-                                        s.messages
-                                            .iter()
-                                            .rev()
-                                            .find(|m| !m.usage.is_empty())
-                                            .map(|m| m.usage)
-                                            .map(|u| {
-                                                let cost: f64 = s
-                                                    .messages
-                                                    .iter()
-                                                    .map(|m| m.usage.cost_cents)
-                                                    .sum();
-                                                let reports = agent::reports_cost(&s.provider);
-                                                let about = agent::cost_limit_note(&s.provider)
-                                                    .unwrap_or_else(|| {
-                                                        format!("session cost ${:.2}", cost / 100.0)
-                                                    });
-                                                (u, cost, reports, about)
-                                            })
-                                    }),
-                                |el, (usage, cost, reports, about)| {
-                                    let window = if usage.window > 0 {
-                                        usage.window
-                                    } else {
-                                        200_000
-                                    };
-                                    let pct = (usage.context() as f32 / window as f32).min(1.0);
-                                    el.child(
-                                        div()
-                                            .id("ctx-meter")
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(6.))
-                                            .tooltip(move |window, cx| {
-                                                gpui_kit::component::tooltip::Tooltip::new(format!(
-                                                    "Context used by the latest turn · {about}"
-                                                ))
-                                                .build(window, cx)
-                                            })
-                                            .child(
-                                                div()
-                                                    .w(px(48.))
-                                                    .h(px(4.))
-                                                    .rounded_full()
-                                                    .bg(tint(c_active()))
-                                                    .child(
-                                                        div()
-                                                            .h_full()
-                                                            .rounded_full()
-                                                            .w(px(48. * pct))
-                                                            .bg(rgb(if pct > 0.8 {
-                                                                c_amber()
-                                                            } else {
-                                                                c_secondary()
-                                                            })),
-                                                    ),
-                                            )
-                                            .child(format!("{:.0}%", pct * 100.))
-                                            .when(cost > 0.0, |el| {
-                                                el.child(format!("· ${:.2}", cost / 100.0))
-                                            })
-                                            .when(!reports, |el| el.child("· no cost reported")),
-                                    )
-                                },
-                            )
-                            .when(!summary.is_empty(), |el| el.child(summary))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(5.))
-                                    .child(div().size(px(6.)).rounded_full().bg(rgb(where_color)))
-                                    .child(where_name),
-                            ),
-                    ),
-            )
+            .child(self.part(
+                panes::Part::Status,
+                StyleRefinement::default().w_full().h(px(24.)).flex_none(),
+            ))
             .when(self.view == View::NewSession, |el| {
                 el.child(self.new_session_modal(f32::from(window.viewport_size().height) - 96., cx))
             })
             .children(self.alerts_view(cx))
-            .children(self.assistant_view(cx))
+            .children(self.assistant_view(window, cx))
             .children(self.switch_modal(cx))
             .children(palette)
             .children(self.ctx_menu_view(cx))
@@ -9664,7 +9598,21 @@ impl Render for RunoApp {
             .children(self.arcade_view(cx))
             .children(self.tour_view(window, cx))
             .children(self.browser_offer(cx))
-            .children(self.whats_new_view(cx));
+            .children(self.whats_new_view(cx))
+            .children(self.lightbox_view(window, cx))
+            // Painted last, once everything that moves has asked for motion.
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    |_, _, window, cx| {
+                        motion::end(window, cx);
+                        framestats::painted();
+                    },
+                )
+                .absolute()
+                .size_0(),
+            );
+        framestats::rendered();
         fade(root, "app-root", 450)
     }
 }
@@ -9794,10 +9742,15 @@ const SIDEBAR_MAX: f32 = 400.;
 const PANEL_WIDTH: f32 = 460.;
 const PANEL_MIN: f32 = 320.;
 const PANEL_MAX: f32 = 900.;
+/// How long output from sessions not on screen may wait to be drawn.
+const BACKGROUND_WAIT: Duration = Duration::from_millis(250);
+/// How long the event loop waits after waking, so a batch of output is handled at once.
+const EVENT_BATCH: Duration = Duration::from_millis(50);
 /// Narrowest the chat gets when the right panel is dragged wider.
 const CHAT_MIN: f32 = 600.;
 
 fn main() {
+    startup::begin();
     // `runo --mcp-memory <folder> [--thread <id>]`: serve the memory tools to an agent,
     // without a window; a Crew thread also gets the tools it reports through.
     let args: Vec<String> = std::env::args().collect();
@@ -9805,9 +9758,17 @@ fn main() {
         let thread = (args.get(3).map(String::as_str) == Some("--thread"))
             .then(|| args.get(4).and_then(|id| id.parse().ok()))
             .flatten();
+        // The key that answers to its permission requests are signed with.
+        if let Some(i) = args.iter().position(|a| a == approvals::KEY_FILE_ARG) {
+            approvals::load_key_file(args.get(i + 1).map(String::as_str).unwrap_or(""));
+        }
         memory_mcp::serve(args.get(2).map(String::as_str).unwrap_or("."), thread);
         return;
     }
+    // Every other mode may start agents or answer them: give it this launch's approval
+    // key, and keep Runo's data folder private.
+    approvals::init_key();
+    store::tighten_data_dir();
     // `runo --agent-host runo-turn <turn folder> <agent> <args…>`: a live turn's agent,
     // detached from the window (see harness::host).
     if args.get(1).map(String::as_str) == Some("--agent-host") {
@@ -9849,12 +9810,16 @@ fn main() {
             connections::connection_shell(file)
         });
     }
-    // Before any thread starts: find agents and Node.js where the person's terminal would.
-    shellenv::init();
+    // Find agents and Node.js where the person's terminal would. The login shell answers
+    // on a thread while the window opens; whatever starts a program waits for it.
+    shellenv::start();
     applog::init();
     detach::enable(store::data_dir());
     harness::log::enable(store::data_dir());
+    // Before settings or sessions are read, and so before either is saved again.
+    store::keep_before_version_change(&store::data_dir(), env!("CARGO_PKG_VERSION"));
     let app = application().with_assets(assets::AllAssets);
+    startup::mark("gpui application");
     // Clicking the Dock icon with the window closed (macOS keeps Runo running) opens it again.
     app.on_reopen(|cx| {
         if cx.windows().is_empty() {
@@ -9862,20 +9827,29 @@ fn main() {
         }
     });
     app.run(|cx| {
+        startup::mark("app running");
         init(cx);
+        startup::mark("components");
         load_fonts(cx);
+        startup::mark("fonts");
         let settings = AppSettings::load();
         settings.apply();
+        startup::mark("settings");
         // Before any text is drawn: the renderer reads this once.
         set_font_smoothing(settings.font_smoothing);
         set_dock_icon();
+        startup::mark("dock icon");
         cx.set_global(settings);
         bind_keys(cx);
         cx.on_action(quit);
+        startup::mark("keys");
         desktop_notify::install(cx);
         menubar::install(cx);
+        startup::mark("notifications, menu bar");
         cx.set_menus(app_menus());
+        startup::mark("menus");
         open_main_window(cx);
+        startup::mark("window opened");
     });
 }
 
@@ -9916,6 +9890,7 @@ fn app_menus() -> Vec<Menu> {
     vec![
         Menu::new("Runo").items([
             MenuItem::action("Settings…", OpenSettings),
+            MenuItem::action("Check for Updates…", CheckForUpdates),
             MenuItem::action("Take the tour", ShowTour),
             MenuItem::separator(),
             MenuItem::action("Quit Runo", Quit),
@@ -9992,7 +9967,9 @@ fn open_main_window(cx: &mut App) {
         app_id: Some("runo".into()),
         ..Default::default()
     };
+    startup::mark("window options");
     let (handle, _) = open_window(options, cx, |window, cx| {
+        startup::mark("window created");
         cx.new(|cx| RunoApp::new(window, cx))
     })
     .expect("failed to open Runo window");

@@ -28,14 +28,14 @@ Their flags come from each vendor's documentation, checked on 2026-10-11. On 202
 | Droid | CLI view | `droid --resume <id>` opens the same session |
 | OpenCode | Chat with `run --format json` | Text from `{"type":"text","part":{"text":…}}` shows (this event shape is inferred from the source), `sessionID` is saved, and the next turn sends `-s <id>` |
 | OpenCode | CLI view | `opencode -s <id>` opens the same session |
-| Grok CLI | Chat | Not wired for resume yet: its docs don't say how to learn the session id. Context is still sent in the prompt. Check that it still works |
+| Grok (xAI's Grok Build) | Chat | Signed in with `grok login`: a first turn with `-s <uuid>`, a follow-up with `-r <uuid>`, tool steps and cost shown, and each permission level. A session from the old community Grok CLI starts a new conversation with its history in the prompt |
 | All of the above | Model, effort and permission chips | Each chip changes the run as expected |
 | Cursor | Model menu | Filled from `agent models`; check that the output format parses into ids and names |
-| Copilot, Gemini, Qwen, Amp, Droid, Grok | Model menu | Filled from the `--model` choices in each CLI's help, where the help lists them. Agents whose help lists none show only Default |
+| Copilot, Gemini, Qwen, Amp, Droid | Model menu | Filled from the `--model` choices in each CLI's help, where the help lists them. Agents whose help lists none show only Default. Grok's comes from `grok models` |
 | Claude Code on macOS (native and npm installs) | Model menu | "Default · <model>" plus versioned aliases and pinned versions; `/model` runs without creating a transcript |
 | All of the above | Switching agents mid-session (handoff dialog) | Cost shown, brief carried over, new agent continues the task |
 | All of the above | Memory server | Every agent but Grok gets it: by flag or environment for Claude Code, Codex, OpenCode, Qwen Code, Copilot and Amp, and through the project config file for Cursor, Gemini CLI and Droid. Check that each can call `read_memory`, and that Grok runs without it |
-| All of the above | Sign-in check, signed in and signed out | Settings → Providers says Signed in or how to sign in, New session marks a signed-out agent, and a turn on one shows the hint before it starts. Codex and Cursor ask their CLI; Claude Code reads the macOS keychain; Copilot, Amp, Droid, Qwen Code and Grok are judged by API keys only |
+| All of the above | Sign-in check, signed in and signed out | Settings → Providers says Signed in or how to sign in, New session marks a signed-out agent, and a turn on one shows the hint before it starts. Codex and Cursor ask their CLI; Claude Code reads the macOS keychain; Grok reads `~/.grok/auth.json` from `grok login`; Copilot, Amp, Droid and Qwen Code are judged by API keys only |
 | All but Claude Code and OpenCode | Spending limits | These report no cost: the session's context meter says so, and Settings and the top bar's spend say the limits don't count them |
 
 ## 2. CLI view (Chat ↔ CLI)
@@ -119,7 +119,7 @@ Tested in the cloud with a fake `npm` only: the confirm card, the "Installing…
 | Cursor (`curl https://cursor.com/install -fsS \| bash`) | The CLI is found even when the installer names it `agent` instead of `cursor-agent` |
 | Droid with and without npm, and on Windows | npm installs `droid`; without npm the Factory script runs |
 | OpenCode without npm on macOS and Linux | The `opencode.ai/install` script runs and `~/.opencode/bin/opencode` is found |
-| Grok CLI install script | Installs and is found. On Windows the card says to use WSL |
+| Grok Build install script (`curl -fsSL https://x.ai/cli/install.sh \| bash`) | Installs to `~/.grok/bin` and is found. On Windows the card says to use WSL |
 | Codex, Gemini, Copilot, Amp and Qwen through real npm | Each installs globally and is detected |
 | npm with a system prefix (EACCES) | The install card fails with a hint to run `npm config set prefix ~/.npm-global` |
 | Progress during a real install | An "Installing" card shows the bar and the installer's output, then "Installed" with the sign-in hint, and fades out |

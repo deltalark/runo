@@ -41,14 +41,25 @@ impl Parser {
     }
 
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
+        self.feed_parsed(line, parse_line(line))
+    }
+
+    /// `feed` for a line already parsed as JSON off the main thread (see `parse_line`).
+    pub fn feed_parsed(&mut self, line: &str, parsed: Option<Value>) -> Vec<AgentEvent> {
         match self {
-            Parser::Claude(p) => p.feed(line),
-            Parser::Json(p) => p.feed(line),
-            Parser::Acp(p) => p.feed(line),
-            Parser::Codex(p) => p.feed(line),
-            Parser::Pi(p) => p.feed(line),
+            Parser::Claude(p) => p.feed_parsed(line, parsed),
+            Parser::Json(p) => p.feed_parsed(line, parsed),
+            Parser::Acp(p) => p.feed_parsed(line, parsed),
+            Parser::Codex(p) => p.feed_parsed(line, parsed),
+            Parser::Pi(p) => p.feed_parsed(line, parsed),
         }
     }
+}
+
+/// A line of an agent's output as JSON, when it is JSON. Agents' reader threads call this,
+/// so the parsing is done before the line reaches the main thread.
+pub fn parse_line(line: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(line.trim()).ok()
 }
 
 /// The conversation id a JSON event names, under any of the keys the CLIs use.
@@ -73,6 +84,11 @@ pub struct ClaudeStream {
     usage: Usage,
     /// Whether the conversation id was already reported.
     named: bool,
+    /// Subagent calls started in the background: their tool result only says they started,
+    /// so they stay running until a `task_notification` says they ended.
+    background: Vec<String>,
+    /// Background tasks' ids and the calls that started them.
+    tasks: Vec<(String, String)>,
 }
 
 impl ClaudeStream {
@@ -83,12 +99,69 @@ impl ClaudeStream {
             any_text: false,
             usage: Usage::default(),
             named: false,
+            background: Vec::new(),
+            tasks: Vec::new(),
+        }
+    }
+
+    /// The call that started background task `event` names, by its own id or the task's.
+    /// With one background subagent running, it's that one.
+    fn task_call(&self, event: &Value) -> Option<String> {
+        if let Some(id) = event["tool_use_id"].as_str().filter(|id| !id.is_empty()) {
+            return Some(id.to_string());
+        }
+        let task = event["task_id"].as_str().unwrap_or("");
+        self.tasks
+            .iter()
+            .find(|(t, _)| !task.is_empty() && t == task)
+            .map(|(_, call)| call.clone())
+            .or_else(|| match self.background.as_slice() {
+                [only] => Some(only.clone()),
+                _ => None,
+            })
+    }
+
+    /// A background task started, moved on or ended.
+    fn task_event(&mut self, event: &Value) -> Option<AgentEvent> {
+        match event["subtype"].as_str().unwrap_or("") {
+            "task_started" => {
+                let (task, call) = (event["task_id"].as_str()?, event["tool_use_id"].as_str()?);
+                self.tasks.push((task.to_string(), call.to_string()));
+                None
+            }
+            "task_progress" => {
+                let label = event["last_tool_name"]
+                    .as_str()
+                    .filter(|t| !t.is_empty())
+                    .map(|t| format!("Used {t}"))?;
+                Some(AgentEvent::SubStep {
+                    parent: self.task_call(event)?,
+                    label,
+                })
+            }
+            "task_notification" => {
+                let id = self.task_call(event)?;
+                self.background.retain(|b| *b != id);
+                Some(AgentEvent::ToolDone {
+                    ok: !matches!(event["status"].as_str(), Some("failed")),
+                    output: event["summary"].as_str().unwrap_or("").to_string(),
+                    id,
+                })
+            }
+            _ => None,
         }
     }
 
     /// Feed one stdout line. Lines that are not JSON pass through as text.
+    /// Tests feed lines unparsed; the app hands them over parsed (see `feed_parsed`).
+    #[cfg(test)]
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
-        let Ok(event) = serde_json::from_str::<Value>(line) else {
+        self.feed_parsed(line, parse_line(line))
+    }
+
+    /// `feed`, with the line already parsed if it is JSON.
+    pub fn feed_parsed(&mut self, line: &str, parsed: Option<Value>) -> Vec<AgentEvent> {
+        let Some(event) = parsed else {
             return if line.trim().is_empty() {
                 vec![]
             } else {
@@ -104,6 +177,7 @@ impl ClaudeStream {
             }
         }
         match kind {
+            "system" => out.extend(self.task_event(&event)),
             "stream_event" => {
                 if !event["parent_tool_use_id"].is_null() {
                     return out;
@@ -127,8 +201,17 @@ impl ClaudeStream {
                 }
             }
             "assistant" => {
-                // Subagent traffic is summarised by its parent's Task step.
-                if !event["parent_tool_use_id"].is_null() {
+                // Of a subagent's traffic only its latest step shows, on its parent's step.
+                if let Some(parent) = event["parent_tool_use_id"].as_str() {
+                    for block in event["message"]["content"].as_array().into_iter().flatten() {
+                        if block["type"] == "tool_use" {
+                            let tool = block["name"].as_str().unwrap_or("tool");
+                            out.push(AgentEvent::SubStep {
+                                parent: parent.to_string(),
+                                label: self.step_label(tool, &block["input"]),
+                            });
+                        }
+                    }
                     return out;
                 }
                 let u = &event["message"]["usage"];
@@ -185,6 +268,13 @@ impl ClaudeStream {
                         "tool_use" => {
                             let tool = block["name"].as_str().unwrap_or("tool");
                             let label = self.step_label(tool, &block["input"]);
+                            if ToolKind::of(tool) == ToolKind::Subagent
+                                && block["input"]["run_in_background"] == true
+                            {
+                                if let Some(id) = block["id"].as_str() {
+                                    self.background.push(id.to_string());
+                                }
+                            }
                             out.push(AgentEvent::Tool(
                                 match block["id"].as_str().filter(|id| !id.is_empty()) {
                                     Some(id) => ToolStep::running(id, tool, label),
@@ -206,10 +296,19 @@ impl ClaudeStream {
                         continue;
                     }
                     if let Some(id) = block["tool_use_id"].as_str().filter(|id| !id.is_empty()) {
+                        let ok = block["is_error"].as_bool() != Some(true);
+                        // A background subagent has only started; it ends later.
+                        if self.background.iter().any(|b| b == id) {
+                            if ok {
+                                continue;
+                            }
+                            self.background.retain(|b| b != id);
+                        }
                         out.push(AgentEvent::ToolDone {
                             id: id.to_string(),
-                            ok: block["is_error"].as_bool() != Some(true),
-                            output: result_text(&block["content"]),
+                            ok,
+                            output: grok_tool_text(&block["content"])
+                                .unwrap_or_else(|| result_text(&block["content"])),
                         });
                     }
                 }
@@ -259,6 +358,9 @@ impl ClaudeStream {
                 if let Some(cost) = event["total_cost_usd"].as_f64().filter(|c| *c > 0.0) {
                     parts.push(format!("${cost:.2}"));
                 }
+                if let Some(share) = cache_share(&event["usage"]) {
+                    parts.push(format!("{share}% from cache"));
+                }
                 if !parts.is_empty() {
                     out.push(AgentEvent::Summary(parts.join(" · ")));
                 }
@@ -267,11 +369,21 @@ impl ClaudeStream {
                         .as_str()
                         .or_else(|| event["subtype"].as_str())
                         .unwrap_or("The agent reported an error.");
+                    // A used-up plan says so in words only when no rate_limit_event came.
+                    if let Some(limit) = crate::planlimit::from_text(reason, chrono::Local::now()) {
+                        out.push(AgentEvent::Limit(limit));
+                    }
                     out.push(AgentEvent::Error(reason.to_string()));
                 } else if !self.any_text {
                     if let Some(text) = event["result"].as_str().filter(|t| !t.is_empty()) {
                         out.push(self.text(text.to_string()));
                     }
+                }
+            }
+            // Where the plan's usage window stands, sent with each turn.
+            "rate_limit_event" => {
+                if let Some(limit) = crate::planlimit::from_claude(&event["rate_limit_info"]) {
+                    out.push(AgentEvent::Limit(limit));
                 }
             }
             _ => {}
@@ -313,6 +425,36 @@ pub(crate) fn result_text(content: &Value) -> String {
     crate::harness::event::tail(&text, 4096)
 }
 
+/// What a Grok Build tool printed. Its results arrive as the tool's own record in JSON,
+/// such as `{"type":"Bash","output_for_prompt":"exit: 0\nok\n",…}`, or as a list of
+/// content blocks; the text the model was shown is what a step shows.
+fn grok_tool_text(content: &Value) -> Option<String> {
+    let text = content.as_str()?.trim_start();
+    if !text.starts_with(['{', '[']) {
+        return None;
+    }
+    let record: Value = serde_json::from_str(text).ok()?;
+    let shown = |v: &Value| {
+        ["output_for_prompt", "tool_output_for_prompt", "raw_output"]
+            .iter()
+            .find_map(|k| v[*k].as_str().map(str::to_string))
+    };
+    let found = match &record {
+        Value::Object(fields) => {
+            shown(&record).or_else(|| fields.values().filter(|v| v.is_object()).find_map(shown))
+        }
+        Value::Array(blocks) => {
+            let texts: Vec<&str> = blocks
+                .iter()
+                .filter_map(|b| b["content"]["text"].as_str())
+                .collect();
+            (!texts.is_empty()).then(|| texts.join("\n"))
+        }
+        _ => None,
+    }?;
+    Some(crate::harness::event::tail(&found, 4096))
+}
+
 /// A short label for a tool call, such as "Read src/main.rs" or "Ran cargo test". Tool
 /// names and argument keys differ between CLIs; unknown tools read "Used <tool>".
 pub(crate) fn step_label(cwd: &str, tool: &str, input: &Value) -> String {
@@ -349,9 +491,11 @@ pub(crate) fn step_label(cwd: &str, tool: &str, input: &Value) -> String {
         ]))
     };
     match tool {
-        "Read" | "read" | "view" | "read_file" | "ReadFile" => format!("Read {}", path()),
+        "Read" | "read" | "view" | "read_file" | "ReadFile" | "hashline_read" => {
+            format!("Read {}", path())
+        }
         "Edit" | "MultiEdit" | "edit" | "edit_file" | "replace" | "str_replace_editor"
-        | "ApplyPatch" | "apply_patch" => match path() {
+        | "ApplyPatch" | "apply_patch" | "search_replace" | "hashline_edit" => match path() {
             p if p.is_empty() => "Edited files".to_string(),
             p => format!("Edited {p}"),
         },
@@ -359,13 +503,20 @@ pub(crate) fn step_label(cwd: &str, tool: &str, input: &Value) -> String {
             format!("Wrote {}", path())
         }
         "NotebookEdit" => format!("Edited {}", rel(s(&["notebook_path"]))),
-        "Bash" | "bash" | "shell" | "Execute" | "run_shell_command" | "exec_command" => {
+        "Bash"
+        | "bash"
+        | "shell"
+        | "Execute"
+        | "run_shell_command"
+        | "exec_command"
+        | "run_terminal_command"
+        | "run_terminal_cmd" => {
             format!("Ran {}", short(&s(&["command", "cmd"]), 70))
         }
-        "Grep" | "grep" | "search_file_content" | "search" => {
+        "Grep" | "grep" | "search_file_content" | "search" | "hashline_grep" => {
             format!("Searched for {}", short(&s(&["pattern", "query"]), 50))
         }
-        "Glob" | "glob" | "LS" | "ls" | "list" | "list_directory" => {
+        "Glob" | "glob" | "LS" | "ls" | "list" | "list_directory" | "list_dir" => {
             let what = s(&["pattern", "path", "dir_path"]);
             format!("Listed {}", short(&rel(what), 50))
         }
@@ -375,13 +526,13 @@ pub(crate) fn step_label(cwd: &str, tool: &str, input: &Value) -> String {
         "WebFetch" | "web_fetch" | "webfetch" | "fetch" => {
             format!("Fetched {}", short(&s(&["url", "prompt"]), 60))
         }
-        "Task" | "Agent" | "task" => format!(
+        "Task" | "Agent" | "task" | "spawn_subagent" => format!(
             "Ran a subagent: {}",
             short(&s(&["description", "prompt"]), 60)
         ),
         tool if is_todo_tool(tool) => "Updated the plan".to_string(),
-        "ExitPlanMode" => "Proposed a plan".to_string(),
-        "AskUserQuestion" => "Asked a question".to_string(),
+        "ExitPlanMode" | "exit_plan_mode" => "Proposed a plan".to_string(),
+        "AskUserQuestion" | "ask_user_question" => "Asked a question".to_string(),
         other => format!("Used {other}"),
     }
 }
@@ -701,7 +852,12 @@ impl JsonStream {
     }
 
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
-        let Ok(event) = serde_json::from_str::<Value>(line.trim()) else {
+        self.feed_parsed(line, parse_line(line))
+    }
+
+    /// `feed`, with the line already parsed if it is JSON.
+    pub fn feed_parsed(&mut self, line: &str, parsed: Option<Value>) -> Vec<AgentEvent> {
+        let Some(event) = parsed else {
             return if line.trim().is_empty() {
                 vec![]
             } else {
@@ -1113,9 +1269,43 @@ fn duration(ms: u64) -> String {
     }
 }
 
+/// The share of a run's prompt read from the cache, in percent: low means each call
+/// sent the context afresh, which costs more and uses more of a plan.
+fn cache_share(usage: &serde_json::Value) -> Option<u64> {
+    let n = |k: &str| usage[k].as_u64().unwrap_or(0);
+    let read = n("cache_read_input_tokens");
+    let prompt = read + n("cache_creation_input_tokens") + n("input_tokens");
+    // A tiny prompt says nothing about the cache.
+    (prompt >= 10_000).then(|| read * 100 / prompt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rate_limit_events_and_the_limit_line_are_read() {
+        let mut p = ClaudeStream::new("/x");
+        let out = p.feed(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1792840000,"rateLimitType":"five_hour","utilization":0.9},"session_id":"s"}"#);
+        assert!(matches!(
+            &out[..],
+            [AgentEvent::Limit(l)] if l.status == crate::planlimit::Status::Warning && l.kind == "five_hour"
+        ));
+        let out = p.feed(r#"{"type":"result","is_error":true,"result":"You've hit your session limit · resets 3pm (Asia/Calcutta)"}"#);
+        assert!(
+            matches!(&out[0], AgentEvent::Limit(l) if l.status == crate::planlimit::Status::Rejected)
+        );
+        assert!(matches!(&out[1], AgentEvent::Error(_)));
+    }
+
+    #[test]
+    fn the_summary_says_how_much_came_from_the_cache() {
+        let mut p = ClaudeStream::new("/x");
+        let out = p.feed(r#"{"type":"result","is_error":false,"duration_ms":2000,"usage":{"input_tokens":1000,"cache_read_input_tokens":90000,"cache_creation_input_tokens":9000,"output_tokens":50},"result":"ok"}"#);
+        assert!(out
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Summary(s) if s == "2s · 90% from cache")));
+    }
 
     #[test]
     fn usage_denials_plans_and_questions() {
@@ -1229,6 +1419,144 @@ mod tests {
     }
 
     #[test]
+    fn grok_builds_stream_reads_like_claude_codes() {
+        // A real run of xAI's Grok Build 1.0.70 with `--output-format
+        // streaming-messages-json`, signed in with a subscription. Ids, paths and the
+        // tool list are shortened; signatures and thinking are left out.
+        let lines = [
+            r#"{"type":"system","subtype":"init","session_id":"0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f","apiKeySource":"oauth","model":"grok-4.7","cwd":"/work/app","permissionMode":"acceptEdits","tools":["run_terminal_command","read_file","search_replace"],"mcp_servers":[],"uuid":"u-1"}"#,
+            r#"{"type":"assistant","message":{"id":"msg_0","type":"message","role":"assistant","model":"grok-4.7","content":[{"type":"text","text":"I'll read `note.txt` and run `echo ok`."},{"type":"tool_use","id":"call-a-0","name":"read_file","input":{"target_file":"/work/app/note.txt"}},{"type":"tool_use","id":"call-a-1","name":"run_terminal_command","input":{"command":"echo ok","description":"Print ok to confirm shell works"}}],"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":6318,"output_tokens":91,"cache_read_input_tokens":10112,"cache_creation_input_tokens":0}},"parent_tool_use_id":null,"session_id":"0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f","uuid":"u-2"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-a-0","content":"{\"type\":\"ReadFile\",\"FileContent\":{\"content\":\"1→hello from runo\\n\",\"absolute_path\":\"/work/app/note.txt\",\"offset\":null,\"raw_output\":\"hello from runo\\n\",\"total_lines\":1}}","is_error":false},{"type":"tool_result","tool_use_id":"call-a-1","content":"{\"type\":\"Bash\",\"output\":[111,107,10],\"output_for_prompt\":\"exit: 0\\nok\\n\",\"exit_code\":0,\"command\":\"echo ok\",\"truncated\":false,\"signal\":null,\"timed_out\":false}","is_error":false}]},"parent_tool_use_id":null,"session_id":"0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f","uuid":"u-3"}"#,
+            r#"{"type":"assistant","message":{"id":"msg_1","type":"message","role":"assistant","model":"grok-4.7","content":[{"type":"text","text":"Read note.txt (hello from runo) and the shell printed ok."}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":166,"output_tokens":52,"cache_read_input_tokens":16384,"cache_creation_input_tokens":0}},"parent_tool_use_id":null,"session_id":"0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f","uuid":"u-4"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":3794,"duration_api_ms":3649,"num_turns":2,"result":"Read note.txt (hello from runo) and the shell printed ok.","stop_reason":"end_turn","total_cost_usd":0.027074,"usage":{"input_tokens":6484,"output_tokens":143,"cache_read_input_tokens":26496,"cache_creation_input_tokens":0,"server_tool_use":{"web_search_requests":0}},"modelUsage":{"grok-4.7-build":{"inputTokens":6484,"outputTokens":143,"cacheReadInputTokens":26496,"cacheCreationInputTokens":0,"webSearchRequests":0,"costUSD":0.027074}},"session_id":"0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f","uuid":"u-5"}"#,
+        ];
+        let mut parser = ClaudeStream::new("/work/app");
+        let out: Vec<AgentEvent> = lines.iter().flat_map(|l| parser.feed(l)).collect();
+        assert_eq!(
+            out[0],
+            AgentEvent::Conversation("0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f".into())
+        );
+        let steps: Vec<(String, String)> = out
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Tool(s) => Some((s.id.clone(), s.label.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                ("call-a-0".to_string(), "Read note.txt".to_string()),
+                ("call-a-1".to_string(), "Ran echo ok".to_string()),
+            ]
+        );
+        // A step shows what the tool printed, not its JSON record.
+        let outputs: Vec<&str> = out
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolDone {
+                    ok: true, output, ..
+                } => Some(output.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs, ["hello from runo", "exit: 0\nok"]);
+        let text: String = out
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            text,
+            "I'll read `note.txt` and run `echo ok`.\n\nRead note.txt (hello from runo) and the shell printed ok."
+        );
+        let usage = out
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                AgentEvent::Usage(u) => Some(*u),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(usage.output, 143);
+        assert!((usage.cost_cents - 2.7074).abs() < 1e-9);
+        assert!(out
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Summary(s) if s.starts_with("3s · 2 turns · $0.03"))));
+        assert!(!out.iter().any(|e| matches!(e, AgentEvent::Error(_))));
+    }
+
+    #[test]
+    fn grok_builds_partial_messages_stream_its_text_once() {
+        // From a real Plan only run with `--include-partial-messages`, cut short: the
+        // text arrives as deltas, then once more in the whole message, which is skipped.
+        let s = r#","parent_tool_use_id":null,"session_id":"0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f","uuid":"u"}"#;
+        let lines = [
+            format!(
+                r#"{{"type":"stream_event","event":{{"type":"message_start","message":{{"id":"msg_2","type":"message","role":"assistant","model":"grok-4.7","content":[],"stop_reason":null,"stop_sequence":null,"usage":{{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}}}}{s}"#
+            ),
+            format!(
+                r#"{{"type":"stream_event","event":{{"type":"content_block_start","index":0,"content_block":{{"type":"thinking","thinking":"","signature":""}}}}{s}"#
+            ),
+            format!(
+                r#"{{"type":"stream_event","event":{{"type":"content_block_delta","index":0,"delta":{{"type":"thinking_delta","thinking":"Plan mode remains active."}}}}{s}"#
+            ),
+            format!(
+                r#"{{"type":"stream_event","event":{{"type":"content_block_stop","index":0}}{s}"#
+            ),
+            format!(
+                r#"{{"type":"stream_event","event":{{"type":"content_block_start","index":1,"content_block":{{"type":"text","text":""}}}}{s}"#
+            ),
+            format!(
+                r#"{{"type":"stream_event","event":{{"type":"content_block_delta","index":1,"delta":{{"type":"text_delta","text":"note"}}}}{s}"#
+            ),
+            format!(
+                r#"{{"type":"stream_event","event":{{"type":"content_block_delta","index":1,"delta":{{"type":"text_delta","text":".txt said: hello from runo."}}}}{s}"#
+            ),
+            format!(
+                r#"{{"type":"stream_event","event":{{"type":"content_block_stop","index":1}}{s}"#
+            ),
+            format!(
+                r#"{{"type":"stream_event","event":{{"type":"message_delta","delta":{{"stop_reason":"end_turn","stop_sequence":null}},"usage":{{"input_tokens":122,"output_tokens":207,"cache_read_input_tokens":18432,"cache_creation_input_tokens":0}}}}{s}"#
+            ),
+            format!(r#"{{"type":"stream_event","event":{{"type":"message_stop"}}{s}"#),
+            format!(
+                r#"{{"type":"assistant","message":{{"id":"msg_2","type":"message","role":"assistant","model":"grok-4.7","content":[{{"type":"thinking","thinking":"Plan mode remains active."}},{{"type":"text","text":"note.txt said: hello from runo."}}],"stop_reason":"end_turn","stop_sequence":null,"usage":{{"input_tokens":122,"output_tokens":207,"cache_read_input_tokens":18432,"cache_creation_input_tokens":0}}}}{s}"#
+            ),
+        ];
+        let mut parser = ClaudeStream::new("/work/app");
+        let text: String = lines
+            .iter()
+            .flat_map(|l| parser.feed(l))
+            .filter_map(|e| match e {
+                AgentEvent::Text(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "note.txt said: hello from runo.");
+        // Plan mode's exit and its tool record read as Grok's own steps.
+        assert_eq!(
+            step_label("/w", "exit_plan_mode", &Value::Null),
+            "Proposed a plan"
+        );
+        assert_eq!(
+            step_label(
+                "/w",
+                "search_replace",
+                &serde_json::json!({"file_path": "/w/plan.md"})
+            ),
+            "Edited plan.md"
+        );
+        assert_eq!(
+            grok_tool_text(&Value::String(r#"[{"type":"content","content":{"type":"text","text":"Non-interactive plan-only run: plan mode stays on."}}]"#.into())).as_deref(),
+            Some("Non-interactive plan-only run: plan mode stays on.")
+        );
+        assert_eq!(grok_tool_text(&Value::String("plain output".into())), None);
+    }
+
+    #[test]
     fn tool_steps_run_until_their_result_arrives() {
         let out = feed_all(&[
             r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_a","name":"Bash","input":{"command":"sleep 60"}},{"type":"tool_use","id":"toolu_b","name":"Bash","input":{"command":"false"}}]}}"#,
@@ -1283,6 +1611,63 @@ mod tests {
                 AgentEvent::Error("error_max_turns".into())
             ]
         );
+    }
+
+    #[test]
+    fn subagent_steps_show_on_their_parent_step() {
+        let out = feed_all(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Task","input":{"description":"Find the parser"}}]}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"content":[{"type":"text","text":"Looking"},{"type":"tool_use","id":"toolu_s1","name":"Read","input":{"file_path":"/work/app/src/stream.rs"}}]}}"#,
+            r#"{"type":"user","parent_tool_use_id":"toolu_1","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_s1","content":"…"}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"Found it"}]}}"#,
+        ]);
+        assert_eq!(
+            out,
+            [
+                started("toolu_1", "Ran a subagent: Find the parser"),
+                AgentEvent::SubStep {
+                    parent: "toolu_1".into(),
+                    label: "Read src/stream.rs".into()
+                },
+                AgentEvent::ToolDone {
+                    id: "toolu_1".into(),
+                    ok: true,
+                    output: String::new()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn background_subagents_run_until_their_task_ends() {
+        let out = feed_all(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_b","name":"Agent","input":{"description":"Review","run_in_background":true}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_b","content":"Async agent launched"}]}}"#,
+            r#"{"type":"system","subtype":"task_started","task_id":"t9","tool_use_id":"toolu_b","description":"Review"}"#,
+            r#"{"type":"system","subtype":"task_progress","task_id":"t9","last_tool_name":"Grep"}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"t9","status":"failed","summary":"Stopped"}"#,
+        ]);
+        assert_eq!(
+            &out[1..],
+            [
+                AgentEvent::SubStep {
+                    parent: "toolu_b".into(),
+                    label: "Used Grep".into()
+                },
+                AgentEvent::ToolDone {
+                    id: "toolu_b".into(),
+                    ok: false,
+                    output: String::new()
+                },
+            ],
+            "the launch result doesn't end the step"
+        );
+        // One that couldn't start ends at once.
+        let out = feed_all(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_c","name":"Agent","input":{"description":"x","run_in_background":true}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_c","is_error":true,"content":"No"}]}}"#,
+        ]);
+        assert!(matches!(&out[1], AgentEvent::ToolDone { ok: false, .. }));
     }
 
     #[test]

@@ -48,8 +48,8 @@ fn ssh_common(conn: &Connection) -> Vec<String> {
 }
 
 fn expand_home(path: &str) -> String {
-    match (path.strip_prefix("~/"), std::env::var("HOME")) {
-        (Some(rest), Ok(home)) => format!("{home}/{rest}"),
+    match (path.strip_prefix("~/"), crate::store::home_dir()) {
+        (Some(rest), Some(home)) => home.join(rest).to_string_lossy().into_owned(),
         _ => path.to_string(),
     }
 }
@@ -82,10 +82,10 @@ fn tunnels() -> &'static Mutex<HashMap<u64, Instant>> {
 /// Make sure a connection that goes through SSH has its tunnel open, starting it when it
 /// isn't. Connections without an SSH login pass straight through.
 pub fn ensure_tunnel(conn: &Connection) -> Result<(), String> {
-    let host = conn.ssh.trim();
-    if host.is_empty() || conn.tunnel_port == 0 {
+    if conn.ssh.trim().is_empty() || conn.tunnel_port == 0 {
         return Ok(());
     }
+    let host = crate::connections::ssh_host(&conn.ssh, &conn.name)?;
     let port = conn.tunnel_port;
     if answers(port) {
         return Ok(());
@@ -218,7 +218,7 @@ fn run(conn: &Connection, script: &str) -> Result<String, String> {
     let out = Command::new("ssh")
         .args(ssh_args(conn))
         .args([
-            conn.ssh.trim(),
+            crate::connections::ssh_host(&conn.ssh, &conn.name)?,
             "--",
             &format!("bash -lc {}", quote(script)),
         ])
@@ -311,6 +311,7 @@ fn set_up_now(conn: Connection) -> Result<Step, String> {
     if conn.ssh.trim().is_empty() {
         return Err("Fill in the server's SSH login first, such as ubuntu@203.0.113.7.".into());
     }
+    crate::connections::ssh_host(&conn.ssh, &conn.name)?;
     if crate::cove::binary().is_none() {
         return Err(
             "Runo talks to Cove servers with the cove command, which this Mac doesn't have yet: press Install under Cove on this machine first, then Set up again."

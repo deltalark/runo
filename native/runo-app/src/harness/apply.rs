@@ -20,7 +20,10 @@ pub fn apply(session: &mut Session, events: Vec<AgentEvent>, cx: &Context) -> bo
     let mut failed = false;
     let id = session.id;
     for event in events {
-        if !matches!(session.messages.last(), Some(m) if m.role == Role::Agent) {
+        // A subagent's step only updates a step already there.
+        if !matches!(event, AgentEvent::SubStep { .. })
+            && !matches!(session.messages.last(), Some(m) if m.role == Role::Agent)
+        {
             session.messages.push(Message::new(Role::Agent, ""));
         }
         let Some(m) = session.messages.last_mut() else {
@@ -45,8 +48,21 @@ pub fn apply(session: &mut Session, events: Vec<AgentEvent>, cx: &Context) -> bo
                     }
                 }
             }
+            AgentEvent::SubStep { parent, label } => {
+                if let Some(step) = session
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .flat_map(|m| m.steps.iter_mut().rev())
+                    .find(|s| s.state == crate::harness::StepState::Running && s.id == parent)
+                {
+                    step.latest = label;
+                }
+            }
             // Written to the log by whoever starts and ends the turn.
             AgentEvent::TurnStarted { .. } | AgentEvent::TurnEnded { .. } => {}
+            // The window holds or warns about the agent's turns; see `note_plan_limit`.
+            AgentEvent::Limit(_) => {}
             AgentEvent::Summary(summary) => {
                 m.meta = match &cx.model {
                     Some(model) => format!("{model} · {summary}"),

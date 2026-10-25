@@ -38,26 +38,25 @@ fn holds(
 }
 
 /// Whether the CLI keeps its own conversation that a follow-up can resume. Others get
-/// the recent conversation written into each follow-up prompt instead. Grok does once
-/// its help lists `--session`; older releases start fresh every turn.
+/// the recent conversation written into each follow-up prompt instead.
 pub fn resumes(provider: &str) -> bool {
     holds(provider, |s| &s.resumes)
 }
 
-/// The conversation id a CLI names on stderr: Grok's headless runs start with
-/// `Session: <id>` there (dimmed), the id `-s` takes to continue it.
-pub fn stderr_conversation(provider: &str, line: &str) -> Option<String> {
-    if provider != "grok" {
-        return None;
-    }
-    let plain = strip_ansi(line);
-    let id = plain.trim().strip_prefix("Session: ")?.trim();
-    (!id.is_empty()
-        && id.len() <= 64
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-    .then(|| id.to_string())
+/// Whether the CLI can resume the conversation Runo kept for a session. Grok (xAI's
+/// Grok Build) resumes only by session UUID; a session from the community Grok CLI Runo
+/// ran before keeps a shorter id, so it starts a new conversation with the history in
+/// the prompt instead.
+pub fn can_resume(provider: &str, conversation: &str) -> bool {
+    provider != "grok" || conversation.is_empty() || is_uuid(conversation)
+}
+
+fn is_uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.char_indices().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        })
 }
 
 /// `text` without terminal colour codes (`ESC [ ... letter`).
@@ -189,6 +188,10 @@ pub struct RunSpec<'a> {
     /// The session's id when it is a Crew thread, whose memory server adds the tools
     /// threads report through; 0 otherwise.
     pub thread: u64,
+    /// Runo may trust the folder for CLIs that ask (Cursor, Gemini) and approve its MCP
+    /// servers up front: the person trusts the project's agent settings, or the folder
+    /// holds none that start programs (see `folder_trusted`).
+    pub trusted: bool,
 }
 
 /// A random version-4 UUID, for naming a Claude Code conversation up front.
@@ -240,9 +243,9 @@ pub fn output(provider: &str) -> Output {
     }
 }
 
-/// Runo's permission levels a CLI can hold to, given its `--help`. Grok runs every tool
-/// without asking; Amp has no read-only mode; Cursor's print mode either only proposes
-/// changes or, with `--force`, also runs commands, so it has no edit-only level.
+/// Runo's permission levels a CLI can hold to, given its `--help`. Amp has no read-only
+/// mode; Cursor's print mode either only proposes changes or, with `--force`, also runs
+/// commands, so it has no edit-only level.
 pub fn modes(provider: &str) -> Vec<&'static str> {
     match crate::registry::spec(provider) {
         Some(spec) => spec.modes.iter().map(String::as_str).collect(),
@@ -251,8 +254,8 @@ pub fn modes(provider: &str) -> Vec<&'static str> {
 }
 
 /// The level a CLI really runs at for the session's mode, for agents that have no exact
-/// match: one without Auto edit (Grok, whose tools always run, and Cursor, whose edits
-/// come with commands) runs at Full access.
+/// match: one without Auto edit (Cursor, whose edits come with commands) runs at Full
+/// access.
 pub fn effective_mode<'a>(provider: &str, mode: &'a str) -> &'a str {
     match mode {
         "" | "edit" if !modes(provider).contains(&"edit") => "full",
@@ -293,20 +296,26 @@ fn mcp_servers(spec: &RunSpec) -> Vec<(String, crate::mcp::McpSpec)> {
                 },
             ));
         }
+        let mut args = if spec.thread == 0 {
+            vec!["--mcp-memory".into(), dir.to_string()]
+        } else {
+            vec![
+                "--mcp-memory".into(),
+                dir.to_string(),
+                "--thread".into(),
+                spec.thread.to_string(),
+            ]
+        };
+        // So it can tell the person's answers from ones anyone else left in the folder.
+        // A connection's relay answers in Runo itself, which has the key.
+        if let Some(file) = spec.local.then(crate::approvals::key_file).flatten() {
+            args.extend([crate::approvals::KEY_FILE_ARG.into(), file]);
+        }
         out.push((
             MEMORY_SERVER.into(),
             McpSpec {
                 command: exe.to_string(),
-                args: if spec.thread == 0 {
-                    vec!["--mcp-memory".into(), dir.to_string()]
-                } else {
-                    vec![
-                        "--mcp-memory".into(),
-                        dir.to_string(),
-                        "--thread".into(),
-                        spec.thread.to_string(),
-                    ]
-                },
+                args,
                 ..Default::default()
             },
         ));
@@ -350,6 +359,13 @@ fn file_servers(spec: &RunSpec) -> Vec<(String, crate::mcp::McpSpec)> {
 /// Environment for one run, for CLIs that take settings that way.
 fn provider_env(spec: &RunSpec) -> Vec<(String, String)> {
     let mut env = Vec::new();
+    // The person's own environment lines come after these and win.
+    if spec.provider == "claude" && !spec.opts.subagent_model.trim().is_empty() {
+        env.push((
+            "CLAUDE_CODE_SUBAGENT_MODEL".into(),
+            spec.opts.subagent_model.trim().to_string(),
+        ));
+    }
     if spec.provider == "opencode" {
         let servers: serde_json::Map<String, serde_json::Value> = mcp_servers(spec)
             .into_iter()
@@ -389,7 +405,7 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
         "pi" => {
             args.extend([s("--mode"), s("json")]);
             args.extend(pi_args(spec, &model, &effort, &mode));
-            args.push(spec.prompt.to_string());
+            args.push(prompt_arg(spec.prompt));
         }
         "codex" => {
             args.extend([s("exec"), s("--json")]);
@@ -452,11 +468,15 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                     args.extend([s("-i"), image.clone()]);
                 }
             }
-            args.push(spec.prompt.to_string());
+            args.push(prompt_arg(spec.prompt));
         }
         "cursor" => {
             args.extend([s("-p"), s("--output-format"), s("stream-json")]);
-            args.extend(cursor_trust());
+            // Without trust, Cursor stops at its trust prompt rather than load settings
+            // the repository brought.
+            if spec.trusted {
+                args.extend(cursor_trust());
+            }
             if spec.resume && !spec.session_id.is_empty() {
                 args.extend([s("--resume"), spec.session_id.to_string()]);
             }
@@ -467,8 +487,9 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             } else {
                 args.push(s("--force"));
             }
-            // Servers from the project file wait for approval unless approved up front.
-            if knows("--approve-mcps") && !file_servers(spec).is_empty() {
+            // Servers from the project file wait for approval unless approved up front,
+            // which happens only when they are all Runo's or the person trusts the repo.
+            if spec.trusted && knows("--approve-mcps") && !file_servers(spec).is_empty() {
                 args.push(s("--approve-mcps"));
             }
             if !model.is_empty() {
@@ -549,7 +570,7 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 for image in spec.images {
                     args.extend([s("--attachment"), image.clone()]);
                 }
-                args.extend([s("-p"), spec.prompt.to_string()]);
+                args.extend([s("-p"), prompt_arg(spec.prompt)]);
             } else {
                 args.extend([s("-p"), with_images(spec)]);
             }
@@ -594,12 +615,49 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             args.extend(split_args(&opts.extra_args));
             args.push(with_images(spec));
         }
+        // xAI's Grok Build speaks Claude Code's stream-json and permission modes. A
+        // headless run can't ask, so a tool call its mode doesn't allow is refused.
         "grok" => {
-            if spec.resume && !spec.session_id.is_empty() {
-                args.extend([s("-s"), spec.session_id.to_string()]);
+            let permission = match mode.as_str() {
+                "plan" => "plan",
+                "full" => "bypassPermissions",
+                _ => "acceptEdits",
+            };
+            args.extend([s("--output-format"), s("streaming-messages-json")]);
+            if knows("--include-partial-messages") {
+                args.push(s("--include-partial-messages"));
             }
+            args.extend([s("--permission-mode"), s(permission)]);
             if !model.is_empty() {
                 args.extend([s("-m"), model]);
+            }
+            if !effort.is_empty() {
+                args.extend([s("--reasoning-effort"), effort]);
+            }
+            if !opts.append_prompt.trim().is_empty() {
+                args.extend([s("--rules"), opts.append_prompt.clone()]);
+            }
+            // It takes Claude Code's `Bash(git *)` style rules.
+            for rule in list(&opts.allowed_tools) {
+                args.extend([s("--allow"), rule]);
+            }
+            for rule in list(&opts.disallowed_tools) {
+                args.extend([s("--deny"), rule]);
+            }
+            let id = spec.session_id;
+            match (spec.resume, id.is_empty()) {
+                // A resumed session keeps the folders it was created with.
+                (true, false) if is_uuid(id) => args.extend([s("-r"), id.to_string()]),
+                (true, true) => args.push(s("-c")),
+                _ => {
+                    // `-s` takes only a UUID, for a new session.
+                    if is_uuid(id) {
+                        args.extend([s("-s"), id.to_string()]);
+                    }
+                    for dir in list(&opts.add_dirs) {
+                        args.extend([s("--add-dir"), dir]);
+                    }
+                }
             }
             args.extend(split_args(&opts.extra_args));
             args.extend([s("-p"), with_images(spec)]);
@@ -644,7 +702,7 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             }
             args.extend(split_args(&opts.extra_args));
             // `-f` takes several files, so it goes after the prompt.
-            args.push(spec.prompt.to_string());
+            args.push(prompt_arg(spec.prompt));
             for image in spec.images {
                 args.extend([s("-f"), image.clone()]);
             }
@@ -782,6 +840,39 @@ fn conversation_args(spec: &RunSpec) -> Vec<String> {
     }
 }
 
+/// Why Runo won't trust `dir` for `spec`'s CLI, when the person hasn't trusted the
+/// project's agent settings and the folder has settings that start programs (from the
+/// repository, a pull request, or a VM sharing the folder). None when it may. What an
+/// earlier run added to the folder's settings is taken out first, so only the folder's
+/// own are judged.
+pub fn untrusted_config(spec: &RunSpec, dir: &str) -> Option<String> {
+    if spec.trusted || crate::mcp::project_file(spec.provider).is_none() {
+        return None;
+    }
+    crate::mcp::clean_project(std::path::Path::new(dir));
+    let found = crate::mcp::foreign_config(
+        std::path::Path::new(dir),
+        spec.provider,
+        &file_servers(spec),
+    )?;
+    let name = provider(spec.provider).name;
+    crate::applog::warn_once(
+        "agent",
+        format!("not trusting {dir} for {name}: {found} starts programs Runo didn't add"),
+    );
+    Some(format!(
+        "Runo didn't trust this folder for {name}, because {found} can start programs. \
+         If this project's agent settings are yours, turn on \"Trust agent settings in this \
+         repository\" in the project's settings."
+    ))
+}
+
+/// Whether `spec` may trust `dir`: the person trusts the project, or nothing in the
+/// folder starts programs Runo didn't add.
+pub fn folder_trusted(spec: &RunSpec, dir: &str) -> bool {
+    untrusted_config(spec, dir).is_none()
+}
+
 /// Cursor's headless runs stop at a workspace trust prompt in a folder it hasn't seen,
 /// such as a new worktree, unless the CLI is told to trust it.
 pub(crate) fn cursor_trust() -> Vec<String> {
@@ -873,17 +964,27 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
             }
             let mut args = with_model(args, "--model");
             if !spec.prompt.is_empty() {
-                args.push(spec.prompt.to_string());
+                args.push(prompt_arg(spec.prompt));
             }
             return args;
         }
         "grok" => {
             let mut args = with_model(Vec::new(), "-m");
+            match spec.sel.get("mode").map(String::as_str) {
+                Some("plan") => args.extend([s("--permission-mode"), s("plan")]),
+                Some("full") => args.extend([s("--permission-mode"), s("bypassPermissions")]),
+                Some("edit") => args.extend([s("--permission-mode"), s("acceptEdits")]),
+                _ => {}
+            }
+            let resume = resume && is_uuid(&id);
             if resume {
+                args.extend([s("-r"), id]);
+            } else if is_uuid(&id) {
                 args.extend([s("-s"), id]);
-            } else if !spec.prompt.is_empty() {
+            }
+            if !resume && !spec.prompt.is_empty() {
                 // The interactive CLI takes its opening message as its argument.
-                args.push(spec.prompt.to_string());
+                args.push(prompt_arg(spec.prompt));
             }
             return args;
         }
@@ -919,7 +1020,7 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
                 out.extend([s("-c"), format!("approval_policy=\"{approval}\"")]);
             }
             if !spec.prompt.is_empty() {
-                out.push(spec.prompt.to_string());
+                out.push(prompt_arg(spec.prompt));
             }
             out
         }
@@ -956,6 +1057,15 @@ mod interactive_tests {
     use super::*;
 
     #[test]
+    fn a_prompt_starting_with_a_dash_is_never_a_flag() {
+        assert_eq!(
+            prompt_arg("--dangerously-bypass-approvals-and-sandbox"),
+            " --dangerously-bypass-approvals-and-sandbox"
+        );
+        assert_eq!(prompt_arg("fix the -x flag"), "fix the -x flag");
+    }
+
+    #[test]
     fn interactive_args_drop_print_mode_and_keep_the_conversation() {
         let sel = std::collections::HashMap::from([
             ("model".to_string(), "haiku".to_string()),
@@ -975,6 +1085,7 @@ mod interactive_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         };
         let claude = interactive_args(&spec("claude", true, ""));
         assert!(!claude
@@ -1017,11 +1128,23 @@ fn cove_server() -> Option<String> {
 pub const MEMORY_SERVER: &str = "runo";
 
 /// The prompt with attached image paths listed, for CLIs that read images from disk.
+/// The prompt as a command-line argument. Most agent CLIs take it as a positional
+/// argument without a `--` before it, so a prompt starting with `-` (a Crew message that
+/// is exactly `--dangerously-bypass-approvals-and-sandbox`, say) would be read as a flag.
+/// A leading space keeps it text and changes nothing for the agent.
+fn prompt_arg(prompt: &str) -> String {
+    if prompt.starts_with('-') {
+        format!(" {prompt}")
+    } else {
+        prompt.to_string()
+    }
+}
+
 fn with_images(spec: &RunSpec) -> String {
     if spec.images.is_empty() {
-        return spec.prompt.to_string();
+        return prompt_arg(spec.prompt);
     }
-    let mut prompt = spec.prompt.to_string();
+    let mut prompt = prompt_arg(spec.prompt);
     prompt.push_str("\n\nAttached images (read them):");
     for image in spec.images {
         prompt.push_str(&format!("\n- {image}"));
@@ -1037,6 +1160,9 @@ pub enum Target {
 
 pub enum Event {
     Line(Target, String),
+    /// A line of an agent's output that is JSON, parsed on the thread that read it so the
+    /// main thread only has to act on it.
+    Json(Target, String, serde_json::Value),
     /// stderr of an agent run: kept out of the conversation unless the run fails.
     Err(Target, String),
     Done(Target, bool),
@@ -1044,8 +1170,6 @@ pub enum Event {
     Output(String, Result<String, String>),
     /// The reply so far of a command started with `oneshot_streamed`, by its key.
     Partial(String, String),
-    /// An interactive shell has new output, or exited.
-    Pty(u64),
 }
 
 /// Run a command to completion on a background thread and send its stdout back.
@@ -1310,6 +1434,17 @@ pub fn recap_command(
             }
             command.arg(prompt);
         }
+        "grok" if is_uuid(conversation) => {
+            command.args([
+                "--permission-mode",
+                "plan",
+                "-r",
+                conversation,
+                "--fork-session",
+                "-p",
+                prompt,
+            ]);
+        }
         "qwen" if !conversation.is_empty() => {
             command.args([
                 "--approval-mode",
@@ -1344,8 +1479,18 @@ pub fn recap_command(
 /// What to do to sign an agent in, when its output says it isn't. Only lines from the
 /// CLI itself are checked (its errors and stderr), never the agent's reply.
 pub fn sign_in_hint(provider: &str, log: &str) -> Option<String> {
-    let lower = log.to_lowercase();
-    let signs = [
+    if !log.lines().any(signs_out) {
+        return None;
+    }
+    Some(sign_in_help(provider))
+}
+
+/// Whether one line of a CLI's error output says it isn't signed in. Broad words such as
+/// "unauthorized" or "401" count only on the agent's own errors: an MCP server or a tool
+/// refused for its own login doesn't sign the agent out.
+fn signs_out(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    let plain = [
         "not logged in",
         "please log in",
         "please login",
@@ -1356,13 +1501,23 @@ pub fn sign_in_hint(provider: &str, log: &str) -> Option<String> {
         "please sign in",
         "not authenticated",
         "authentication required",
-        "authentication failed",
-        "unauthorized",
         "invalid api key",
         "no api key",
         "api key not found",
         "missing api key",
         "starting login flow",
+        // Gemini, signed out.
+        "set an auth method",
+        "must specify the gemini_api_key",
+    ];
+    if plain.iter().any(|s| lower.contains(s)) {
+        return true;
+    }
+    // Words any refused request uses: an MCP server's, a plugin's or a hook's as much as
+    // the agent's own.
+    let broad = [
+        "authentication failed",
+        "unauthorized",
         "token expired",
         "could not be validated",
         "status 401",
@@ -1371,14 +1526,9 @@ pub fn sign_in_hint(provider: &str, log: &str) -> Option<String> {
         // OpenCode, when its saved sign-in has expired.
         "token refresh failed",
         "providerautherror",
-        // Gemini, signed out.
-        "set an auth method",
-        "must specify the gemini_api_key",
     ];
-    if !signs.iter().any(|s| lower.contains(s)) {
-        return None;
-    }
-    Some(sign_in_help(provider))
+    let elsewhere = ["mcp", "plugin", "hook "].iter().any(|s| lower.contains(s));
+    !elsewhere && broad.iter().any(|s| lower.contains(s))
 }
 
 /// How to sign an agent in, as "Codex isn't signed in. Open a terminal and run …".
@@ -1394,7 +1544,7 @@ pub fn sign_in_help(provider: &str) -> String {
         "cursor" => "Open a terminal and run `cursor-agent login`, or set CURSOR_API_KEY under Settings > Cursor > Environment.",
         "droid" => "Open a terminal and run `droid` to sign in, or set FACTORY_API_KEY under Settings > Droid > Environment.",
         "opencode" => "Open a terminal and run `opencode auth login`.",
-        "grok" => "Set GROK_API_KEY under Settings > Grok > Environment.",
+        "grok" => "Open a terminal and run `grok login` to sign in with your SuperGrok or X Premium+ subscription, or set XAI_API_KEY under Settings > Grok > Environment.",
         _ => "Sign in to it in a terminal, then try again.",
     };
     format!("{name} isn't signed in. {how}")
@@ -1402,7 +1552,7 @@ pub fn sign_in_help(provider: &str) -> String {
 
 /// Whether the CLI reports what a turn cost, which spending limits count.
 pub fn reports_cost(provider: &str) -> bool {
-    matches!(provider, "claude" | "opencode" | "pi")
+    matches!(provider, "claude" | "opencode" | "grok" | "pi")
 }
 
 /// Whether Runo reads the tokens a turn used from the CLI's output, which the token limit
@@ -1470,6 +1620,12 @@ pub fn model_hint(provider: &str, log: &str) -> Option<String> {
 /// Whether a line shows the CLI waiting for a browser sign-in, which never finishes in
 /// a run without a terminal.
 pub fn waits_for_sign_in(line: &str) -> bool {
+    // An event of a JSON stream is the agent's own output, such as its reply or a tool's
+    // result, which can quote these very words; a CLI waiting for a sign-in prints a
+    // plain line.
+    if line.trim_start().starts_with('{') {
+        return false;
+    }
     let lower = line.to_lowercase();
     lower.contains("starting login flow")
         || (lower.contains("visit") && lower.contains("/auth/") && lower.contains("login"))
@@ -1526,6 +1682,10 @@ pub fn ask_command_on(provider: &str, configured_bin: &str, prompt: &str, model:
             command.args(["-p", "--permission-mode", "plan"]);
             command.args(&model_args).args(["--", prompt]);
         }
+        "grok" => {
+            command.args(["--permission-mode", "plan"]);
+            command.args(&model_args).args(["-p", prompt]);
+        }
         _ => {
             command.args(&model_args).args(["-p", prompt]);
         }
@@ -1543,6 +1703,11 @@ impl Handle {
     /// A local turn running detached from Runo in process group `group`.
     pub(crate) fn detached(group: u32) -> Self {
         Self(None, false, Some(group))
+    }
+
+    /// A turn with no process behind it, which `bench` plays.
+    pub(crate) fn none() -> Self {
+        Self(None, false, None)
     }
 
     pub fn kill(&self) {
@@ -1617,7 +1782,7 @@ pub fn turn_command(spec: &RunSpec) -> Command {
 /// What the folder needs before a turn: Gemini's trust, so it holds to the session's
 /// mode, and MCP servers for CLIs that read them from a project file.
 pub fn prepare_folder(spec: &RunSpec, dir: &str, sandboxed: bool) {
-    if spec.provider == "gemini" && spec.local && !sandboxed {
+    if spec.provider == "gemini" && spec.local && !sandboxed && spec.trusted {
         crate::gemini::trust(dir, &spec.opts.env);
     }
     if crate::mcp::project_file(spec.provider).is_some() {
@@ -1818,6 +1983,15 @@ pub fn run_agent(
     sandbox: Option<&crate::connections::Sandbox>,
     tx: Sender<Event>,
 ) -> Result<Handle, String> {
+    let foreign = untrusted_config(spec, dir);
+    if let Some(why) = &foreign {
+        // Shown with the error when the CLI then stops at its trust prompt.
+        let _ = tx.send(Event::Err(target, why.clone()));
+    }
+    let spec = &RunSpec {
+        trusted: foreign.is_none(),
+        ..*spec
+    };
     let bin = program(spec);
     let mut command = turn_command(spec);
     let acp = match (target, crate::detach::root(), sandbox) {
@@ -1826,7 +2000,7 @@ pub fn run_agent(
     };
     if acp.is_some() {
         // The servers go in the session instead; nothing is merged into project files.
-        if spec.provider == "gemini" {
+        if spec.provider == "gemini" && spec.trusted {
             crate::gemini::trust(dir, &spec.opts.env);
         }
         crate::mcp::clean_project(std::path::Path::new(dir));
@@ -1902,16 +2076,24 @@ pub fn run_shell(
 fn pump<R: Read + Send + 'static>(reader: R, target: Target, is_err: bool, tx: Sender<Event>) {
     std::thread::spawn(move || {
         for line in BufReader::new(reader).lines().map_while(Result::ok) {
-            let event = if is_err && matches!(target, Target::Session(_)) {
-                Event::Err(target, line)
-            } else {
-                Event::Line(target, line)
-            };
+            let event = line_event(target, is_err, line);
             if tx.send(event).is_err() {
                 break;
             }
         }
     });
+}
+
+/// The event for a line read from a run's stdout or stderr (`is_err`).
+pub(crate) fn line_event(target: Target, is_err: bool, line: String) -> Event {
+    match target {
+        Target::Session(_) if is_err => Event::Err(target, line),
+        Target::Session(_) => match crate::stream::parse_line(&line) {
+            Some(json) => Event::Json(target, line, json),
+            None => Event::Line(target, line),
+        },
+        Target::Terminal(_) => Event::Line(target, line),
+    }
 }
 
 pub(crate) fn spawn(
@@ -1920,6 +2102,7 @@ pub(crate) fn spawn(
     dir: &str,
     tx: Sender<Event>,
 ) -> Result<Handle, String> {
+    crate::shellenv::ready();
     let runner = command
         .get_args()
         .next()
@@ -2049,6 +2232,32 @@ mod tests {
     }
 
     #[test]
+    fn an_agents_json_lines_arrive_parsed() {
+        let session = Target::Session(1);
+        let json = r#"{"type":"result"}"#.to_string();
+        match line_event(session, false, json.clone()) {
+            Event::Json(target, line, value) => {
+                assert!(target == session && line == json);
+                assert_eq!(value["type"], "result");
+            }
+            _ => panic!("not parsed"),
+        }
+        assert!(matches!(
+            line_event(session, false, "plain words".into()),
+            Event::Line(_, l) if l == "plain words"
+        ));
+        assert!(matches!(
+            line_event(session, true, json.clone()),
+            Event::Err(..)
+        ));
+        // A terminal's output is shown as it is.
+        assert!(matches!(
+            line_event(Target::Terminal(1), false, json),
+            Event::Line(..)
+        ));
+    }
+
+    #[test]
     fn shell_streams_lines_then_done() {
         let (tx, rx) = std::sync::mpsc::channel();
         let dir = std::env::temp_dir();
@@ -2063,12 +2272,12 @@ mod tests {
         let mut lines = vec![];
         loop {
             match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
-                Event::Line(_, l) | Event::Err(_, l) => lines.push(l),
+                Event::Line(_, l) | Event::Json(_, l, _) | Event::Err(_, l) => lines.push(l),
                 Event::Done(_, ok) => {
                     assert!(ok);
                     break;
                 }
-                Event::Output(..) | Event::Partial(..) | Event::Pty(_) => {}
+                Event::Output(..) | Event::Partial(..) => {}
             }
         }
         lines.sort();
@@ -2108,7 +2317,44 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         })
+    }
+
+    #[test]
+    fn the_subagent_model_goes_to_claude_only_when_set_and_the_persons_env_wins() {
+        let sel = HashMap::new();
+        let env_of = |provider, opts: &AgentOptions| {
+            let spec = RunSpec {
+                provider,
+                prompt: "hi",
+                resume: false,
+                sel: &sel,
+                opts,
+                in_git: true,
+                session_id: "",
+                images: &[],
+                memory: None,
+                local: true,
+                thread: 0,
+                trusted: false,
+            };
+            turn_command(&spec)
+                .get_envs()
+                .filter(|(k, _)| *k == "CLAUDE_CODE_SUBAGENT_MODEL")
+                .map(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+                .last()
+                .flatten()
+        };
+        assert_eq!(env_of("claude", &AgentOptions::default()), None);
+        let mut opts = AgentOptions {
+            subagent_model: " sonnet ".into(),
+            ..AgentOptions::default()
+        };
+        assert_eq!(env_of("claude", &opts).as_deref(), Some("sonnet"));
+        assert_eq!(env_of("codex", &opts), None);
+        opts.env = "CLAUDE_CODE_SUBAGENT_MODEL=haiku".into();
+        assert_eq!(env_of("claude", &opts).as_deref(), Some("haiku"));
     }
 
     #[test]
@@ -2128,6 +2374,7 @@ mod arg_tests {
                 memory: None,
                 local: true,
                 thread: 0,
+                trusted: false,
             })
         };
         assert!(run("0199-id").ends_with(&["resume".into(), "0199-id".into(), "hi".into()]));
@@ -2150,6 +2397,7 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         };
         let id = "0b7c6a52-3f7e-4f3a-9d61-2a1c9b3e8f10";
         let first = provider_args(&spec(false, id));
@@ -2185,6 +2433,7 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         };
         let exec = turn_command(&spec);
         // Without an app server in the installed Codex's help, `exec` runs as before.
@@ -2260,6 +2509,7 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         };
         let json_mode = turn_command(&spec);
         // A Pi whose help doesn't list `--mode` runs each prompt in print mode.
@@ -2286,7 +2536,6 @@ mod arg_tests {
 
     #[test]
     fn modes_come_from_the_manifest() {
-        assert_eq!(effective_mode("grok", "edit"), "full");
         assert_eq!(effective_mode("cursor", ""), "full");
         assert_eq!(effective_mode("amp", "edit"), "edit");
         assert!(mode_error("amp", "plan").is_some());
@@ -2398,19 +2647,20 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         };
         run_agent(Target::Session(5), &spec, dir.to_str().unwrap(), None, tx).unwrap();
         let (mut out, mut err) = (vec![], vec![]);
         loop {
             match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
-                Event::Line(_, l) => out.push(l),
+                Event::Line(_, l) | Event::Json(_, l, _) => out.push(l),
                 Event::Err(_, l) => err.push(l),
                 Event::Done(target, ok) => {
                     assert!(target == Target::Session(5));
                     assert!(!ok);
                     break;
                 }
-                Event::Output(..) | Event::Partial(..) | Event::Pty(_) => unreachable!(),
+                Event::Output(..) | Event::Partial(..) => unreachable!(),
             }
         }
         assert_eq!(out[0], "env=from-env");
@@ -2443,6 +2693,7 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         };
         let error = run_agent(Target::Session(1), &spec, "/", None, tx)
             .err()
@@ -2677,6 +2928,7 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         };
         let has = |p, resume, pair: [&str; 2]| {
             provider_args(&spec(p, resume))
@@ -2710,6 +2962,7 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: true,
         })
     }
 
@@ -2793,17 +3046,15 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         });
         assert!(opencode.windows(2).any(|w| w == ["--agent", "plan"]));
         assert!(!opencode.contains(&"build".to_string()));
-        // Grok and Amp can't stay read-only, so they don't run in Plan only.
-        assert!(mode_error("grok", "plan").is_some());
+        // Amp can't stay read-only, so it doesn't run in Plan only.
         assert!(mode_error("amp", "plan").is_some());
         assert!(mode_error("amp", "edit").is_none());
         assert!(mode_error("copilot", "plan").is_none());
-        assert_eq!(modes("grok"), ["full"]);
         assert_eq!(modes("cursor"), ["plan", "full"]);
-        assert_eq!(effective_mode("grok", "edit"), "full");
         assert_eq!(effective_mode("cursor", ""), "full");
         assert_eq!(effective_mode("copilot", "edit"), "edit");
     }
@@ -2819,7 +3070,6 @@ mod arg_tests {
         assert!(run_args("amp", "edit", false, &[]).contains(&"--stream-json".to_string()));
         assert_eq!(output("codex"), Output::Json);
         assert_eq!(output("amp"), Output::Claude);
-        assert_eq!(output("grok"), Output::Text);
     }
 
     #[test]
@@ -2838,6 +3088,7 @@ mod arg_tests {
             memory: Some(("/bin/runo", "/work/app")),
             local: true,
             thread: 0,
+            trusted: false,
         };
         let claude = provider_args(&spec("claude"));
         let config = claude[claude.iter().position(|a| a == "--mcp-config").unwrap() + 1].clone();
@@ -2885,6 +3136,54 @@ mod arg_tests {
             file_servers(&remote).is_empty(),
             "no local programs elsewhere"
         );
+    }
+
+    #[test]
+    fn untrusted_folders_get_no_cursor_trust_or_mcp_approval() {
+        crate::caps::set(
+            "cursor",
+            crate::caps::Caps {
+                help: "--trust  Trust the workspace\n--approve-mcps  Approve all MCP servers"
+                    .into(),
+                ..Default::default()
+            },
+        );
+        let sel = sel(&[("mode", "full")]);
+        let o = AgentOptions::default();
+        let spec = |trusted| RunSpec {
+            provider: "cursor",
+            prompt: "hi",
+            resume: false,
+            sel: &sel,
+            opts: &o,
+            in_git: true,
+            session_id: "",
+            images: &[],
+            memory: Some(("/bin/runo", "/tmp/x")),
+            local: true,
+            thread: 0,
+            trusted,
+        };
+        let trusted = provider_args(&spec(true));
+        assert!(trusted.contains(&"--trust".to_string()));
+        assert!(trusted.contains(&"--approve-mcps".to_string()));
+        let untrusted = provider_args(&spec(false));
+        assert!(!untrusted.contains(&"--trust".to_string()));
+        assert!(!untrusted.contains(&"--approve-mcps".to_string()));
+
+        // A folder with a planted server isn't trusted unless the person said so.
+        let dir = std::env::temp_dir().join(format!("runo-untrusted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".cursor")).unwrap();
+        let folder = dir.to_string_lossy().into_owned();
+        assert!(folder_trusted(&spec(false), &folder));
+        std::fs::write(dir.join(".cursor/hooks.json"), "{}").unwrap();
+        assert!(!folder_trusted(&spec(false), &folder));
+        assert!(
+            untrusted_config(&spec(false), &folder).is_some_and(|why| why.contains("hooks.json"))
+        );
+        assert!(folder_trusted(&spec(true), &folder));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2960,74 +3259,155 @@ mod arg_tests {
     }
 
     #[test]
-    fn grok_continues_its_session_once_its_help_lists_the_flag() {
-        crate::caps::set("grok", crate::caps::Caps::default());
-        assert!(!resumes("grok"), "older releases start fresh every turn");
+    fn grok_runs_xais_grok_build() {
+        // Grok Build 1.0.70 speaks Claude Code's stream-json and permission modes, and
+        // takes a session UUID up front. Lines from its `--help`.
         crate::caps::set(
             "grok",
             crate::caps::Caps {
-                help: "  -s, --session <id>             Continue a saved session by id, or use\n                                 'latest'".into(),
+                help: "Grok Build TUI\n      --include-partial-messages\n          Emit incremental text and thinking deltas alongside whole messages\n      --output-format <OUTPUT_FORMAT>\n          Output format for headless mode [default: plain] [possible values: plain, json, streaming-json, streaming-messages-json]".into(),
                 ..Default::default()
             },
         );
-        assert!(resumes("grok"));
-        assert!(!names_conversation("grok"), "Grok names its own sessions");
-        let fresh = run_args("grok", "full", false, &[]);
-        assert!(!fresh.contains(&"-s".to_string()));
-        assert!(fresh.ends_with(&["-p".into(), "hi".into()]));
-        let resumed = run_args("grok", "full", true, &[]);
-        assert_eq!(&resumed[..2], ["-s", "id-1"]);
-        assert!(resumed.ends_with(&["-p".into(), "hi".into()]));
-        // The interactive CLI opens the same session.
-        let sel = sel(&[("model", "grok-4.3")]);
+        assert_eq!(output("grok"), Output::Claude);
+        assert!(resumes("grok") && names_conversation("grok"));
+        assert_eq!(modes("grok"), ["edit", "plan", "full"]);
+        assert_eq!(effective_mode("grok", "edit"), "edit");
+        assert!(mode_error("grok", "plan").is_none());
+        assert!(reports_cost("grok") && reports_tokens("grok"));
+        assert_eq!(cost_limit_note("grok"), None);
+        let hint = sign_in_help("grok");
+        assert!(hint.starts_with("Grok isn't signed in. Open a terminal and run `grok login`"));
+        assert!(hint.contains("XAI_API_KEY") && !hint.contains("GROK_API_KEY"));
+        assert_eq!(
+            crate::install::sign_in_command("grok", "grok"),
+            "grok login"
+        );
+
+        const ID: &str = "0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f";
+        let mode = sel(&[("model", "grok-4.7"), ("mode", "edit")]);
         let o = AgentOptions::default();
-        let spec = |resume, prompt| RunSpec {
+        let spec = |resume, session_id| RunSpec {
             provider: "grok",
-            prompt,
+            prompt: "hi",
             resume,
-            sel: &sel,
+            sel: &mode,
             opts: &o,
             in_git: true,
-            session_id: "9857aae5fff2",
+            session_id,
             images: &[],
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         };
         assert_eq!(
-            interactive_args(&spec(true, "")),
-            ["-m", "grok-4.3", "-s", "9857aae5fff2"]
+            provider_args(&spec(false, ID)),
+            [
+                "--output-format",
+                "streaming-messages-json",
+                "--include-partial-messages",
+                "--permission-mode",
+                "acceptEdits",
+                "-m",
+                "grok-4.7",
+                "-s",
+                ID,
+                "-p",
+                "hi"
+            ]
         );
-        assert_eq!(
-            interactive_args(&spec(false, "start here")),
-            ["-m", "grok-4.3", "start here"]
-        );
-    }
+        let resumed = provider_args(&spec(true, ID));
+        assert!(resumed.windows(2).any(|w| w == ["-r", ID]));
+        assert!(!resumed.contains(&"-s".to_string()));
+        assert!(resumed.ends_with(&["-p".into(), "hi".into()]));
+        assert!(run_args("grok", "plan", false, &[])
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "plan"]));
+        assert!(run_args("grok", "full", false, &[])
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "bypassPermissions"]));
 
-    #[test]
-    fn grok_names_its_session_on_stderr() {
-        // Exactly what grok-dev 1.1.7 prints at the start of a headless run.
-        let line = "\u{1b}[2mSession: 9857aae5fff2\u{1b}[0m";
+        // A session the community Grok CLI kept has an id Grok Build can't take: it starts
+        // a new conversation, with the history in the prompt.
+        assert!(!can_resume("grok", "9857aae5fff2"));
+        assert!(can_resume("grok", ID) && can_resume("grok", ""));
+        assert!(can_resume("claude", "9857aae5fff2"));
+        let old = provider_args(&spec(true, "9857aae5fff2"));
+        assert!(!old
+            .iter()
+            .any(|a| a == "-r" || a == "-s" || a == "9857aae5fff2"));
+
+        // Settings' effort, rules and tool rules reach it; extra folders only start a
+        // session, since a resumed one keeps its own.
+        let o = AgentOptions {
+            effort: "high".into(),
+            append_prompt: "Be brief.".into(),
+            allowed_tools: "Bash(git *)".into(),
+            disallowed_tools: "Bash(rm *)".into(),
+            add_dirs: "../lib".into(),
+            ..Default::default()
+        };
+        let mut build = spec(false, ID);
+        build.opts = &o;
+        let args = provider_args(&build);
+        for pair in [
+            ["--reasoning-effort", "high"],
+            ["--rules", "Be brief."],
+            ["--allow", "Bash(git *)"],
+            ["--deny", "Bash(rm *)"],
+            ["--add-dir", "../lib"],
+        ] {
+            assert!(args.windows(2).any(|w| w == pair), "{pair:?} in {args:?}");
+        }
+        build.resume = true;
+        assert!(!provider_args(&build).contains(&"--add-dir".to_string()));
+
+        // The interactive CLI opens the same session, in the same mode.
+        let plan = sel(&[("model", "grok-4.7"), ("mode", "plan")]);
+        let mut open = spec(true, ID);
+        open.sel = &plan;
+        open.prompt = "";
         assert_eq!(
-            stderr_conversation("grok", line).as_deref(),
-            Some("9857aae5fff2")
+            interactive_args(&open),
+            ["-m", "grok-4.7", "--permission-mode", "plan", "-r", ID]
+        );
+        open.resume = false;
+        open.prompt = "start here";
+        assert_eq!(
+            interactive_args(&open),
+            [
+                "-m",
+                "grok-4.7",
+                "--permission-mode",
+                "plan",
+                "-s",
+                ID,
+                "start here"
+            ]
+        );
+        let args = |c: Command| -> Vec<String> {
+            c.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(
+            args(ask_command_on("grok", "", "why?", "grok-4.6")),
+            ["--permission-mode", "plan", "-m", "grok-4.6", "-p", "why?"]
         );
         assert_eq!(
-            stderr_conversation("grok", "Session: 9857aae5fff2").as_deref(),
-            Some("9857aae5fff2")
+            args(recap_command("grok", "", ID, "recap").unwrap()),
+            [
+                "--permission-mode",
+                "plan",
+                "-r",
+                ID,
+                "--fork-session",
+                "-p",
+                "recap"
+            ]
         );
-        // Only Grok's own line, never a reply or an error that mentions a session.
-        assert_eq!(stderr_conversation("claude", line), None);
-        assert_eq!(stderr_conversation("grok", "Session: "), None);
-        assert_eq!(
-            stderr_conversation("grok", "Session \"abc\" was not found."),
-            None
-        );
-        assert_eq!(stderr_conversation("grok", "Session: two words"), None);
-        assert_eq!(
-            stderr_conversation("grok", "\u{1b}[33m▸ bash: ls\u{1b}[0m"),
-            None
-        );
+        assert!(recap_command("grok", "", "9857aae5fff2", "recap").is_none());
     }
 
     #[test]
@@ -3060,6 +3440,14 @@ mod arg_tests {
         assert!(hint.contains("codex login"));
         assert!(sign_in_hint("claude", "Invalid API key · Please run /login").is_some());
         assert!(sign_in_hint("claude", "error: model not found").is_none());
+        // An MCP server refused for its own login: the agent is still signed in.
+        assert!(sign_in_hint(
+            "claude",
+            "MCP server \"github\": HTTP 401 Unauthorized\nerror: model not found"
+        )
+        .is_none());
+        // The words count line by line, not across lines.
+        assert!(sign_in_hint("claude", "Token\nexpired").is_none());
         let tip = model_hint(
             "codex",
             "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account.",
@@ -3069,22 +3457,16 @@ mod arg_tests {
         assert!(model_hint("codex", "Model metadata for `x` not found.").is_some());
         assert!(model_hint("codex", "file not found").is_none());
         let note = cost_note();
-        assert!(note.starts_with("Only Claude Code, OpenCode and Pi report a cost; Codex, "));
-        assert!(note.contains(" and Grok report none"));
+        assert!(note.starts_with("Only Claude Code, OpenCode, Grok and Pi report a cost; Codex, "));
         assert!(note.contains("spending limits don't hold them"));
         assert!(note.contains("turn limits") && note.contains("token limit"));
         assert!(reports_tokens("claude") && reports_tokens("codex") && reports_tokens("cursor"));
-        assert!(!reports_tokens("grok"));
         assert_eq!(cost_limit_note("claude"), None);
         assert_eq!(cost_limit_note("opencode"), None);
         assert!(cost_limit_note("codex")
             .unwrap()
             .ends_with("the turn and token limits do"));
         assert!(cost_limit_note("cursor").unwrap().contains("token limits"));
-        assert_eq!(
-            cost_limit_note("grok").as_deref(),
-            Some("Grok reports no cost or tokens, so only the turn limits count it")
-        );
         assert!(sign_in_hint("opencode", "Error: Token refresh failed: 401")
             .unwrap()
             .contains("opencode auth login"));
@@ -3095,6 +3477,10 @@ mod arg_tests {
         .is_some());
         assert!(waits_for_sign_in(
             "No API key found. Starting login flow..."
+        ));
+        // The same words quoted in a JSON event, such as a tool's result, are not the CLI.
+        assert!(!waits_for_sign_in(
+            &serde_json::json!({ "type": "user", "content": "No API key found. Starting login flow..." }).to_string()
         ));
         assert!(!waits_for_sign_in("Reading src/login.rs"));
     }

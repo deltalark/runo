@@ -103,13 +103,27 @@ impl Turn {
 
     /// One line of the agent's output: the events it gives, also written to the log.
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
+        let parsed = self
+            .parser
+            .is_some()
+            .then(|| crate::stream::parse_line(line))
+            .flatten();
+        self.feed_parsed(line, parsed)
+    }
+
+    /// `feed`, with the line already parsed if it is JSON (see `stream::parse_line`).
+    pub fn feed_parsed(
+        &mut self,
+        line: &str,
+        parsed: Option<serde_json::Value>,
+    ) -> Vec<AgentEvent> {
         let Some(parser) = self.parser.as_mut() else {
             // Plain output is kept line by line.
             self.log.record(&AgentEvent::Text(format!("{line}\n")));
             return vec![AgentEvent::Text(line.to_string())];
         };
         super::record::line(&self.provider, self.session, self.log.turn(), line);
-        let events = parser.feed(line);
+        let events = parser.feed_parsed(line, parsed);
         for event in &events {
             self.log.record(event);
         }
@@ -153,8 +167,8 @@ mod tests {
     #[test]
     fn a_plain_turn_passes_lines_through_and_logs_them_whole() {
         let dir = root("plain");
-        // Grok prints plain text.
-        let mut turn = Turn::start_in(Some(&dir), 4, "grok", "/w", 2, "");
+        // Gemini prints plain text when its help lists no stream-json.
+        let mut turn = Turn::start_in(Some(&dir), 4, "gemini", "/w", 2, "");
         assert!(turn.plain());
         assert_eq!(turn.feed("one"), [AgentEvent::Text("one".into())]);
         assert_eq!(turn.feed("two"), [AgentEvent::Text("two".into())]);

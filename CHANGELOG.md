@@ -8,8 +8,157 @@ All notable changes to Runo are documented here.
 
 - The Runo assistant knows all of Runo. Each question now carries a reference read from the app itself: its version, every menu and Quick open command with its keys, every shortcut as you have it set, and every page of Settings with what each setting is set to now. Because it is built from the same tables the app draws, it can't fall behind a new feature or setting.
 - The assistant can run any Quick open command for you, such as quitting Runo ("exit runo" now offers a Quit Runo card), opening the Terminal or going to Design. Quitting from the assistant quits for real even when Runo keeps running in the menu bar, with the usual warning if agents are running.
-- The assistant can change any switch or choice in Settings by its name, or press a button there such as Check now for updates, each as a card you click first.
+- The assistant can change any switch or choice in Settings by its name, or press a button there such as Check now for updates, each as a card you click first that shows the setting's value now and the new one. Settings that decide what agents may do (Safety, Connections, Phone, permissions, sandboxes) and anything holding a key or token stay for you to change in Settings, and pairing links and tokens are never sent to the assistant's agent.
 - Guide articles for the parts that had none: quitting and updating Runo, Settings, Projects, Design (with its canvas keys), Architecture, the Timeline, Project notes, the Arcade, the Inbox and Home. Every place and command in Runo now points at an article, and the tests fail when a new one doesn't.
+
+## [0.5.10] - 2026-10-26
+
+### Added
+
+- Grok runs through xAI's official Grok Build CLI, which signs in with a SuperGrok or X Premium+ subscription (`grok login`) or `XAI_API_KEY`. It replaces the community grok-cli.
+- Check for Updates… in the Runo menu and Check for updates in the palette. Both check GitHub right away and open Settings on the Updates row, where the result shows.
+- Copy diagnostics in Settings, next to the logs: your version, system, agent CLIs, settings without secrets and the end of the log, to paste into a bug report.
+- Helper agents show on the Working line ("Working · 2 helper agents"), the thread card and the peek; click the line to see each one's latest step.
+- A per-project opt-in, Trust agent settings in this repository, for Cursor and Gemini MCP servers and hooks committed to the repo.
+
+### Changed
+
+- Runo's data folder `~/.runo` is private to you (0700, files 0600), existing installs are tightened on start, and saves go through a fresh private file instead of writing through links. Approval answers are signed, so only the Runo that asked can answer.
+- Post-turn checks wait for you when the turn changed a file that defines what they run, such as `package.json` or a `Makefile`, so agent-written scripts don't run on their own.
+- Approval cards and the Inbox show the whole command, and say what the one-line summaries leave out. Always allow saves a narrow rule (such as `Bash(npm test:*)`) for that project only, never a bare `Bash`, and isn't offered for chained or piped commands; an earlier allow-all-shell rule is flagged once.
+- A pull request comment wakes a watched thread only when it comes from the repository's owner, members or collaborators, the PR's author or an installed app; other comments are quoted as information, never instructions.
+- Calls from a VM or server over the relay can use only the tools that connection needs, and shared folders no longer follow symlinks.
+- Prompts, SSH hosts and playbook links that start with `-` can no longer be read as command-line options.
+- Update downloads are checked against the release's SHA256SUMS (and its signature, once a signing key is set) before Runo offers them.
+- Threads' decisions reach Crew too, a thread can send several messages to Crew in a turn, and Crew's prompt puts a thread's words under their own heading.
+- Crew's rules include guidance for fast threads.
+- The context % uses the model's real context window instead of assuming 200k.
+- Each launch's log is capped at about 30 MB.
+- Going back to an older Runo keeps your sessions and settings: values it doesn't know load as defaults, and copies are kept before a version change.
+- Releases list SHA-256 checksums for every file in SHA256SUMS. Apple signing secrets are scoped to the signing steps.
+- Builds use a pinned Rust toolchain (1.99.0), CI lints the Windows build, and dependencies are checked with cargo-deny. Updated rustls, rustls-webpki and other crates for six security advisories.
+- Internal refactors (browser locks, file editor and Browser tab state) with no change in behaviour, and new tests for the updater and cleanup.
+
+### Fixed
+
+- On Windows, features that read only `HOME` (playbook and Cove `~/` paths, save dialogs, and more) now use your profile folder. Step labels no longer show full `C:\` paths, and Keep the computer awake says it doesn't work on Windows yet.
+
+## [0.5.9] - 2026-10-25
+
+### Added
+
+- Runo watches the pull requests Crew threads open and wakes a thread only when it has something to do: a failed check, a review or comment from someone else, or a conflict with the base branch. Threads no longer wait for CI inside their turn; when the checks pass, the thread's card turns green and Crew's chat gets a short note.
+
+### Changed
+
+- Post-turn checks come in two levels. Quick, the default, runs each language's fast check (such as `cargo check`, a typecheck or lint script, `go vet` or `ruff`) and leaves tests to CI; Full runs the tests too. Pick it in Settings > Safety, or per project in its Edit dialog. A check that couldn't run because the disk was full, a tool was missing or it was killed now shows "Couldn't run checks" with the reason instead of failing, and doesn't start a fix turn.
+- Sending a message no longer freezes the window: the undo checkpoint, git, the post-turn checks and the end of a turn's saving run off the UI thread, and the checkpoint is cheaper. A turn that changed only docs skips its post-turn checks.
+- Redraws cost less. A large diff lays out only the lines in view, the terminal draws in its own pane, and agents working in the background redraw only the sidebar, bars and rail rather than the whole window.
+- The working indicator moves at a steady pace, without the hitches other redraws used to cause, and stays smooth however long Runo has been open.
+- The assistant's corner mark counts only its own unread answers, and its input is a composer-style box that grows to six lines; Enter sends, Shift+Enter adds a line.
+- The sidebar sets Crew's block apart from your own sessions with space and a quiet SESSIONS label instead of lines, and Crew's threads are indented under it rather than marked by a guide line.
+- Runo does much less while you aren't using it. The Browser tab's frame timer runs only while a page is on screen, and agents' output and background results wake the app when they arrive instead of being checked 50 times a second. While the window is hidden, minimized or covered, git rescans, dev-server port scans, pull request and GitHub checks, plan usage and update checks pause until it is back; saves, queued turns, Crew, the menu bar and the Dock count keep going at a slower pace. Pull request lookups, and git scans of a session nobody is working in, come less and less often while nothing changes. Freeing build output and finding dev-server ports no longer scan every process on the Mac with `lsof`, and a quiet terminal no longer wakes the app 100 times a second.
+- Post-turn checks and Crew threads scale with the computer. Settings > Safety > Limits > Checks running at once is Auto by default: one check set per 4 cores and per 6 GB of memory, from 1 to 6, instead of one at a time. Crew threads running at once is Auto too: one per 3 cores and per 4 GB, from 2 to 8. Each shows what Auto comes to, such as "Auto (4 at a time on this Mac: 16 cores, 64 GB)", and the fixed numbers and No limit are still there. Low priority for checks is its own switch, Run checks at low priority, on by default. The old background checks switch carries over: on becomes Auto, off becomes No limit at normal priority; a Crew cap left at the old default of 3 becomes Auto.
+
+### Fixed
+
+- The top bar and status bar stretch across the whole window again; since 0.5.8 their background stopped after their last item.
+- A picture attached to a message no longer spills over the message's text and the rows below it. Thumbnails take their size from the picture before it loads, keep its shape within 220 × 160, and very tall or very wide pictures are cropped rather than shrunk to a sliver. Steps that read an attachment show its file name instead of the `.runo/attachments/…` path.
+
+## [0.5.8] - 2026-10-25
+
+### Fixed
+
+- Runo builds for Windows again. 0.5.7 shipped without a Windows download because the frame-time stats used a Unix-only call; on Windows their CPU figure now reads 0%.
+
+## [0.5.7] - 2026-10-25
+
+### Added
+
+- Image viewer. Click a picture in a chat, in the composer's attachments or in a thread in the Threads tab to open it large over the window, with pinch and ⌘ + scroll zoom, fit and 100%, ← and → through every picture in the conversation, and Copy image, Open in Preview, Show in Finder and Save as…. Esc or a click on the backdrop closes it.
+
+### Changed
+
+- The window is smooth when typing, scrolling, idle and with agents streaming. Only the chat rows in view are laid out, each message's Markdown is parsed once, the window's parts are drawn as cached views so typing doesn't redraw the rest of the window, and agents' JSON output and turn logs are handled off the main thread. The same goes for the thread open in the Threads tab. `RUNO_BENCH=1` plays the same scenes every time for frame times before and after.
+- Crew's threads show only under Crew, grouped into Needs you, Working, Waiting and a folded "N done", in one-line rows with their status and time. The selected thread shows its agent, branch and worktree size, and a hover card has its details. The sessions you started yourself are listed under "Sessions".
+- The status bar's plan usage is a small ring around each agent's mark, with the percentage only from 75%, a dot for a problem, and the full line in its tooltip. Clicking a mark opens the Usage popover with that agent highlighted.
+- Crew's route bar lines up with the composer.
+- The Arcade's games are tighter and more polished.
+
+### Fixed
+
+- A turn is no longer stopped with a false "isn't signed in" when the agent's own output mentions a browser sign-in. Only a plain line from the CLI counts as waiting for sign-in.
+
+## [0.5.6] - 2026-10-25
+
+### Added
+
+- Finished threads free their build output. When a Crew thread is resolved, a session is archived or its branch is merged, the build and dependency folders git ignores in its worktree (target, node_modules, .venv, dist, build and the like) are deleted, while the worktree, its code and its branch stay. Worktrees in use are skipped and tried again later. Turn it off in Settings > Worktrees > Remove build output when a thread is done.
+- Worktree sizes. A session's `worktree` chip shows its size, with Free build output in its menu, and a project's right-click menu has Worktrees and disk space, listing each worktree biggest first with a Free space button.
+
+### Changed
+
+- Each worktree of a Rust project builds into its own `target` again, as before 0.5.4: the shared build folder, its switch under Settings > Worktrees and the two-jobs limit for checks on 8 GB computers are gone. A settings file that still has the switch loads as before.
+- Post-turn checks run in the background, one session at a time: at low CPU and disk priority, with what they start, and in order when several threads finish together, with "Waiting for another check…" and Cancel on the waiting ones. Turn it off in Settings > Safety > Limits > Run checks in the background, one at a time.
+- The working indicator is a glowing ring with one label that says what the agent is doing, such as Reading, Editing or Running Bash, with a band of the accent passing along it. When a turn ends on its own, the ring closes, turns green and shows a check with "Worked" and the time. Moving parts of the main window redraw at most 60 times a second, and hold still while the window isn't active, with Animations off or with Reduce motion on, while elapsed times keep counting.
+
+### Fixed
+
+- A thread's message to Crew shows as a From-thread chip, with the thread's number and title as a link and its status, instead of a red "Ran playbook · deleted" card.
+
+## [0.5.5] - 2026-10-25
+
+### Fixed
+
+- Runo no longer says an agent isn't signed in when it is. A turn whose errors read like a sign-in problem now asks the agent first (Claude Code's `claude auth status`, Codex's and Cursor's status). Still signed in, most often because another run was renewing the login token at that moment, the turn goes again once after a few seconds with a quiet note, and queued prompts carry on. Only a real sign-out, or a second failure, shows the sign-in card.
+- A turn that ends without a reply says why where it can tell: the disk is full, the agent ran out of memory or was killed, or it timed out; otherwise "stopped without replying", with Retry.
+- Words such as "unauthorized" or "401" from an MCP server, a plugin or a hook, or from an earlier turn, no longer count as the agent being signed out.
+
+## [0.5.4] - 2026-10-25
+
+### Added
+
+- Thread numbers in Crew's chat open their thread. A `#34` that names one of the project's threads is a link, with the thread's title beside it and its status in a tooltip; click opens it in the peek pane and Cmd-click in the main view. Numbers in code, after "PR" or "issue", and ones that aren't threads stay as written. Turn the titles off in Settings > Behavior > Thread titles beside numbers.
+- Worktrees of a Rust project share one build folder, the main checkout's `target`, for agent turns, checks and terminals, instead of a full `target` each. A `CARGO_TARGET_DIR` or `build.target-dir` you set is kept. On a computer with 8 GB of memory or less, checks in a Rust project build two jobs at a time. Turn sharing off in Settings > Worktrees > Share one Rust build folder across worktrees.
+- A turn that hits Claude's usage limit pauses instead of being lost. Runo reads the limit Claude Code reports with every turn, so new Claude turns wait until the 5-hour or weekly window resets (Send anyway still sends one), and the failed turn offers Carry on at its reset time or Carry on now. Carrying on continues the same conversation from where it stopped, keeping what the turn and its subagents already did, where Retry would start the work over. A Crew thread the limit stops carries on by itself once the window resets, and Crew is told not to start it again.
+- Crew threads running at once, under Settings > Safety > Limits, 3 by default. Threads Crew starts past it wait for a slot and start in order as others finish, with Start now to let one go ahead; threads you start or approve never wait for it. Crew sees how many run and wait, so it plans in order instead of starting more.
+- Hold threads and playbooks past a share of the plan, under the same Limits: once Claude Code's 5-hour or weekly window is that full, Crew threads and playbook runs wait for it to reset, so what you start yourself still has room. Off by default.
+- Crew can give a thread a model, an effort and a budget. Its rules suggest a smaller model for mechanical work such as renames, docs and copy, list the agent's models, and ask for briefs that name the files and findings already known. A thread past its budget waits for you, with Send anyway.
+- Subagent model for Claude Code, under Settings > Agents > Claude Code: the model its subagents run on, such as sonnet or haiku, while the session keeps its own. Empty keeps today's behaviour.
+- A Crew thread's card shows how many subagents it has running, and whether it is waiting for a slot or paused at the limit. Crew's Started card adds up what its threads have cost so far.
+- A run's summary says how much of its prompt came from the cache, such as "94% from cache", so a run that kept re-sending its context stands out.
+
+### Changed
+
+- The Crew row in the sidebar has its own look: a soft wash of the accent colour, the mark in an accent chip that glows while Crew works, and its threads hanging off it on an accent line, with a hairline below the Crew block.
+- Crew threads are told to do their work in the thread, keep subagents for independent lookups (at most two at a time, never one per item) and run the full test suite once at the end. Crew is told to split work by area rather than by item and to start the riskiest first.
+- Claude Code's usage in the status bar follows each turn as it runs, rather than refreshing only every five minutes, and a window past its warning point is mentioned once.
+- The Usage popover notes that Chat runs Claude Code in print mode, which can use more of the plan windows than the same work in a terminal, and points to the CLI view.
+
+## [0.5.3] - 2026-10-25
+
+### Added
+
+- Runo's Dock icon shows a red count of what needs you: sessions and threads waiting on you or finished and not yet seen, permission requests, unread Crew replies, and review requests and failed checks on GitHub. The corner mark's badge shows the same count. Turn it off in Settings > Alerts > Show badge on Dock icon.
+
+### Changed
+
+- Runo's window opens and responds about a second sooner. It no longer waits for your login shell's profile to finish before showing the window; agents, terminals and git still start with that shell's PATH and variables. Set `RUNO_TRACE_STARTUP=1` to log how long each step of starting up takes.
+- The Arcade is redesigned as a games corner: a glowing ring in the game's colour, cartridge tabs, a score strip that ticks up, and a scene of its own for each game. Rules, keys, scoring and best scores are unchanged.
+
+### Fixed
+
+- A thread's peek pane in Crew stays where it is while you scroll up during a run, with the same "New messages" pill as the chat, instead of snapping to the bottom on every update.
+
+## [0.5.2] - 2026-10-24
+
+### Added
+
+- Stack, a fourth game in the Arcade: Tetris with all seven pieces, a next-piece preview and an outline of where the piece will land. Left and right move, Up (or X, and Z the other way) turns with a nudge off walls, Down drops a row and Space drops it all the way. Clearing lines scores more with each level, and every ten lines is a level that falls faster. Press 4 in the Arcade to pick it.
+
+### Fixed
+
+- The chat stays where it is while you scroll up during a run, instead of snapping to the bottom on every streamed line. It follows the bottom only while it's there; scrolling back down, sending or opening a chat brings it back. While scrolled up, a "New messages" pill over the bottom of the chat jumps to the newest. The Help assistant's answer follows only while its panel is at the bottom, too.
 
 ## [0.5.1] - 2026-10-23
 

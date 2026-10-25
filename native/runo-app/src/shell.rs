@@ -849,40 +849,44 @@ pub(crate) fn hover_wash(
 ) -> Stateful<Div> {
     let id: ElementId = id.into();
     let color = Hsla::from(color);
-    el.on_hover(|_, window, _| window.refresh()).child(
-        canvas(
-            |_, _, _| (),
-            move |b, _, window, _| {
-                let over = b.contains(&window.mouse_position());
-                let now = std::time::Instant::now();
-                let since = HOVERS.with_borrow_mut(|h| {
-                    // First seen: already settled, so nothing fades on arrival.
-                    let seen = h
-                        .entry(id.clone())
-                        .or_insert((over, now - Duration::from_secs(1)));
-                    if seen.0 != over {
-                        *seen = (over, now);
+    let view = std::rc::Rc::new(Cell::new(None));
+    let drawn_in = view.clone();
+    el.on_hover(move |_, window, cx| redraw_view(view.get(), window, cx))
+        .child(
+            canvas(
+                move |_, window, _| drawn_in.set(Some(window.current_view())),
+                move |b, _, window, _| {
+                    let over = b.contains(&window.mouse_position());
+                    let now = std::time::Instant::now();
+                    let since = HOVERS.with_borrow_mut(|h| {
+                        // First seen: already settled, so nothing fades on arrival.
+                        let seen = h
+                            .entry(id.clone())
+                            .or_insert((over, now - Duration::from_secs(1)));
+                        if seen.0 != over {
+                            *seen = (over, now);
+                        }
+                        seen.1.elapsed().as_secs_f32() * 1000.
+                    });
+                    let t = if anim_on() {
+                        (since / HOVER_MS).min(1.)
+                    } else {
+                        1.
+                    };
+                    if t < 1. {
+                        window.request_animation_frame();
                     }
-                    seen.1.elapsed().as_secs_f32() * 1000.
-                });
-                let t = if anim_on() {
-                    (since / HOVER_MS).min(1.)
-                } else {
-                    1.
-                };
-                if t < 1. {
-                    window.request_animation_frame();
-                }
-                let t = 1. - (1. - t).powi(3);
-                let strength = if over { t } else { 1. - t };
-                if strength > 0. && color.a > 0. {
-                    window.paint_quad(fill(b, color.opacity(strength)).corner_radii(px(radius)));
-                }
-            },
+                    let t = 1. - (1. - t).powi(3);
+                    let strength = if over { t } else { 1. - t };
+                    if strength > 0. && color.a > 0. {
+                        window
+                            .paint_quad(fill(b, color.opacity(strength)).corner_radii(px(radius)));
+                    }
+                },
+            )
+            .absolute()
+            .inset_0(),
         )
-        .absolute()
-        .inset_0(),
-    )
 }
 
 thread_local! {
@@ -898,12 +902,32 @@ const REVEAL_MS: u64 = 140;
 /// have them pop. Keep `on_hover` free on the row for it.
 pub(crate) fn reveal_group(el: Stateful<Div>, id: impl Into<ElementId>) -> Stateful<Div> {
     let id = id.into();
-    el.on_hover(move |hovered, window, _| {
+    let view = std::rc::Rc::new(Cell::new(None));
+    let drawn_in = view.clone();
+    el.on_hover(move |hovered, window, cx| {
         GROUPS.with_borrow_mut(|g| {
             g.insert(id.clone(), (*hovered, std::time::Instant::now()));
         });
-        window.refresh();
+        redraw_view(view.get(), window, cx);
     })
+    .child(
+        canvas(
+            move |_, window, _| drawn_in.set(Some(window.current_view())),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_0(),
+    )
+}
+
+/// Draw `view` again, the view a hovered element was drawn in, rather than the whole
+/// window: the window's parts are cached views (see `panes`), and only the hovered one
+/// changed. Before the element is first drawn, the window.
+fn redraw_view(view: Option<EntityId>, window: &mut Window, cx: &mut App) {
+    match view {
+        Some(view) => cx.notify(view),
+        None => window.refresh(),
+    }
 }
 
 /// An action that shows while its row is hovered (with `group_hover`, which still decides
@@ -1034,6 +1058,7 @@ impl Mode {
             | View::NewSession
             | View::AllSessions
             | View::Worktrees
+            | View::WorktreeSpace
             | View::Activity
             | View::Editor => Mode::Sessions,
         }
@@ -1100,8 +1125,11 @@ pub(crate) fn need_of(
     if s.archived || running {
         return None;
     }
-    // A Crew thread asking the person to decide something waits on them.
-    if s.crew.as_ref().is_some_and(|i| i.decision.is_some()) {
+    // A Crew thread asking the person to decide something waits on them, as does one
+    // whose pull request the watcher gave up fixing.
+    if s.crew.as_ref().is_some_and(|i| {
+        i.decision.is_some() || i.watch.as_ref().is_some_and(|w| w.needs.is_some())
+    }) {
         return Some(Need::Blocked);
     }
     if let Some((index, _)) = alerts::waiting_on(s) {
@@ -1162,7 +1190,7 @@ pub(crate) fn turn_usage(messages: &[store::Message]) -> store::Usage {
 }
 
 /// Totals shown in the top bar and on Home.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct Counts {
     pub running: usize,
     /// Sessions blocked on the person, or finished or failed unseen.
@@ -1268,6 +1296,40 @@ impl RunoApp {
         out
     }
 
+    /// How many things need the person, for the Dock icon:
+    /// sessions and threads waiting on them or finished unseen, permission requests,
+    /// unread Crew replies, and Reviews' review requests and failed checks. Each session
+    /// counts once, and the one on screen in the focused window counts as seen.
+    pub(crate) fn attention(&self) -> usize {
+        let seen = (self.window_active && self.view == View::Session)
+            .then_some(self.selected)
+            .flatten();
+        let mut sessions: std::collections::HashSet<u64> = self
+            .needs_you()
+            .into_iter()
+            .map(|(s, _)| s.id)
+            .chain(
+                // Crew's own chat sits on its canvas, out of `needs_you`.
+                self.state
+                    .sessions
+                    .iter()
+                    .filter(|s| s.canvas == crew::CANVAS && !s.archived && s.unread)
+                    .map(|s| s.id),
+            )
+            .collect();
+        // A permission request from a canvas chat, which `needs_you` leaves out.
+        sessions.extend(
+            self.approvals
+                .iter()
+                .filter(|r| !self.alerts_hidden.contains(&format!("a:{}", r.id)))
+                .filter_map(|r| self.approval_session(r)),
+        );
+        if let Some(id) = seen {
+            sessions.remove(&id);
+        }
+        sessions.len() + self.gh.needs_you()
+    }
+
     /// Where a session sits on Home and in the counts. Canvas chats sit on their canvas.
     pub(crate) fn bucket(&self, s: &Session) -> Option<Bucket> {
         if s.archived || !s.canvas.is_empty() {
@@ -1289,7 +1351,25 @@ impl RunoApp {
         self.home_all || Some(s.project_id) == self.current_project()
     }
 
+    /// The totals, worked out once per frame of the main window, where the sidebar, the
+    /// top bar and Home each ask for them.
     pub(crate) fn counts(&self) -> Counts {
+        thread_local! {
+            static FRAME: std::cell::Cell<Option<(std::time::Instant, Counts)>> =
+                const { std::cell::Cell::new(None) };
+        }
+        let Some(frame) = motion::frame() else {
+            return self.count();
+        };
+        if let Some((_, counts)) = FRAME.get().filter(|(at, _)| *at == frame) {
+            return counts;
+        }
+        let counts = self.count();
+        FRAME.set(Some((frame, counts)));
+        counts
+    }
+
+    fn count(&self) -> Counts {
         let mut counts = Counts::default();
         for s in &self.state.sessions {
             match self.bucket(s) {
@@ -1872,7 +1952,7 @@ impl RunoApp {
         );
         for project in &self.state.projects {
             let pid = project.id;
-            let missing = !std::path::Path::new(&project.path).is_dir();
+            let missing = !checks::is_dir(&project.path);
             let sessions = self
                 .state
                 .sessions
@@ -2189,6 +2269,7 @@ impl RunoApp {
         let (where_name, where_color, where_tip) = self.runs_on();
         let where_session = self.current().map(|s| s.id);
         div()
+            .w_full()
             .h(px(44.))
             .flex_none()
             .flex()
@@ -2621,7 +2702,7 @@ impl RunoApp {
             };
             let provider = agent::provider(&session.provider);
             let active =
-                self.selected == Some(id) && self.view == View::Session && !self.browser_main;
+                self.selected == Some(id) && self.view == View::Session && !self.browser.main;
             let working = self.handles.contains_key(&Target::Session(id));
             let dot = match self.need(session) {
                 _ if working => Some(c_blue()),
@@ -2698,8 +2779,8 @@ impl RunoApp {
                     ),
             ));
         }
-        if self.browser_open {
-            let active = self.browser_main && self.view == View::Session;
+        if self.browser.open {
+            let active = self.browser.main && self.view == View::Session;
             tabs = tabs.child(tab_slot(
                 active,
                 div()
@@ -2732,8 +2813,8 @@ impl RunoApp {
                             .hover(|el| el.bg(divider()))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.stop_propagation();
-                                this.browser_open = false;
-                                this.browser_main = false;
+                                this.browser.open = false;
+                                this.browser.main = false;
                                 cx.notify();
                             }))
                             .child(icon(IconName::X, 11., c_muted())),
@@ -2997,7 +3078,7 @@ impl RunoApp {
         for project in &self.state.projects {
             let pid = project.id;
             let root = std::path::Path::new(&project.path);
-            let missing = !root.is_dir();
+            let missing = !checks::is_dir(&project.path);
             let summary = if missing {
                 "Folder missing".to_string()
             } else {
@@ -3581,7 +3662,7 @@ impl RunoApp {
         // `select` turns to the session's page; the canvas stays and the chat floats over it.
         self.view = view;
         self.canvas_chat = Some(id);
-        self.chat_scroll.scroll_to_bottom();
+        self.jump_to_bottom();
         self.prompt.update(cx, |p, cx| p.focus(window, cx));
     }
 
@@ -3652,12 +3733,27 @@ impl RunoApp {
                         })),
                 );
         let body = div()
-            .id("canvas-chat-body")
+            .relative()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.chat_scroll)
-            .child(self.chat_list(session, working, true, cx));
+            .v_flex()
+            .child(
+                div()
+                    .id("canvas-chat-body")
+                    .flex_1()
+                    .min_h_0()
+                    .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, window, _| {
+                        this.chat_wheel(e, window)
+                    }))
+                    .child({
+                        self.chat_shown[1].set(Some(session.id));
+                        self.part(
+                            panes::Part::CanvasChat,
+                            StyleRefinement::default().size_full(),
+                        )
+                    }),
+            )
+            .children(self.new_messages_pill(session, cx));
         let (top, right, bottom) = inset;
         Some(
             div()

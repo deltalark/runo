@@ -252,11 +252,28 @@ pub fn folders(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Bytes the files under `path` take, without following symlinks.
+/// Whether `meta` (from `symlink_metadata`) is a link: a symlink, or on Windows any
+/// reparse point, junctions included (pnpm's node_modules is full of them).
+pub fn is_link(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    meta.file_type().is_symlink()
+}
+
+/// Bytes the files under `path` take. Links are neither followed nor counted.
 pub fn size(path: &Path) -> u64 {
     let Ok(meta) = path.symlink_metadata() else {
         return 0;
     };
+    if is_link(&meta) {
+        return 0;
+    }
     if !meta.is_dir() {
         return meta.len();
     }
@@ -482,7 +499,11 @@ pub fn scan(projects: &[Project], uses: &[Use], sizes: bool) -> Vec<Item> {
 
 /// Remove one item. `root` guards against anything outside `.runo-worktrees`.
 fn remove_one(item: &Item) -> Result<(), String> {
-    let root = norm(&root_of(&item.repo));
+    remove_one_under(item, &norm(&root_of(&item.repo)))
+}
+
+fn remove_one_under(item: &Item, root: &Path) -> Result<(), String> {
+    let root = root.to_path_buf();
     let path = &item.found.path;
     let inside = || {
         if path != &root && path.starts_with(&root) {
@@ -705,6 +726,86 @@ branch refs/heads/runo/manual
         assert_eq!(human(2048), "2 KB");
         assert_eq!(human(5 << 20), "5.0 MB");
         assert_eq!(human(3 << 30), "3.0 GB");
+    }
+
+    #[test]
+    fn a_clean_worktree_with_commits_not_on_main_is_careful() {
+        let base = std::env::temp_dir().join(format!("runo-cleanup-ahead-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("app");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+        let r = repo.to_str().unwrap();
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        sh(&repo, &["config", "user.email", "t@t"]);
+        sh(&repo, &["config", "user.name", "t"]);
+        sh(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        // Committed and never pushed: the tree is clean, but the work is only here.
+        let ahead = git::add_worktree(r, "runo/ahead", None).unwrap();
+        std::fs::write(Path::new(&ahead).join("f.txt"), "x").unwrap();
+        sh(Path::new(&ahead), &["add", "f.txt"]);
+        sh(Path::new(&ahead), &["commit", "-q", "-m", "work"]);
+        let projects = [Project {
+            name: "app".into(),
+            path: r.into(),
+        }];
+        let items = scan(&projects, &[], false);
+        let worktree = items
+            .iter()
+            .find(|i| i.found.what == What::Worktree)
+            .expect("listed");
+        assert!(!worktree.dirty);
+        assert_eq!(worktree.ahead, 1);
+        assert!(worktree.careful(), "never picked for the person");
+        assert!(worktree.detail().contains("1 commit not on main"));
+        let branch = items
+            .iter()
+            .find(|i| i.found.what == What::Branch)
+            .expect("listed");
+        assert!(branch.careful());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_in_the_worktree_folder_are_never_followed() {
+        let base = std::env::temp_dir().join(format!("runo-cleanup-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join(".runo-worktrees").join("app");
+        let outside = base.join("precious");
+        std::fs::create_dir_all(root.join("runo")).unwrap();
+        std::fs::create_dir_all(outside.join("inner")).unwrap();
+        std::fs::write(outside.join("inner").join("keep.txt"), "x").unwrap();
+        // A link at the top and one inside a branch folder, both to a folder elsewhere.
+        std::os::unix::fs::symlink(&outside, root.join("top-link")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("runo").join("link")).unwrap();
+        let found = folders(&root);
+        // The branch folder holding the link is listed; removing it removes the link,
+        // not what it points at. So does removing a link listed on its own.
+        assert_eq!(found, [root.join("runo")]);
+        let item = |path: PathBuf| Item {
+            repo: String::new(),
+            project: "app".into(),
+            found: Found {
+                what: What::Folder,
+                path,
+                branch: String::new(),
+            },
+            size: 0,
+            merged: true,
+            ahead: 0,
+            base: "main".into(),
+            dirty: false,
+        };
+        let removed = remove_one_under(&item(root.join("top-link")), &root);
+        assert!(removed.is_ok(), "{removed:?}");
+        assert!(root.join("top-link").symlink_metadata().is_err());
+        let item = item(root.join("runo"));
+        let removed = remove_one_under(&item, &root);
+        assert!(removed.is_ok(), "{removed:?}");
+        assert!(!root.join("runo").exists());
+        assert!(outside.join("inner").join("keep.txt").is_file());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn sh(dir: &Path, args: &[&str]) {

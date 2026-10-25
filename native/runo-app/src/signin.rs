@@ -72,26 +72,11 @@ pub fn refresh(force: bool) {
     }
     std::thread::spawn(|| {
         let settings = crate::settings::AppSettings::load();
-        let Some(home) = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(std::path::PathBuf::from)
-        else {
-            return;
-        };
         for p in crate::agent::PROVIDERS.iter() {
             if !crate::caps::get(p.id).installed {
                 continue;
             }
-            let env = settings.agent(p.id).env;
-            let has_var = |key: &str| {
-                std::env::var(key).is_ok_and(|v| !v.is_empty())
-                    || crate::shellenv::login_var(key).is_some_and(|v| !v.is_empty())
-                    || env.lines().any(|line| {
-                        line.split_once('=')
-                            .is_some_and(|(k, v)| k.trim() == key && !v.trim().is_empty())
-                    })
-            };
-            match judge(p.id, &crate::caps::binary(p), &home, &has_var, &run) {
+            match check(p.id, &settings) {
                 Some(true) => set(p.id, true),
                 // A turn ran signed in since: the check missed how this CLI signs in.
                 _ if turn_worked(p.id) => set(p.id, true),
@@ -100,6 +85,35 @@ pub fn refresh(force: bool) {
             }
         }
     });
+}
+
+/// Check now, on this thread, whether `provider` is signed in: for a turn whose errors
+/// read like a sign-in problem, before saying so. None when Runo can't tell.
+pub fn verify(provider: &str) -> Option<bool> {
+    check(provider, &crate::settings::AppSettings::load())
+}
+
+fn check(provider: &str, settings: &crate::settings::AppSettings) -> Option<bool> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)?;
+    let p = crate::agent::PROVIDERS.iter().find(|p| p.id == provider)?;
+    let env = settings.agent(p.id).env;
+    let has_var = |key: &str| {
+        std::env::var(key).is_ok_and(|v| !v.is_empty())
+            || crate::shellenv::login_var(key).is_some_and(|v| !v.is_empty())
+            || env.lines().any(|line| {
+                line.split_once('=')
+                    .is_some_and(|(k, v)| k.trim() == key && !v.trim().is_empty())
+            })
+    };
+    judge(p.id, &crate::caps::binary(p), &home, &has_var, &run)
+}
+
+/// What `claude auth status` says: `"loggedIn": true` or false, None when it said neither.
+fn claude_logged_in(out: &str) -> Option<bool> {
+    let v: serde_json::Value = serde_json::from_str(out.trim()).ok()?;
+    v.get("loggedIn")?.as_bool()
 }
 
 /// Runs a program with arguments: whether it succeeded, and its output.
@@ -188,6 +202,13 @@ fn judge(
             }
         }
         "claude" => {
+            // The CLI's own answer, which knows every way it signs in; older CLIs without
+            // `auth status` fall back to looking for its login.
+            if let Some(signed_in) =
+                run(bin, &["auth", "status", "--json"]).and_then(|(_, out)| claude_logged_in(&out))
+            {
+                return Some(signed_in);
+            }
             if file(".claude/.credentials.json")
                 || read(".claude/settings.json").contains("apiKeyHelper")
                 || read(".claude.json").contains("primaryApiKey")
@@ -232,6 +253,10 @@ fn judge(
                 return None;
             }
             Some(false)
+        }
+        "grok" => {
+            // `grok login` keeps its sign-in here and `grok logout` removes it.
+            Some(read(".grok/auth.json").contains("\"key\""))
         }
         _ => None,
     }
@@ -295,6 +320,47 @@ mod tests {
         assert_eq!(
             judge("codex", "codex", &dir, &unset, &|_: &str, _: &[&str]| None),
             None
+        );
+    }
+
+    #[test]
+    fn claude_asks_its_cli_first() {
+        let dir = home("claude-status");
+        let unset = |_: &str| false;
+        let says = |text: &'static str| move |_: &str, _: &[&str]| Some((true, text.into()));
+        assert_eq!(
+            judge(
+                "claude",
+                "claude",
+                &dir,
+                &unset,
+                &says("{\"loggedIn\": true}")
+            ),
+            Some(true)
+        );
+        // Logged out, even with an old login file lying about.
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        std::fs::write(dir.join(".claude/.credentials.json"), "{}").unwrap();
+        assert_eq!(
+            judge(
+                "claude",
+                "claude",
+                &dir,
+                &unset,
+                &says("{\"loggedIn\": false}")
+            ),
+            Some(false)
+        );
+        // An older CLI without `auth status` falls back to the login file.
+        assert_eq!(
+            judge(
+                "claude",
+                "claude",
+                &dir,
+                &unset,
+                &says("error: unknown command 'auth'")
+            ),
+            Some(true)
         );
     }
 

@@ -1,9 +1,11 @@
 //! Proof of done: the project's checks run after each turn that changed files, a red
 //! result goes back to the agent, and an agent from another vendor reviews the change.
 
+use std::collections::VecDeque;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -35,6 +37,10 @@ pub struct Proof {
     /// Why the checks didn't run, such as a session on a connection.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub skipped: String,
+    /// The checks are waiting for the person to look and press Run (see `hold`), rather
+    /// than skipped for good.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
 }
 
 impl Proof {
@@ -42,8 +48,24 @@ impl Proof {
         !self.results.is_empty() && self.results.iter().all(|r| r.ok)
     }
 
+    /// Checks that ran and failed: what a fix turn is for.
     pub fn failed(&self) -> Vec<&CheckRun> {
-        self.results.iter().filter(|r| !r.ok).collect()
+        self.results
+            .iter()
+            .filter(|r| !r.ok && r.infra.is_empty())
+            .collect()
+    }
+
+    /// Why some checks couldn't run, such as "disk full", one reason each; empty when
+    /// every check ran.
+    pub fn couldnt_run(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for r in &self.results {
+            if !r.ok && !r.infra.is_empty() && !out.contains(&r.infra.as_str()) {
+                out.push(&r.infra);
+            }
+        }
+        out
     }
 }
 
@@ -59,6 +81,45 @@ pub struct CheckRun {
     pub tail: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub timed_out: bool,
+    /// Why the check couldn't run, such as "disk full", when the computer stopped it
+    /// rather than the code: it isn't a failure and doesn't start a fix turn.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub infra: String,
+}
+
+/// Why a check that didn't pass couldn't run, from how it ended and what it printed:
+/// a full disk, a kill by a signal (out of memory, or by hand), the time limit, or a
+/// missing tool. `None` when it ran and failed.
+pub fn infra_reason(
+    code: Option<i32>,
+    signal: Option<i32>,
+    timed_out: bool,
+    output: &str,
+) -> Option<&'static str> {
+    let has = |s: &str| output.contains(s);
+    if has("No space left on device") || has("ENOSPC") || has("os error 28") {
+        return Some("disk full");
+    }
+    if timed_out {
+        return Some("timed out");
+    }
+    // The shell reports a child killed by SIGKILL, SIGTERM or SIGINT as 128 + signal,
+    // and build tools print the signal of a compiler they lost.
+    if signal.is_some()
+        || matches!(code, Some(137 | 143 | 130))
+        || has("signal: 9, SIGKILL")
+        || has("signal: 15, SIGTERM")
+    {
+        return Some("stopped by a signal, maybe out of memory");
+    }
+    if code == Some(127)
+        || code == Some(9009)
+        || has("command not found")
+        || has("is not recognized as an internal or external command")
+    {
+        return Some("a tool is missing");
+    }
+    None
 }
 
 /// The project's checks: one command per line, blank lines and `#` comments skipped.
@@ -70,8 +131,90 @@ pub fn commands(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Checks worth suggesting for the project in `dir`, from its manifests.
+/// How much Runo checks after each turn when it picks the commands itself.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Level {
+    /// Each ecosystem's fast check: a compile, type check or lint, no tests.
+    Quick,
+    /// Tests too, plus lint and build scripts.
+    Full,
+}
+
+impl Level {
+    /// The level a setting names: "full", else Quick.
+    pub fn parse(key: &str) -> Self {
+        if key == "full" {
+            Level::Full
+        } else {
+            Level::Quick
+        }
+    }
+}
+
+/// A project's `check_level`: Runo picks the commands at the Settings level, at its own,
+/// runs the person's commands, or runs none.
+pub const LEVEL_DEFAULT: &str = "";
+pub const LEVEL_QUICK: &str = "quick";
+pub const LEVEL_FULL: &str = "full";
+pub const LEVEL_CUSTOM: &str = "custom";
+pub const LEVEL_OFF: &str = "off";
+
+/// What a project runs after each turn.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Plan {
+    Off,
+    /// The commands the person typed, as they are.
+    Custom(Vec<String>),
+    /// The commands `detect` finds in the session's folder at this level.
+    Detect(Level),
+}
+
+/// A project's level key, with a project saved before levels read as `migrate` would.
+pub fn level_key<'a>(level: Option<&'a str>, checks: &str) -> &'a str {
+    match level {
+        Some(level) => level,
+        None if commands(checks).is_empty() => LEVEL_DEFAULT,
+        None => LEVEL_CUSTOM,
+    }
+}
+
+/// What to run for a project with `level` and typed `checks`, under the Settings level.
+pub fn plan(level: Option<&str>, checks: &str, default: Level) -> Plan {
+    match level_key(level, checks) {
+        LEVEL_OFF => Plan::Off,
+        LEVEL_CUSTOM => Plan::Custom(commands(checks)),
+        LEVEL_QUICK => Plan::Detect(Level::Quick),
+        LEVEL_FULL => Plan::Detect(Level::Full),
+        _ => Plan::Detect(default),
+    }
+}
+
+/// The level for a project saved before levels, and whether its typed checks stay. Its
+/// checks are the person's own unless they are just what Runo suggests for the folder
+/// (`suggested`), which now follow the Settings level, Quick unless changed.
+pub fn migrate(checks: &str, suggested: &[String]) -> (&'static str, bool) {
+    let mut have = commands(checks);
+    if have.is_empty() {
+        return (LEVEL_DEFAULT, false);
+    }
+    let mut found = suggested.to_vec();
+    have.sort();
+    found.sort();
+    if have == found {
+        (LEVEL_DEFAULT, false)
+    } else {
+        (LEVEL_CUSTOM, true)
+    }
+}
+
+/// The full set of checks worth suggesting for the project in `dir`, from its manifests.
 pub fn detect(dir: &Path) -> Vec<String> {
+    detect_at(dir, Level::Full)
+}
+
+/// The checks for the project in `dir` at `level`, from its manifests.
+pub fn detect_at(dir: &Path, level: Level) -> Vec<String> {
+    let quick = level == Level::Quick;
     let mut out = Vec::new();
     let has = |name: &str| dir.join(name).exists();
     if has("package.json") {
@@ -98,63 +241,469 @@ pub fn detect(dir: &Path) -> Vec<String> {
             if script.contains("no test specified") {
                 continue;
             }
+            if quick && !matches!(name, "typecheck" | "lint") {
+                continue;
+            }
             out.push(if pm == "npm" && name == "test" {
                 "npm test".to_string()
             } else {
                 format!("{pm} run {name}")
             });
+            // Quick runs the type check, or the lint when there is none.
+            if quick {
+                break;
+            }
         }
     }
     if has("Cargo.toml") {
-        out.push("cargo test".into());
+        out.push(if quick { "cargo check" } else { "cargo test" }.into());
     }
     if has("go.mod") {
         out.push("go vet ./...".into());
-        out.push("go test ./...".into());
+        if !quick {
+            out.push("go test ./...".into());
+        }
     }
     if has("pyproject.toml") || has("setup.py") || has("requirements.txt") {
         let pyproject = std::fs::read_to_string(dir.join("pyproject.toml")).unwrap_or_default();
         if pyproject.contains("ruff") || has("ruff.toml") || has(".ruff.toml") {
             out.push("ruff check .".into());
         }
-        if pyproject.contains("pytest") || has("pytest.ini") || has("tests") {
+        if !quick && (pyproject.contains("pytest") || has("pytest.ini") || has("tests")) {
             out.push("pytest -q".into());
         }
     }
     if out.is_empty() && has("Makefile") {
         let make = std::fs::read_to_string(dir.join("Makefile")).unwrap_or_default();
-        for target in ["check", "lint", "test"] {
+        let targets: &[&str] = if quick {
+            &["check", "lint"]
+        } else {
+            &["check", "lint", "test"]
+        };
+        for target in targets {
             if make.lines().any(|l| l.starts_with(&format!("{target}:"))) {
                 out.push(format!("make {target}"));
+                if quick {
+                    break;
+                }
             }
         }
     }
     out
 }
 
-/// Run each check in turn in `dir`. Every check runs, so one card shows all that failed.
-pub fn run_all(dir: &str, commands: &[String], limit: Duration) -> Vec<CheckRun> {
-    commands.iter().map(|c| run_one(dir, c, limit)).collect()
+/// What the card says when a turn changed only docs and the checks didn't run.
+pub const DOCS_ONLY: &str = "Checks skipped: only docs changed.";
+
+/// Whether a changed file can't affect any project's checks: prose, images and media,
+/// and git or editor settings. Anything else, such as code, manifests, lockfiles and
+/// build or tool configuration, counts as code.
+pub fn is_docs(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    let name = path.rsplit('/').next().unwrap_or(&path);
+    let lower = name.to_ascii_lowercase();
+    // A top-level folder of documentation.
+    let first = path.split('/').next().unwrap_or("").to_ascii_lowercase();
+    if path.contains('/') && matches!(first.as_str(), "docs" | "doc") {
+        return true;
+    }
+    if path.starts_with(".github/") && !path.starts_with(".github/actions/") {
+        return true;
+    }
+    let stem = lower.split('.').next().unwrap_or("");
+    if matches!(
+        stem,
+        "license" | "licence" | "copying" | "notice" | "authors" | "contributors" | "codeowners"
+    ) || matches!(
+        lower.as_str(),
+        ".gitignore" | ".gitattributes" | ".mailmap" | ".editorconfig"
+    ) {
+        return true;
+    }
+    let Some((_, ext)) = lower.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()) else {
+        return false;
+    };
+    matches!(
+        ext,
+        "md" | "markdown"
+            | "mdown"
+            | "txt"
+            | "rst"
+            | "adoc"
+            | "asciidoc"
+            | "org"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "avif"
+            | "bmp"
+            | "ico"
+            | "icns"
+            | "tif"
+            | "tiff"
+            | "heic"
+            | "psd"
+            | "pdf"
+            | "mp4"
+            | "mov"
+            | "webm"
+            | "mp3"
+            | "wav"
+    )
 }
 
-fn run_one(dir: &str, command: &str, limit: Duration) -> CheckRun {
-    let started = Instant::now();
-    let mut cmd = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.args(["/C", command]);
-        c
+/// Whether a turn's changed files are all docs, so its checks can be skipped. A turn
+/// with no changes recorded doesn't count: its checks run.
+pub fn only_docs(changed: &[String]) -> bool {
+    !changed.is_empty() && changed.iter().all(|p| is_docs(p))
+}
+
+/// Whether a file decides what a check command actually runs: npm scripts, Make and just
+/// recipes, Python and Rust build settings, test and lint configs that are code. A turn
+/// that changed one may have rewritten `npm run lint` into anything, so its checks wait
+/// for the person instead of running on their own.
+pub fn defines_checks(path: &str) -> bool {
+    let path = path.trim_start_matches("./").replace('\\', "/");
+    let name = path.rsplit('/').next().unwrap_or(&path);
+    let lower = name.to_ascii_lowercase();
+    // Folders whose files feed the build tools.
+    if path.starts_with(".cargo/") || path.contains("/.cargo/") {
+        return true;
+    }
+    if path.starts_with(".husky/") || path.starts_with(".config/") {
+        return true;
+    }
+    const FILES: &[&str] = &[
+        // JavaScript
+        "package.json",
+        ".npmrc",
+        ".yarnrc",
+        ".yarnrc.yml",
+        ".pnpmfile.cjs",
+        "pnpm-workspace.yaml",
+        "lerna.json",
+        "nx.json",
+        "turbo.json",
+        "deno.json",
+        "deno.jsonc",
+        "bunfig.toml",
+        // Make, just, task runners
+        "makefile",
+        "gnumakefile",
+        "justfile",
+        ".justfile",
+        "taskfile.yml",
+        "taskfile.yaml",
+        "rakefile",
+        // Python
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "tox.ini",
+        "noxfile.py",
+        "pytest.ini",
+        "conftest.py",
+        // Rust
+        "cargo.toml",
+        "build.rs",
+        "rust-toolchain",
+        "rust-toolchain.toml",
+        // Go, JVM, others
+        "go.mod",
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+        "gradlew",
+        "pom.xml",
+        "mix.exs",
+        "gemfile",
+        "composer.json",
+        ".pre-commit-config.yaml",
+        ".envrc",
+    ];
+    if FILES.contains(&lower.as_str()) || lower.ends_with(".mk") {
+        return true;
+    }
+    // Configs written as code: jest.config.js, vitest.config.ts, eslint.config.mjs,
+    // .eslintrc.cjs, playwright.config.ts and the like.
+    let code = [".js", ".cjs", ".mjs", ".ts", ".cts", ".mts"]
+        .iter()
+        .any(|ext| lower.ends_with(ext));
+    code && (lower.contains(".config.")
+        || lower.starts_with(".eslintrc")
+        || lower.starts_with(".prettierrc"))
+}
+
+/// The changed files among `changed` that define checks (see `defines_checks`).
+pub fn check_files_changed(changed: &[String]) -> Vec<String> {
+    changed
+        .iter()
+        .filter(|p| defines_checks(p))
+        .cloned()
+        .collect()
+}
+
+/// A digest of what the checks in `dir` would run: the commands, and every file at the
+/// top of the folder that defines them. The person's go-ahead holds while it stays the
+/// same, and is asked again once it changes.
+pub fn fingerprint(dir: &Path, commands: &[String]) -> String {
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    for command in commands {
+        ctx.update(command.as_bytes());
+        ctx.update(b"\0");
+    }
+    let mut files: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|name| defines_checks(name))
+        .collect();
+    files.sort();
+    for name in files {
+        ctx.update(name.as_bytes());
+        ctx.update(b"\0");
+        ctx.update(&std::fs::read(dir.join(&name)).unwrap_or_default());
+        ctx.update(b"\0");
+    }
+    ctx.finish()
+        .as_ref()
+        .iter()
+        .take(16)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Why a turn's checks wait for the person instead of running on their own, or None
+/// when they may run. `fork`: the branch came from someone else's fork. `changed`: the
+/// turn's changed files. `asks_shell`: the session's mode asks before shell commands, so
+/// the project's scripts run only once the person has let them (`approved`) as they are.
+pub fn hold(fork: bool, changed: &[String], asks_shell: bool, approved: bool) -> Option<String> {
+    if fork {
+        return Some(
+            "This branch came from someone else's fork, so Runo doesn't run its scripts on its own. Review them and run."
+                .into(),
+        );
+    }
+    let files = check_files_changed(changed);
+    if !files.is_empty() {
+        let shown: Vec<&str> = files.iter().take(3).map(String::as_str).collect();
+        let more = if files.len() > 3 {
+            format!(" and {} more", files.len() - 3)
+        } else {
+            String::new()
+        };
+        return Some(format!(
+            "Checks changed in this turn ({}{more}): review and run.",
+            shown.join(", ")
+        ));
+    }
+    if asks_shell && !approved {
+        return Some(
+            "Checks run the project's own scripts, and this session asks before shell commands. Review and run; they run on their own after that until what they run changes."
+                .into(),
+        );
+    }
+    None
+}
+
+/// Where Cargo should build a linked worktree's checks: the main checkout's own target
+/// folder, so each new worktree reuses its compiled dependencies instead of building
+/// every one again into a target of its own. None when the person set a target already,
+/// outside a worktree, or when the main checkout has no Rust project there.
+pub fn shared_target(dir: &str, commands: &[String]) -> Option<std::path::PathBuf> {
+    if !commands.iter().any(|c| c.contains("cargo"))
+        || std::env::var_os("CARGO_TARGET_DIR").is_some()
+    {
+        return None;
+    }
+    let main = crate::git::main_checkout_dir(dir)?;
+    main.join("Cargo.toml")
+        .is_file()
+        .then(|| main.join("target"))
+}
+
+/// Post-turn check sets across every session and project, at most a set number at once
+/// (see `AppSettings::checks_limit`). The rest wait in order; the time limit only starts
+/// once a set leaves the queue.
+#[derive(Default, Debug)]
+pub struct CheckQueue {
+    running: Vec<u64>,
+    /// Sessions waiting, first in line first, each with whether its turn just finished.
+    waiting: VecDeque<(u64, bool)>,
+}
+
+impl CheckQueue {
+    /// Line up a session's checks, unless they are already waiting or running. `fill`
+    /// says when they start.
+    pub fn join(&mut self, id: u64, auto: bool) {
+        if !self.running.contains(&id) && !self.is_waiting(id) {
+            self.waiting.push_back((id, auto));
+        }
+    }
+
+    /// Move sessions from the front of the line to running while fewer than `limit` run
+    /// (0 for no limit): the ones to start now, in order.
+    pub fn fill(&mut self, limit: usize) -> Vec<(u64, bool)> {
+        let mut out = Vec::new();
+        while limit == 0 || self.running.len() < limit {
+            let Some((id, auto)) = self.waiting.pop_front() else {
+                break;
+            };
+            self.running.push(id);
+            out.push((id, auto));
+        }
+        out
+    }
+
+    /// The session's running checks finished, freeing their place. False when they
+    /// weren't running.
+    pub fn done(&mut self, id: u64) -> bool {
+        let before = self.running.len();
+        self.running.retain(|r| *r != id);
+        self.running.len() != before
+    }
+
+    /// Take a waiting session out of the line. True when it was waiting.
+    pub fn drop_waiting(&mut self, id: u64) -> bool {
+        let before = self.waiting.len();
+        self.waiting.retain(|(w, _)| *w != id);
+        self.waiting.len() != before
+    }
+
+    pub fn is_waiting(&self, id: u64) -> bool {
+        self.waiting.iter().any(|(w, _)| *w == id)
+    }
+}
+
+/// Windows' priority class for checks; processes they start inherit it.
+#[cfg_attr(not(windows), allow(dead_code))]
+const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+
+/// The programs that run a check at low CPU and disk priority on this OS, found by `find`
+/// (a usable path, or `None` when the tool is missing). Children inherit the priority.
+fn low_prefix(mut find: impl FnMut(&str, &[&str]) -> Option<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    if cfg!(target_os = "macos") {
+        // Background QoS: low CPU, disk and network priority.
+        if let Some(tp) = find("taskpolicy", &["-b"]) {
+            out.extend([tp, "-b".into()]);
+        }
+    } else if cfg!(unix) {
+        if let Some(ionice) = find("ionice", &["-c", "3"]) {
+            out.extend([ionice, "-c".into(), "3".into()]);
+        }
+        if let Some(nice) = find("nice", &["-n", "10"]) {
+            out.extend([nice, "-n".into(), "10".into()]);
+        }
+    }
+    out
+}
+
+/// The program and arguments that run `command`, after `prefix`.
+fn check_argv(command: &str, prefix: &[String]) -> Vec<String> {
+    let mut out = prefix.to_vec();
+    if cfg!(windows) {
+        out.extend(["cmd".into(), "/C".into(), command.into()]);
     } else {
         // One pipe for both streams keeps errors next to what led to them.
-        let mut c = Command::new("sh");
-        c.args(["-c", &format!("exec 2>&1\n{command}")]);
-        c
-    };
+        out.extend(["sh".into(), "-c".into(), format!("exec 2>&1\n{command}")]);
+    }
+    out
+}
+
+/// A priority tool that is on this computer and works here (a container may refuse
+/// `ionice`), tried once with `true`.
+fn working_tool(name: &str, args: &[&str]) -> Option<String> {
+    let dirs = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let fixed = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"].map(std::path::PathBuf::from);
+    let path = dirs
+        .into_iter()
+        .chain(fixed)
+        .map(|d| d.join(name))
+        .find(|p| p.is_file())?;
+    let ok = Command::new(&path)
+        .args(args)
+        .arg("true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    ok.then(|| path.to_string_lossy().into_owned())
+}
+
+/// The low-priority prefix for this computer, looked up once. A missing tool is noted
+/// once in the log and its checks run at normal priority.
+fn low_prefix_here() -> &'static [String] {
+    static PREFIX: OnceLock<Vec<String>> = OnceLock::new();
+    PREFIX.get_or_init(|| {
+        let mut missing = Vec::new();
+        let prefix = low_prefix(|name, args| {
+            let found = working_tool(name, args);
+            if found.is_none() {
+                missing.push(name.to_string());
+            }
+            found
+        });
+        if !missing.is_empty() {
+            crate::applog::info(
+                "proof",
+                format!(
+                    "{} isn't available, so checks run without it at normal priority",
+                    missing.join(" and ")
+                ),
+            );
+        }
+        prefix
+    })
+}
+
+/// Run each check in turn in `dir`. Every check runs, so one card shows all that failed.
+/// `low` runs them at low CPU and disk priority, with everything they start.
+/// `env` is added to each check's environment.
+pub fn run_all(
+    dir: &str,
+    commands: &[String],
+    limit: Duration,
+    low: bool,
+    env: &[(String, String)],
+) -> Vec<CheckRun> {
+    commands
+        .iter()
+        .map(|c| run_one(dir, c, limit, low, env))
+        .collect()
+}
+
+fn run_one(
+    dir: &str,
+    command: &str,
+    limit: Duration,
+    low: bool,
+    env: &[(String, String)],
+) -> CheckRun {
+    let started = Instant::now();
+    let prefix = if low { low_prefix_here() } else { &[] };
+    let argv = check_argv(command, prefix);
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    #[cfg(windows)]
+    if low {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(BELOW_NORMAL_PRIORITY_CLASS);
+    }
     cmd.current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("CI", "1")
-        .env("NO_COLOR", "1");
+        .env("NO_COLOR", "1")
+        .envs(env.iter().map(|(k, v)| (k, v)));
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -170,6 +719,12 @@ fn run_one(dir: &str, command: &str, limit: Duration) -> CheckRun {
                 secs: 0,
                 tail: format!("Could not start it: {error}"),
                 timed_out: false,
+                infra: if error.kind() == std::io::ErrorKind::NotFound {
+                    "a tool is missing"
+                } else {
+                    infra_reason(None, None, false, &error.to_string()).unwrap_or_default()
+                }
+                .into(),
             }
         }
     };
@@ -212,6 +767,17 @@ fn run_one(dir: &str, command: &str, limit: Duration) -> CheckRun {
         None => String::new(),
     };
     let timed_out = status.is_none();
+    let ok = status.is_some_and(|s| s.success());
+    let code = status.and_then(|s| s.code());
+    #[cfg(unix)]
+    let signal = status.and_then(|s| std::os::unix::process::ExitStatusExt::signal(&s));
+    #[cfg(not(unix))]
+    let signal = None;
+    let infra = if ok {
+        ""
+    } else {
+        infra_reason(code, signal, timed_out, &text).unwrap_or_default()
+    };
     let mut tail = tail(&crate::agent::strip_ansi(&text));
     if timed_out {
         tail = format!("Stopped after {} minutes.", limit.as_secs() / 60);
@@ -222,10 +788,11 @@ fn run_one(dir: &str, command: &str, limit: Duration) -> CheckRun {
     }
     CheckRun {
         command: command.into(),
-        ok: status.is_some_and(|s| s.success()),
+        ok,
         secs,
         tail,
         timed_out,
+        infra: infra.into(),
     }
 }
 
@@ -249,7 +816,7 @@ pub fn tail(text: &str) -> String {
 pub fn failure_key(results: &[CheckRun]) -> String {
     results
         .iter()
-        .filter(|r| !r.ok)
+        .filter(|r| !r.ok && r.infra.is_empty())
         .map(|r| {
             let end: Vec<&str> = r
                 .tail
@@ -271,7 +838,10 @@ pub fn failure_key(results: &[CheckRun]) -> String {
 
 /// The follow-up that asks the agent to make the failing checks pass.
 pub fn fix_prompt(results: &[CheckRun]) -> String {
-    let failed: Vec<&CheckRun> = results.iter().filter(|r| !r.ok).collect();
+    let failed: Vec<&CheckRun> = results
+        .iter()
+        .filter(|r| !r.ok && r.infra.is_empty())
+        .collect();
     let mut out = format!(
         "Runo ran the project's checks after your last turn and {} failed. Fix the cause in \
          the code. Don't skip, disable or loosen tests or lint rules to make them pass. Run \
@@ -284,8 +854,7 @@ pub fn fix_prompt(results: &[CheckRun]) -> String {
         if failed.len() == 1 { "" } else { "s" }
     );
     for r in failed {
-        let why = if r.timed_out { " (timed out)" } else { "" };
-        out.push_str(&format!("\n`{}`{why}:\n```\n{}\n```\n", r.command, r.tail));
+        out.push_str(&format!("\n`{}`:\n```\n{}\n```\n", r.command, r.tail));
     }
     out
 }
@@ -299,12 +868,12 @@ pub fn tested_note(proof: &Proof) -> String {
         .results
         .iter()
         .map(|r| {
-            let verdict = if r.timed_out {
-                "timed out"
-            } else if r.ok {
-                "passed"
+            let verdict = if r.ok {
+                "passed".to_string()
+            } else if !r.infra.is_empty() {
+                format!("couldn't run: {}", r.infra)
             } else {
-                "failed"
+                "failed".to_string()
             };
             format!("`{}` {verdict} ({}s)", r.command, r.secs)
         })
@@ -405,6 +974,89 @@ pub fn review_summary(name: &str, findings: usize, said_none: bool) -> String {
 }
 
 #[cfg(test)]
+mod hold_tests {
+    use super::*;
+
+    #[test]
+    fn files_that_define_checks_are_known() {
+        for path in [
+            "package.json",
+            "web/package.json",
+            "Makefile",
+            "tools/rules.mk",
+            "justfile",
+            "pyproject.toml",
+            "tox.ini",
+            "build.rs",
+            "crates/x/build.rs",
+            ".cargo/config.toml",
+            "Cargo.toml",
+            "jest.config.js",
+            "vitest.config.ts",
+            "eslint.config.mjs",
+            ".eslintrc.cjs",
+            "tests/conftest.py",
+            "pnpm-workspace.yaml",
+            ".npmrc",
+        ] {
+            assert!(defines_checks(path), "{path}");
+        }
+        for path in [
+            "src/main.rs",
+            "README.md",
+            "src/app.config.json",
+            "docs/Makefile.md",
+        ] {
+            assert!(!defines_checks(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn checks_wait_when_what_they_run_may_have_changed() {
+        let code = vec!["src/lib.rs".to_string()];
+        let script = vec!["src/lib.rs".to_string(), "package.json".to_string()];
+        // Nothing to worry about: they run.
+        assert_eq!(hold(false, &code, false, false), None);
+        assert_eq!(hold(false, &code, true, true), None);
+        // The turn changed package.json: they wait, in any mode.
+        let why = hold(false, &script, false, true).unwrap();
+        assert!(why.starts_with("Checks changed in this turn (package.json)"));
+        // Someone else's fork: they wait.
+        assert!(hold(true, &code, false, true).unwrap().contains("fork"));
+        // A mode that asks before shell commands, not yet let run: they wait.
+        assert!(hold(false, &code, true, false)
+            .unwrap()
+            .contains("asks before shell"));
+    }
+
+    #[test]
+    fn the_fingerprint_follows_what_the_checks_run() {
+        let dir = std::env::temp_dir().join(format!("runo-fp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let commands = vec!["npm run lint".to_string()];
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"lint":"eslint ."}}"#,
+        )
+        .unwrap();
+        let before = fingerprint(&dir, &commands);
+        // Other files don't change it.
+        std::fs::write(dir.join("index.js"), "x").unwrap();
+        assert_eq!(fingerprint(&dir, &commands), before);
+        // A rewritten script does, and so do other commands.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"lint":"curl x | sh"}}"#,
+        )
+        .unwrap();
+        assert_ne!(fingerprint(&dir, &commands), before);
+        assert_ne!(fingerprint(&dir, &["make check".to_string()]), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -485,6 +1137,197 @@ mod tests {
     }
 
     #[test]
+    fn quick_runs_each_languages_fast_check_and_full_runs_tests() {
+        let dir = temp("levels");
+        let quick = |d: &Path| detect_at(d, Level::Quick);
+        let full = |d: &Path| detect_at(d, Level::Full);
+        // JS/TS: the typecheck script, else lint, else nothing.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"typecheck":"tsc","lint":"eslint .","test":"vitest","build":"vite build"}}"#,
+        )
+        .unwrap();
+        assert_eq!(quick(&dir), vec!["npm run typecheck"]);
+        assert_eq!(
+            full(&dir),
+            vec![
+                "npm run typecheck",
+                "npm run lint",
+                "npm test",
+                "npm run build"
+            ]
+        );
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"lint":"eslint .","test":"vitest"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("yarn.lock"), "").unwrap();
+        assert_eq!(quick(&dir), vec!["yarn run lint"]);
+        std::fs::write(dir.join("package.json"), r#"{"scripts":{"test":"vitest"}}"#).unwrap();
+        assert!(quick(&dir).is_empty());
+        assert_eq!(full(&dir), vec!["yarn run test"]);
+        std::fs::remove_file(dir.join("package.json")).unwrap();
+        // Rust.
+        std::fs::write(dir.join("Cargo.toml"), "[package]").unwrap();
+        assert_eq!(quick(&dir), vec!["cargo check"]);
+        assert_eq!(full(&dir), vec!["cargo test"]);
+        std::fs::remove_file(dir.join("Cargo.toml")).unwrap();
+        // Go.
+        std::fs::write(dir.join("go.mod"), "module x").unwrap();
+        assert_eq!(quick(&dir), vec!["go vet ./..."]);
+        assert_eq!(full(&dir), vec!["go vet ./...", "go test ./..."]);
+        std::fs::remove_file(dir.join("go.mod")).unwrap();
+        // Python: ruff, no pytest.
+        std::fs::write(
+            dir.join("pyproject.toml"),
+            "[tool.ruff]\n[tool.pytest.ini_options]\n",
+        )
+        .unwrap();
+        assert_eq!(quick(&dir), vec!["ruff check ."]);
+        assert_eq!(full(&dir), vec!["ruff check .", "pytest -q"]);
+        std::fs::remove_file(dir.join("pyproject.toml")).unwrap();
+        // make: check, else lint.
+        std::fs::write(
+            dir.join("Makefile"),
+            "lint:\n\tx\ncheck:\n\ty\ntest:\n\tz\n",
+        )
+        .unwrap();
+        assert_eq!(quick(&dir), vec!["make check"]);
+        assert_eq!(full(&dir), vec!["make check", "make lint", "make test"]);
+        std::fs::write(dir.join("Makefile"), "lint:\n\tx\ntest:\n\tz\n").unwrap();
+        assert_eq!(quick(&dir), vec!["make lint"]);
+        std::fs::write(dir.join("Makefile"), "test:\n\tz\n").unwrap();
+        assert!(quick(&dir).is_empty());
+        assert_eq!(detect(&dir), full(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn projects_follow_their_level_and_keep_typed_commands() {
+        let typed = "make e2e\n";
+        assert_eq!(plan(None, "", Level::Quick), Plan::Detect(Level::Quick));
+        assert_eq!(
+            plan(None, typed, Level::Quick),
+            Plan::Custom(vec!["make e2e".into()])
+        );
+        assert_eq!(
+            plan(Some(""), typed, Level::Full),
+            Plan::Detect(Level::Full)
+        );
+        assert_eq!(
+            plan(Some("quick"), "", Level::Full),
+            Plan::Detect(Level::Quick)
+        );
+        assert_eq!(
+            plan(Some("full"), "", Level::Quick),
+            Plan::Detect(Level::Full)
+        );
+        assert_eq!(
+            plan(Some("custom"), typed, Level::Quick),
+            Plan::Custom(vec!["make e2e".into()])
+        );
+        assert_eq!(plan(Some("off"), typed, Level::Quick), Plan::Off);
+        assert_eq!(Level::parse("full"), Level::Full);
+        assert_eq!(Level::parse(""), Level::Quick);
+    }
+
+    #[test]
+    fn old_projects_move_to_quick_unless_their_commands_were_typed() {
+        let suggested = vec!["pnpm run lint".to_string(), "cargo test".to_string()];
+        // No checks: the Settings level, Quick unless changed.
+        assert_eq!(migrate("", &suggested), (LEVEL_DEFAULT, false));
+        // Just what Runo suggested, in any order: the Settings level too.
+        assert_eq!(
+            migrate("cargo test\npnpm run lint\n", &suggested),
+            (LEVEL_DEFAULT, false)
+        );
+        // Anything the person changed stays as typed.
+        assert_eq!(migrate("cargo test", &suggested), (LEVEL_CUSTOM, true));
+        assert_eq!(migrate("cargo nextest run", &[]), (LEVEL_CUSTOM, true));
+        assert_eq!(level_key(None, "cargo nextest run"), LEVEL_CUSTOM);
+        assert_eq!(level_key(None, "# none\n"), LEVEL_DEFAULT);
+    }
+
+    #[test]
+    fn the_computer_stopping_a_check_is_not_a_failure() {
+        let disk = "error: failed to write: No space left on device (os error 28)";
+        assert_eq!(
+            infra_reason(Some(101), None, false, disk),
+            Some("disk full")
+        );
+        assert_eq!(
+            infra_reason(Some(1), None, false, "npm ERR! ENOSPC"),
+            Some("disk full")
+        );
+        assert_eq!(infra_reason(None, None, true, ""), Some("timed out"));
+        assert!(infra_reason(None, Some(9), false, "")
+            .unwrap()
+            .contains("signal"));
+        assert!(infra_reason(Some(137), None, false, "")
+            .unwrap()
+            .contains("signal"));
+        let lost = "error: could not compile `x`\nCaused by: process didn't exit successfully: `rustc` (signal: 9, SIGKILL: kill)";
+        assert!(infra_reason(Some(101), None, false, lost)
+            .unwrap()
+            .contains("signal"));
+        assert_eq!(
+            infra_reason(Some(127), None, false, "sh: ruff: command not found"),
+            Some("a tool is missing")
+        );
+        // The code failing is a failure.
+        assert_eq!(
+            infra_reason(Some(101), None, false, "test x ... FAILED"),
+            None
+        );
+        assert_eq!(
+            infra_reason(Some(1), None, false, "error[E0308]: mismatched types"),
+            None
+        );
+
+        let proof = Proof {
+            results: vec![
+                CheckRun {
+                    command: "cargo check".into(),
+                    ok: false,
+                    tail: disk.into(),
+                    infra: "disk full".into(),
+                    ..Default::default()
+                },
+                CheckRun {
+                    command: "go vet ./...".into(),
+                    ok: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(!proof.passed());
+        assert!(proof.failed().is_empty());
+        assert_eq!(proof.couldnt_run(), vec!["disk full"]);
+        assert_eq!(failure_key(&proof.results), "");
+        assert!(tested_note(&proof).contains("`cargo check` couldn't run: disk full"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_tool_or_a_kill_is_reported_as_couldnt_run() {
+        let dir = temp("infra");
+        let d = dir.to_string_lossy().to_string();
+        let limit = Duration::from_secs(20);
+        let missing = run_one(&d, "no-such-tool-for-runo-checks", limit, false, &[]);
+        assert!(!missing.ok);
+        assert_eq!(missing.infra, "a tool is missing", "{missing:?}");
+        let killed = run_one(&d, "kill -9 $$", limit, false, &[]);
+        assert!(!killed.ok && killed.infra.contains("signal"), "{killed:?}");
+        let failed = run_one(&d, "exit 1", limit, false, &[]);
+        assert!(!failed.ok && failed.infra.is_empty());
+        let timed = run_one(&d, "sleep 5", Duration::from_millis(300), false, &[]);
+        assert_eq!(timed.infra, "timed out");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn makefile_targets_are_used_when_nothing_else_is_found() {
         let dir = temp("make");
         std::fs::write(
@@ -505,14 +1348,243 @@ mod tests {
             &d,
             &["echo fine".into(), "echo broke >&2; exit 3".into()],
             Duration::from_secs(20),
+            false,
+            &[],
         );
         assert!(runs[0].ok);
         assert_eq!(runs[0].tail, "fine");
         assert!(!runs[1].ok);
         assert_eq!(runs[1].tail, "broke");
-        let timed = run_one(&d, "sleep 5", Duration::from_millis(300));
+        let timed = run_one(&d, "sleep 5", Duration::from_millis(300), true, &[]);
         assert!(!timed.ok && timed.timed_out);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checks_wait_their_turn_in_order() {
+        let mut q = CheckQueue::default();
+        q.join(1, true);
+        assert_eq!(q.fill(1), [(1, true)]);
+        q.join(2, true);
+        q.join(3, false);
+        assert!(q.fill(1).is_empty());
+        // Asking again while waiting or running keeps its place.
+        q.join(2, false);
+        q.join(1, true);
+        assert!(q.is_waiting(2) && q.is_waiting(3) && !q.is_waiting(1));
+        // Only a running set's end moves the line on.
+        assert!(!q.done(3));
+        assert!(q.fill(1).is_empty());
+        assert!(q.done(1));
+        assert_eq!(q.fill(1), [(2, true)]);
+        assert!(!q.is_waiting(2));
+        assert!(q.done(2));
+        assert_eq!(q.fill(1), [(3, false)]);
+        assert!(q.done(3));
+        q.join(4, true);
+        assert_eq!(q.fill(1), [(4, true)]);
+    }
+
+    #[test]
+    fn several_check_sets_run_at_once_and_the_rest_keep_their_order() {
+        let mut q = CheckQueue::default();
+        for id in 1..=5 {
+            q.join(id, id % 2 == 0);
+        }
+        assert_eq!(q.fill(2), [(1, false), (2, true)]);
+        assert!(q.fill(2).is_empty());
+        assert!(q.is_waiting(3) && q.is_waiting(4) && q.is_waiting(5));
+        // Whichever finishes first, the next in line takes its place.
+        assert!(q.done(2));
+        assert_eq!(q.fill(2), [(3, false)]);
+        assert!(q.done(1));
+        assert!(q.done(3));
+        assert_eq!(q.fill(2), [(4, true), (5, false)]);
+        // A higher limit starts more at once; none starts everything waiting.
+        for id in 6..=9 {
+            q.join(id, true);
+        }
+        assert_eq!(q.fill(3), [(6, true)]);
+        assert_eq!(q.fill(0).len(), 3);
+        assert!(!q.is_waiting(9));
+        // A lower limit lets running sets finish but starts none until it's met again.
+        q.join(10, true);
+        assert!(q.fill(1).is_empty());
+        for id in [4, 5, 6, 7, 8] {
+            q.done(id);
+        }
+        assert!(q.fill(1).is_empty());
+        q.done(9);
+        assert_eq!(q.fill(1), [(10, true)]);
+    }
+
+    #[test]
+    fn a_cancelled_session_leaves_the_line() {
+        let mut q = CheckQueue::default();
+        for id in 1..=4 {
+            q.join(id, true);
+        }
+        assert_eq!(q.fill(2).len(), 2);
+        assert!(q.drop_waiting(3));
+        assert!(!q.drop_waiting(3));
+        // Running sets aren't dropped; they finish and hand on.
+        assert!(!q.drop_waiting(1));
+        assert!(q.done(1));
+        assert_eq!(q.fill(2), [(4, true)]);
+        assert!(q.done(2) && q.done(4));
+        assert!(q.fill(2).is_empty());
+    }
+
+    /// The limit is each check's own, counted from when it starts: two checks that each
+    /// take most of it both pass, though together they take longer than it.
+    #[cfg(unix)]
+    #[test]
+    fn the_time_limit_starts_when_the_check_starts() {
+        let dir = temp("limit");
+        let d = dir.to_string_lossy().to_string();
+        let limit = Duration::from_millis(1500);
+        // Time spent waiting in the queue before the run doesn't count either.
+        let mut q = CheckQueue::default();
+        for id in 1..=3 {
+            q.join(id, true);
+        }
+        assert_eq!(q.fill(2).len(), 2);
+        std::thread::sleep(Duration::from_millis(1600));
+        assert!(q.done(1));
+        assert_eq!(q.fill(2), [(3, true)]);
+        // Two sets running side by side each keep their own limit.
+        let sets: Vec<_> = (0..2)
+            .map(|_| {
+                let d = d.clone();
+                std::thread::spawn(move || {
+                    run_all(&d, &["sleep 1".into(), "sleep 1".into()], limit, true, &[])
+                })
+            })
+            .collect();
+        for set in sets {
+            let runs = set.join().unwrap();
+            assert!(runs.iter().all(|r| r.ok && !r.timed_out), "{runs:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checks_run_normally_without_a_priority_tool() {
+        let argv = check_argv("make test", &low_prefix(|_, _| None));
+        if cfg!(windows) {
+            assert_eq!(argv, ["cmd", "/C", "make test"]);
+        } else {
+            assert_eq!(argv, ["sh", "-c", "exec 2>&1\nmake test"]);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_checks_run_with_background_priority() {
+        let prefix = low_prefix(|name, _| Some(format!("/usr/sbin/{name}")));
+        assert_eq!(
+            check_argv("npm test", &prefix),
+            [
+                "/usr/sbin/taskpolicy",
+                "-b",
+                "sh",
+                "-c",
+                "exec 2>&1\nnpm test"
+            ]
+        );
+        // What the check starts runs in the background band too (priority 4).
+        let dir = temp("mac-low");
+        let run = run_one(
+            &dir.to_string_lossy(),
+            "sh -c 'ps -o pri= -p $$'",
+            Duration::from_secs(20),
+            true,
+            &[],
+        );
+        assert_eq!(run.tail.trim(), "4", "{run:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn linux_checks_run_niced_and_idle_for_disk() {
+        let prefix = low_prefix(|name, _| Some(format!("/usr/bin/{name}")));
+        assert_eq!(
+            check_argv("go test ./...", &prefix),
+            [
+                "/usr/bin/ionice",
+                "-c",
+                "3",
+                "/usr/bin/nice",
+                "-n",
+                "10",
+                "sh",
+                "-c",
+                "exec 2>&1\ngo test ./..."
+            ]
+        );
+        // Without ionice, nice alone.
+        let prefix = low_prefix(|name, _| (name == "nice").then(|| "nice".to_string()));
+        assert_eq!(prefix, ["nice", "-n", "10"]);
+        // What the check starts inherits the niceness.
+        let dir = temp("linux-low");
+        let run = run_one(
+            &dir.to_string_lossy(),
+            "sh -c nice",
+            Duration::from_secs(20),
+            true,
+            &[],
+        );
+        assert_eq!(run.tail.trim(), "10", "{run:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_checks_start_below_normal() {
+        assert!(low_prefix(|_, _| Some("x".into())).is_empty());
+        assert_eq!(BELOW_NORMAL_PRIORITY_CLASS, 0x4000);
+    }
+
+    #[test]
+    fn turns_that_change_only_docs_skip_their_checks() {
+        let files = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(only_docs(&files(&["README.md"])));
+        assert!(only_docs(&files(&[
+            "docs/perf-audit.md",
+            "docs/guide/setup.html",
+            "CHANGELOG.md",
+            "notes.txt",
+            "assets/logo.png",
+            "public/Shot.JPG",
+            "LICENSE",
+            "NOTICE",
+            ".gitignore",
+            ".github/workflows/ci.yml",
+            "native\\app\\docs.rst",
+        ])));
+        // Any code, manifest, lockfile or tool configuration runs them, in any language.
+        for code in [
+            "src/main.rs",
+            "app/views.py",
+            "web/index.ts",
+            "cmd/main.go",
+            "Cargo.toml",
+            "Cargo.lock",
+            "package.json",
+            "pnpm-lock.yaml",
+            "tsconfig.json",
+            "Makefile",
+            ".eslintrc",
+            "src/docs/mod.rs",
+            "README",
+            ".github/actions/setup/action.yml",
+            "assets/icon.svg",
+        ] {
+            assert!(!only_docs(&files(&["README.md", code])), "{code}");
+        }
+        // Nothing recorded as changed: the checks run, as before.
+        assert!(!only_docs(&[]));
     }
 
     #[test]

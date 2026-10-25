@@ -379,9 +379,7 @@ impl RunoApp {
         let Some((name, text)) = self.playbook_text(id) else {
             return;
         };
-        let dir = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
+        let dir = crate::store::home_dir().unwrap_or_else(std::env::temp_dir);
         let rx = cx.prompt_for_new_path(&dir, Some(&name));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = rx.await {

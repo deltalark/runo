@@ -634,6 +634,7 @@ impl RunoApp {
         self.update_checked = Some(std::time::Instant::now());
         let tx = self.tx.clone();
         std::thread::spawn(move || {
+            crate::shellenv::ready();
             // Discovery runs at start; give it a moment to read installed versions.
             let start = std::time::Instant::now();
             let ready = || {
@@ -1040,14 +1041,25 @@ impl RunoApp {
 
     /// The permission request a session is waiting on now, if any.
     pub(crate) fn approval_for(&self, id: u64) -> Option<&approvals::Request> {
+        if self.approvals.is_empty() {
+            return None;
+        }
+        // Only a request from the session's folder can be its; the rest needn't be traced
+        // back to a session each.
+        let dir = &self.state.session(id)?.dir;
         self.approvals
             .iter()
+            .filter(|r| r.dir == *dir)
             .find(|r| self.approval_session(r) == Some(id))
     }
 
     /// Pick up the permission requests agents wait on, answering at once the tools the
     /// person always allowed for that session, and drop ones nobody waits for any more.
     pub(crate) fn poll_approvals(&mut self, cx: &mut Context<Self>) {
+        // Only a running agent can ask, and only one shown can be dropped.
+        if self.handles.is_empty() && self.turns.is_empty() && self.approvals.is_empty() {
+            return;
+        }
         let base = approvals::folder();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1062,7 +1074,9 @@ impl RunoApp {
             let Some(id) = self.approval_session(&request) else {
                 continue;
             };
-            if self.always_allowed.contains(&(id, request.tool.clone())) {
+            if self.always_allowed.iter().any(|(sid, rule)| {
+                *sid == id && approvals::rule_allows(rule, &request.tool, &request.input)
+            }) {
                 let allow = approvals::Answer::Allow {
                     updated_input: request.input.clone(),
                 };
@@ -1093,6 +1107,7 @@ impl RunoApp {
             }
         }
         self.approvals = live;
+        self.show_dock(cx);
         cx.notify();
     }
 
@@ -1133,22 +1148,37 @@ impl RunoApp {
         let what = approvals::describe(&request.tool, &request.input);
         let session = self.approval_session(request);
         self.approvals.retain(|r| r.id != request.id);
-        if approvals::answer(&approvals::folder(), &request.id, &answer).is_err() {
-            self.fail(
-                "alerts",
-                "The agent stopped waiting for that answer: it timed out or its turn ended.".into(),
-            );
+        if let Err(e) = approvals::answer(&approvals::folder(), &request.id, &answer) {
+            let why = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                "The agent asked before Runo last restarted, so Runo can't sign an answer it would trust. It stops waiting on its own; ask it again in a follow-up."
+            } else {
+                "The agent stopped waiting for that answer: it timed out or its turn ended."
+            };
+            self.fail("alerts", why.into());
             cx.notify();
             return;
         }
         if let Some(id) = session {
             match allow {
-                Some(true) => {
-                    self.always_allowed.insert((id, request.tool.clone()));
-                    if let Some(provider) = self.state.session(id).map(|s| s.provider.clone()) {
-                        self.allow_tools_for(&provider, std::slice::from_ref(&request.tool), cx);
+                // Saved narrowed to this command (or prefix) and this project, never as a
+                // bare Bash; a command that can't be narrowed is allowed this once.
+                Some(true) => match approvals::always_rule(&request.tool, &request.input) {
+                    Some(rule) => {
+                        self.always_allowed.insert((id, rule.clone()));
+                        if let Some((provider, project)) = self
+                            .state
+                            .session(id)
+                            .map(|s| (s.provider.clone(), s.project_id))
+                        {
+                            self.allow_tools_for(&provider, project, std::slice::from_ref(&rule), cx);
+                        }
+                        self.state.log(id, format!("Always allowed {rule} in this project"));
                     }
-                }
+                    None => self.state.log(
+                        id,
+                        "Allowed once: this command chains, redirects or spans lines, so Runo can't save it as a rule",
+                    ),
+                },
                 Some(false) => {}
                 None => self
                     .refused
@@ -1180,7 +1210,38 @@ impl RunoApp {
         cx: &mut Context<Self>,
     ) -> Div {
         let (once, always, deny) = (request.clone(), request.clone(), request.clone());
-        div()
+        // What Always would save; a command that can't be narrowed has no Always.
+        let rule = approvals::always_rule(&request.tool, &request.input);
+        // The whole command, not just its first line: scrollable, in monospace, with
+        // anything invisible written out.
+        let command =
+            approvals::full_text(&request.tool, &request.input).map(|text| {
+                let lines = text.lines().count();
+                div()
+                    .v_flex()
+                    .gap_1()
+                    .when(lines > 1, |el| {
+                        el.child(div().text_size(px(11.5)).text_color(rgb(c_amber())).child(
+                            format!("{lines} lines: read all of it before you allow it."),
+                        ))
+                    })
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("{prefix}-ap-cmd-{n}")))
+                            .max_h(px(180.))
+                            .overflow_y_scroll()
+                            .p_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(c_border()))
+                            .bg(tint(c_subtle()))
+                            .font_family(self.mono_font.clone())
+                            .text_size(px(12.))
+                            .text_color(rgb(c_text()))
+                            .child(text),
+                    )
+            });
+        let buttons = div()
             .flex()
             .flex_wrap()
             .items_center()
@@ -1197,20 +1258,24 @@ impl RunoApp {
                     cx.listener(move |this, _, _, cx| this.answer_approval(&once, Some(false), cx)),
                 ),
             )
-            .child(
-                self.button(
-                    SharedString::from(format!("{prefix}-ap-always-{n}")),
-                    "Always allow",
-                    true,
-                )
-                .h(px(26.))
-                .child(icon(IconName::ShieldCheck, 12., c_canvas()))
-                .on_click(
-                    cx.listener(move |this, _, _, cx| {
+            .when_some(rule, |el, rule| {
+                let tip = format!("Never ask again in this project for {rule}");
+                el.child(
+                    self.button(
+                        SharedString::from(format!("{prefix}-ap-always-{n}")),
+                        "Always allow",
+                        true,
+                    )
+                    .h(px(26.))
+                    .child(icon(IconName::ShieldCheck, 12., c_canvas()))
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         this.answer_approval(&always, Some(true), cx)
-                    }),
-                ),
-            )
+                    })),
+                )
+            })
             .child(
                 self.button(
                     SharedString::from(format!("{prefix}-ap-deny-{n}")),
@@ -1220,7 +1285,74 @@ impl RunoApp {
                 .h(px(26.))
                 .child(icon(IconName::X, 12., c_secondary()))
                 .on_click(cx.listener(move |this, _, _, cx| this.answer_approval(&deny, None, cx))),
+            );
+        div().v_flex().gap_2().children(command).child(buttons)
+    }
+
+    /// Asked once: an "Always allow" from before it was narrowed saved a bare `Bash`,
+    /// which lets that agent run any command without asking, in every project.
+    fn any_shell_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let settings = cx.global::<AppSettings>();
+        if settings.any_shell_asked || self.alerts_hidden.contains("any-shell") {
+            return None;
+        }
+        let mut names: Vec<String> = settings
+            .agents
+            .iter()
+            .filter(|(_, o)| o.allows_any_shell())
+            .map(|(id, _)| agent::provider(id).name.to_string())
+            .collect();
+        if names.is_empty() {
+            return None;
+        }
+        names.sort();
+        let answer = |remove: bool| {
+            move |this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                let mut st = cx.global::<AppSettings>().clone();
+                if remove {
+                    for opts in st.agents.values_mut() {
+                        opts.drop_any_shell();
+                    }
+                    this.always_allowed
+                        .retain(|(_, rule)| !approvals::is_bare_bash(rule));
+                }
+                st.any_shell_asked = true;
+                st.save();
+                cx.set_global(st);
+                cx.notify();
+            }
+        };
+        let actions = div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .child(
+                self.button("any-shell-remove", "Ask again", true)
+                    .h(px(26.))
+                    .child(icon(IconName::ShieldCheck, 12., c_canvas()))
+                    .on_click(cx.listener(answer(true))),
             )
+            .child(
+                self.button("any-shell-keep", "Keep allowing", false)
+                    .h(px(26.))
+                    .on_click(cx.listener(answer(false))),
+            );
+        Some(self.alert_card(
+            "alert-any-shell".into(),
+            c_amber(),
+            IconName::ShieldAlert,
+            "Any command allowed",
+            None,
+            None,
+            format!(
+                "An earlier Always allow lets {} run any shell command without asking, in every project. Always allow now saves only the command it was for, in its project. Ask before commands again?",
+                and_list(&names)
+            ),
+            actions,
+            "any-shell".into(),
+            None,
+            cx,
+        ))
     }
 
     /// Sessions waiting on the person, except the one already on screen.
@@ -1244,6 +1376,9 @@ impl RunoApp {
             return None;
         }
         let mut cards: Vec<AnyElement> = Vec::new();
+        if let Some(card) = self.any_shell_card(cx) {
+            cards.push(card);
+        }
         // Agents waiting mid-turn come first: their turn is paused on the answer.
         for (n, request) in self.approvals.iter().enumerate() {
             let key = format!("a:{}", request.id);
@@ -1348,18 +1483,24 @@ impl RunoApp {
                                 .h(px(26.))
                                 .child(icon(IconName::ShieldCheck, 12., c_canvas()))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(provider) =
-                                        this.state.session(id).map(|s| s.provider.clone())
+                                    // A bare Bash isn't saved; it is allowed for this answer.
+                                    let once = match this
+                                        .state
+                                        .session(id)
+                                        .map(|s| (s.provider.clone(), s.project_id))
                                     {
-                                        this.allow_tools_for(&provider, &always, cx);
-                                    }
+                                        Some((provider, project)) => {
+                                            this.allow_tools_for(&provider, project, &always, cx)
+                                        }
+                                        None => always.clone(),
+                                    };
                                     this.answer_session(
                                         id,
                                         format!(
                                             "You now have permission to use {}. Continue.",
                                             always.join(", ")
                                         ),
-                                        Vec::new(),
+                                        once,
                                         cx,
                                     );
                                     cx.notify();

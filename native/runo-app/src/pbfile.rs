@@ -320,8 +320,8 @@ pub fn fetch(source: &str) -> Result<Fetched, String> {
 
 fn expand_home(source: &str) -> PathBuf {
     match source.strip_prefix("~/") {
-        Some(rest) => std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join(rest))
+        Some(rest) => crate::store::home_dir()
+            .map(|h| h.join(rest))
             .unwrap_or_else(|| PathBuf::from(source)),
         None => PathBuf::from(source),
     }
@@ -373,6 +373,16 @@ fn split_tree(url: &str) -> (String, Option<String>, Option<String>) {
 
 fn fetch_repo(source: &str) -> Result<Fetched, String> {
     let (repo, branch, folder) = split_tree(source);
+    // git would read `--upload-pack=…` as an option, and `..` would leave the clone.
+    if repo.starts_with('-') || branch.as_deref().is_some_and(|b| b.starts_with('-')) {
+        return Err("That isn't a repository link.".into());
+    }
+    if folder
+        .as_deref()
+        .is_some_and(|f| f.split(['/', '\\']).any(|part| part == ".."))
+    {
+        return Err("That link's folder points outside the repository.".into());
+    }
     let dir = std::env::temp_dir().join(format!(
         "runo-playbooks-{}-{}",
         std::process::id(),
@@ -386,7 +396,11 @@ fn fetch_repo(source: &str) -> Result<Fetched, String> {
     if let Some(branch) = &branch {
         command.args(["--branch", branch]);
     }
-    command.arg(&repo).arg(&dir).env("GIT_TERMINAL_PROMPT", "0");
+    command
+        .arg("--")
+        .arg(&repo)
+        .arg(&dir)
+        .env("GIT_TERMINAL_PROMPT", "0");
     let out = command
         .output()
         .map_err(|_| "Couldn't clone it: git isn't available.".to_string())?;
@@ -480,6 +494,17 @@ pub fn newer(candidate: &str, installed: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repository_link_cant_carry_options_or_leave_the_clone() {
+        for source in [
+            "--upload-pack=touch /tmp/x;.git",
+            "https://github.com/o/r/tree/main/../../etc",
+            "https://github.com/o/r/tree/--upload-pack=x/f",
+        ] {
+            assert!(fetch_repo(source).is_err(), "{source}");
+        }
+    }
 
     const SAMPLE: &str = "+++\nname = \"Release notes\"\ndescription = \"Draft notes\"\nauthor = \"anish\"\nversion = \"1.2.0\"\nagent = \"claude\"\npermissions = [\"shell\", \"bogus\"]\n\n[[inputs]]\nkey = \"since\"\nlabel = \"Compare from\"\ndefault = \"the last tag\"\n+++\n\nRead the commits since {{since}} on {{ branch }}.\n";
 

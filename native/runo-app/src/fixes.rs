@@ -218,7 +218,7 @@ impl RunoApp {
             .unwrap_or_default();
         self.next_shell += 1;
         let shell_id = self.next_shell;
-        let tx = self.tx.clone();
+        let wake = self.pty_wake();
         let (rows, cols) = self.term_grid();
         match pty::Shell::spawn_program(
             shell_id,
@@ -227,9 +227,7 @@ impl RunoApp {
             rows,
             cols,
             Some(pty::Program::of(&command)),
-            move |sid| {
-                let _ = tx.send(Event::Pty(sid));
-            },
+            wake,
         ) {
             Ok(mut shell) => {
                 shell.title = format!("Sign in to {}", p.name);
@@ -282,7 +280,7 @@ impl RunoApp {
         };
         self.next_shell += 1;
         let shell_id = self.next_shell;
-        let tx = self.tx.clone();
+        let wake = self.pty_wake();
         let (rows, cols) = self.term_grid();
         match pty::Shell::spawn_program(
             shell_id,
@@ -291,9 +289,7 @@ impl RunoApp {
             rows,
             cols,
             Some(pty::Program::of(&command)),
-            move |sid| {
-                let _ = tx.send(Event::Pty(sid));
-            },
+            wake,
         ) {
             Ok(mut shell) => {
                 shell.title = format!("Sign in to {} on {}", p.name, conn.name);
@@ -566,7 +562,7 @@ impl RunoApp {
             .iter()
             .rev()
             .take_while(|m| m.role != Role::User)
-            .filter(|m| m.role == Role::System)
+            .filter(|m| m.role == Role::System && m.meta.is_empty())
             .map(|m| m.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
@@ -614,6 +610,74 @@ impl RunoApp {
 
     /// What a failed turn can do about its agent's setup, shown under "The last turn
     /// didn't finish": sign in, another model, another copy of the CLI, or an update.
+    /// A turn the plan's usage limit cut short: carry on from where it stopped once the
+    /// window resets, or now. Carrying on keeps what the turn did; Retry would redo it.
+    fn limit_fixes(
+        &self,
+        id: u64,
+        name: &str,
+        provider: &str,
+        limit: &crate::planlimit::PlanLimit,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let now = usage::now_secs();
+        let until = crate::planlimit::held_until(provider, now).or(limit.resets_at);
+        let window = crate::planlimit::window_name(&limit.kind);
+        let queued = self
+            .state
+            .session(id)
+            .is_some_and(|s| s.queue.iter().any(|q| q.text == crate::planlimit::CONTINUE));
+        let why = match (until, queued) {
+            (Some(t), true) => format!(
+                "{name}'s {window} limit is used up. This session carries on from where it stopped at {}.",
+                crate::planlimit::reset_clock(t, now)
+            ),
+            (Some(t), false) => format!(
+                "{name}'s {window} limit is used up until {}. Carry on keeps what this turn already did.",
+                crate::planlimit::reset_clock(t, now)
+            ),
+            (None, _) => format!(
+                "{name}'s {window} limit is used up. Carry on keeps what this turn already did."
+            ),
+        };
+        let small = |el: Stateful<Div>| el.h(px(24.)).px_2().text_size(px(12.));
+        let mut row = div().flex().flex_wrap().gap_1();
+        if !queued {
+            let label = match until {
+                Some(t) => format!("Carry on at {}", crate::planlimit::reset_clock(t, now)),
+                None => "Carry on when it resets".to_string(),
+            };
+            row = row.child(
+                small(self.button("fix-continue-later", label, true)).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.continue_after_limit(id, false, cx);
+                        cx.notify();
+                    },
+                )),
+            );
+        }
+        row = row.child(
+            small(self.button("fix-continue-now", "Carry on now", queued)).on_click(cx.listener(
+                move |this, _, _, cx| {
+                    this.continue_after_limit(id, true, cx);
+                    cx.notify();
+                },
+            )),
+        );
+        div()
+            .v_flex()
+            .gap_1()
+            .px_2()
+            .pb_2()
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(c_secondary()))
+                    .child(why),
+            )
+            .child(row)
+    }
+
     pub(crate) fn turn_fixes(&self, id: u64, cx: &mut Context<Self>) -> Option<Div> {
         let session = self.state.session(id)?;
         if session.elsewhere() {
@@ -626,10 +690,13 @@ impl RunoApp {
             .iter()
             .rev()
             .take_while(|m| m.role != Role::User)
-            .filter(|m| m.role == Role::System)
+            .filter(|m| m.role == Role::System && m.meta.is_empty())
             .map(|m| m.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
+        if let Some(limit) = crate::planlimit::from_text(&text, chrono::Local::now()) {
+            return Some(self.limit_fixes(id, p.name, provider, &limit, cx));
+        }
         let caps = caps::get(provider);
         let problem = modelcheck::classify(provider, &text, &caps.version, &caps.client_version)?;
         let chosen = session

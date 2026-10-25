@@ -3,6 +3,7 @@ name = "runo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Runo's native desktop client"
 
 build = "build.rs"
@@ -72,6 +73,8 @@ percent-encoding = "2"
 # The SQL editor's completions speak the editor's LSP types.
 lsp-types = { version = "0.97", features = ["proposed"] }
 anyhow = "1"
+# Wakes the window when a shell prints, without polling.
+async-channel = "2"
 
 [build-dependencies]
 embed-resource = "3.0.11"
@@ -100,3 +103,7 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKWebView",
     "WKWebViewConfiguration",
 ] }
+
+[dev-dependencies]
+# Parses Markdown as TextView does, to check the links thread_refs writes.
+markdown = "1.0.0"

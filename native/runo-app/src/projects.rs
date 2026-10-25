@@ -82,8 +82,12 @@ pub(crate) struct ProjectForm {
     pub sync_setup: Option<String>,
     /// The checks to put in their field on the next render.
     pub sync_checks: Option<String>,
+    /// Which checks run after each turn: a `proof::LEVEL_*` key, empty for Settings'.
+    pub check_level: String,
     /// Failing checks go back to the agent on their own this many times in a row.
     pub fix_rounds: u32,
+    /// Let agents use settings the repository brings that start programs.
+    pub trust_agent_config: bool,
     pub error: Option<String>,
     /// A folder path to put in the path field on the next render (after Browse).
     pub sync_path: Option<String>,
@@ -590,7 +594,9 @@ impl RunoApp {
             filled_name: String::new(),
             sync_setup: Some(String::new()),
             sync_checks: Some(String::new()),
+            check_level: String::new(),
             fix_rounds: 0,
+            trust_agent_config: false,
             error: None,
             sync_path: Some(String::new()),
             path_error: None,
@@ -636,7 +642,9 @@ impl RunoApp {
             filled_name: String::new(),
             sync_setup: Some(p.setup.clone()),
             sync_checks: Some(p.checks.clone()),
+            check_level: crate::proof::level_key(p.check_level.as_deref(), &p.checks).into(),
             fix_rounds: p.fix_rounds,
+            trust_agent_config: p.trust_agent_config,
             error: None,
             sync_path: None,
             path_error: None,
@@ -949,6 +957,8 @@ impl RunoApp {
         let setup = self.project_setup.read(cx).value().trim().to_string();
         let checks = self.project_checks.read(cx).value().trim().to_string();
         let fix_rounds = form.fix_rounds;
+        let trust_agent_config = form.trust_agent_config;
+        let check_level = form.check_level.clone();
         let crew = form.crew;
         let color = COLORS[form.color].0.to_string();
         let glyph = ICONS[form.icon].0.to_string();
@@ -961,7 +971,23 @@ impl RunoApp {
                 p.icon = glyph;
                 p.setup = setup;
                 p.checks = checks;
+                p.check_level = Some(check_level);
                 p.fix_rounds = fix_rounds;
+                if p.trust_agent_config != trust_agent_config {
+                    crate::applog::info(
+                        "project",
+                        format!(
+                            "{}: agent settings in the repository are {}",
+                            p.name,
+                            if trust_agent_config {
+                                "trusted"
+                            } else {
+                                "no longer trusted"
+                            }
+                        ),
+                    );
+                }
+                p.trust_agent_config = trust_agent_config;
             }
             self.set_project_mode(pid, crew);
             self.project_form = None;
@@ -1027,7 +1053,9 @@ impl RunoApp {
                 if let Some(p) = self.state.projects.last_mut() {
                     p.setup = setup;
                     p.checks = checks;
+                    p.check_level = Some(check_level);
                     p.fix_rounds = fix_rounds;
+                    p.trust_agent_config = trust_agent_config;
                     if crew {
                         p.mode = crate::crew::MODE_CREW.into();
                     }
@@ -1675,6 +1703,15 @@ impl RunoApp {
             ))
             .children(checks)
             .children(mode_choice)
+            .when(blank.is_none(), |el| {
+                el.child(check(
+                    "project-trust-config",
+                    form.trust_agent_config,
+                    "Trust agent settings in this repository",
+                    "Lets Cursor and Gemini start the MCP servers, hooks and tool commands committed in .cursor or .gemini, without asking. Leave off for repositories you don't control: anyone who can change the repository, including a pull request, could run commands on this computer.".into(),
+                    |f, v| f.trust_agent_config = v,
+                ))
+            })
             .child(div().v_flex().gap_1p5().child(label("Color")).child(swatches))
             .child(div().v_flex().gap_1p5().child(label("Icon")).child(glyphs))
             .when(!editing && blank.is_none(), |el| {

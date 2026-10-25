@@ -209,6 +209,7 @@ fn start(
     dir: &str,
     tx: Sender<Event>,
 ) -> Result<Handle, String> {
+    crate::shellenv::ready();
     for (key, value) in command.get_envs() {
         match value {
             Some(value) => wrapper.env(key, value),
@@ -275,6 +276,11 @@ fn read_lines(path: &Path, offset: &mut u64, all: bool) -> Vec<String> {
         .collect()
 }
 
+/// How session `id`'s last detached turn ended: its exit code, if it got to write one.
+pub(crate) fn last_exit(id: u64) -> Option<i32> {
+    exit_code(&turn_dir(root()?, id))
+}
+
 /// How the turn ended: its exit code, if it got to write one.
 fn exit_code(turn: &Path) -> Option<i32> {
     std::fs::read_to_string(turn.join("exit"))
@@ -310,7 +316,7 @@ fn follow(target: Target, turn: PathBuf, pid: u32, mut child: Option<Child>, tx:
                 };
             let lines = read_lines(&turn.join("out"), &mut out, ended)
                 .into_iter()
-                .map(|l| Event::Line(target, l))
+                .map(|l| crate::agent::line_event(target, false, l))
                 .chain(
                     read_lines(&turn.join("err"), &mut err, ended)
                         .into_iter()
@@ -359,7 +365,7 @@ mod tests {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         loop {
             match rx.recv_timeout(Duration::from_secs(10)).unwrap() {
-                Event::Line(_, l) => out.push(l),
+                Event::Line(_, l) | Event::Json(_, l, _) => out.push(l),
                 Event::Err(_, l) => err.push(l),
                 Event::Done(_, ok) => return (out, err, ok),
                 _ => {}

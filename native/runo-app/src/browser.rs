@@ -7,6 +7,7 @@ use browser_engine::{key_spec, modifier_bits, to_page, Engine, KeySpec};
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::net::{SocketAddr, TcpStream};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -54,8 +55,12 @@ pub(crate) fn parse_lsof(text: &str) -> Vec<u16> {
 }
 
 /// Dev-server-like ports listening on this machine: unprivileged, not ephemeral and not
-/// a well-known database or cache.
-fn listening_ports() -> Vec<u16> {
+/// a well-known database or cache. Elsewhere than Linux, only the ports of programs
+/// Runo started and of those working in `dir` (the session's folder) are looked up,
+/// with `lsof -p`, and only when there are any: a scan of every process on the Mac takes
+/// a good part of a second. Dev servers on the usual ports are found anyway
+/// (`DEV_PORTS`).
+fn listening_ports(dir: &Path) -> Vec<u16> {
     let mut ports = Vec::new();
     if cfg!(target_os = "linux") {
         for file in ["/proc/net/tcp", "/proc/net/tcp6"] {
@@ -63,13 +68,42 @@ fn listening_ports() -> Vec<u16> {
                 &std::fs::read_to_string(file).unwrap_or_default(),
             ));
         }
-    } else if let Ok(out) = std::process::Command::new("lsof")
-        .args(["-nP", "-iTCP", "-sTCP:LISTEN"])
+        return dev_ports(ports);
+    }
+    let pids = server_pids(&crate::procs::all(), std::process::id(), dir);
+    if pids.is_empty() {
+        return Vec::new();
+    }
+    let list: Vec<String> = pids.iter().map(|p| p.to_string()).collect();
+    if let Ok(out) = std::process::Command::new("lsof")
+        .args(["-nP", "-a", "-p", &list.join(","), "-iTCP", "-sTCP:LISTEN"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .output()
     {
         ports.extend(parse_lsof(&String::from_utf8_lossy(&out.stdout)));
     }
     dev_ports(ports)
+}
+
+/// The processes that may serve the session's app: those below Runo (`me`), whose own
+/// ports aren't dev servers, and those working in `dir`.
+fn server_pids(procs: &[crate::procs::Proc], me: u32, dir: &Path) -> Vec<u32> {
+    let mut pids: Vec<u32> = crate::procs::descendants(procs, me)
+        .into_iter()
+        .filter(|p| *p != me)
+        .collect();
+    if !dir.as_os_str().is_empty() && dir != Path::new("/") {
+        pids.extend(
+            procs
+                .iter()
+                .filter(|p| p.pid != me && p.cwd.as_ref().is_some_and(|c| c.starts_with(dir)))
+                .map(|p| p.pid),
+        );
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    pids
 }
 
 /// Keep the ports a dev server could be on: unprivileged, not ephemeral and not a
@@ -139,6 +173,38 @@ pub(crate) fn urls_in(lines: &[String]) -> Vec<String> {
     found
 }
 
+/// The Browser tab's state on the app.
+pub(crate) struct BrowserTab {
+    /// The Browser is open as a tab beside the session tabs, and whether it is the one shown.
+    pub open: bool,
+    pub main: bool,
+    pub address: Entity<InputState>,
+    pub recent: Vec<String>,
+    pub ports: Vec<u16>,
+    pub scanning: bool,
+    /// The headless Chromium behind the Browser tab, started on first use.
+    pub engine: Option<Arc<Engine>>,
+    pub view: BrowserView,
+    pub focus: FocusHandle,
+}
+
+impl BrowserTab {
+    /// Closed, with no engine started yet.
+    pub fn new(address: Entity<InputState>, focus: FocusHandle) -> Self {
+        Self {
+            open: false,
+            main: false,
+            address,
+            recent: Vec::new(),
+            ports: Vec::new(),
+            scanning: false,
+            engine: None,
+            view: BrowserView::default(),
+            focus,
+        }
+    }
+}
+
 /// The Browser tab's side of the engine: frames on screen and where the page was drawn.
 #[derive(Default)]
 pub(crate) struct BrowserView {
@@ -202,11 +268,15 @@ impl RunoApp {
                 );
             }
         }
-        if self.browser_scanning {
+        if self.browser.scanning {
             return;
         }
-        self.browser_scanning = true;
+        self.browser.scanning = true;
         let tx = self.tx.clone();
+        let dir = self
+            .current()
+            .map(|s| std::path::PathBuf::from(&s.dir))
+            .unwrap_or_default();
         std::thread::spawn(move || {
             let mut ports: Vec<u16> = DEV_PORTS
                 .iter()
@@ -216,7 +286,7 @@ impl RunoApp {
                     TcpStream::connect_timeout(&addr, Duration::from_millis(120)).is_ok()
                 })
                 .collect();
-            for port in listening_ports() {
+            for port in listening_ports(&dir) {
                 if !ports.contains(&port) {
                     ports.push(port);
                 }
@@ -230,7 +300,7 @@ impl RunoApp {
     /// Whether something looks served for this session: a dev server on a usual port
     /// where it runs, a browser page already open, or a local URL printed in its terminals.
     pub(crate) fn app_serving(&self, session: &Session) -> bool {
-        if self.browser_open || !self.browser_view.pages.is_empty() {
+        if self.browser.open || !self.browser.view.pages.is_empty() {
             return true;
         }
         // Only the usual dev server ports count: plenty of other apps listen on this
@@ -239,7 +309,7 @@ impl RunoApp {
         let listening = if session.sandbox().is_some() {
             matches!(self.remote_ports.get(&session.id), Some(Ok(ports)) if ports.iter().any(dev))
         } else {
-            self.browser_ports.iter().any(dev)
+            self.browser.ports.iter().any(dev)
         };
         if listening {
             return true;
@@ -254,9 +324,9 @@ impl RunoApp {
     }
 
     pub(crate) fn remember_url(&mut self, url: &str) {
-        self.browser_recent.retain(|u| u != url);
-        self.browser_recent.insert(0, url.to_string());
-        self.browser_recent.truncate(6);
+        self.browser.recent.retain(|u| u != url);
+        self.browser.recent.insert(0, url.to_string());
+        self.browser.recent.truncate(6);
     }
 
     pub(crate) fn open_in_browser(&mut self, url: String, cx: &mut Context<Self>) {
@@ -372,8 +442,8 @@ impl RunoApp {
         if key != "ports" {
             return false;
         }
-        self.browser_scanning = false;
-        self.browser_ports = result
+        self.browser.scanning = false;
+        self.browser.ports = result
             .unwrap_or_default()
             .split(',')
             .filter_map(|p| p.parse().ok())
@@ -388,26 +458,26 @@ impl RunoApp {
 
     /// The running engine, starting Chromium the first time.
     fn engine(&mut self) -> Option<Arc<Engine>> {
-        if let Some(engine) = self.browser.as_ref().filter(|e| e.alive()) {
+        if let Some(engine) = self.browser.engine.as_ref().filter(|e| e.alive()) {
             return Some(engine.clone());
         }
-        self.browser_view.pages.clear();
+        self.browser.view.pages.clear();
         let Some(path) = browser_engine::find_chromium() else {
             crate::applog::warn_once("browser", "no Chromium or Chrome was found");
-            self.browser_view.error = Some(browser_engine::not_found_message().into());
+            self.browser.view.error = Some(browser_engine::not_found_message().into());
             return None;
         };
         let profile = store::data_dir().join("browser").join("profile");
         let shown = path.display().to_string();
         match Engine::start(path, &profile) {
             Ok(engine) => {
-                self.browser_view.error = None;
-                self.browser = Some(Arc::new(engine));
-                self.browser.clone()
+                self.browser.view.error = None;
+                self.browser.engine = Some(Arc::new(engine));
+                self.browser.engine.clone()
             }
             Err(e) => {
                 crate::applog::warn("browser", format!("could not start {shown}: {e}"));
-                self.browser_view.error = Some(e);
+                self.browser.view.error = Some(e);
                 None
             }
         }
@@ -416,11 +486,11 @@ impl RunoApp {
     /// Show `url` in the panel, in the selected session's page.
     /// Open the Browser tab and show it.
     pub(crate) fn show_browser(&mut self) {
-        if !self.browser_open {
+        if !self.browser.open {
             self.scan_ports();
         }
-        self.browser_open = true;
-        self.browser_main = true;
+        self.browser.open = true;
+        self.browser.main = true;
         if self.view != View::Session && self.current().is_some() {
             self.view = View::Session;
         }
@@ -434,61 +504,69 @@ impl RunoApp {
             return;
         };
         let key = self.browser_key();
-        let v = &self.browser_view;
+        let v = &self.browser.view;
         engine.show(Some(key));
         engine.open(key, &url, viewport(v.bounds.get(), v.scale.get()));
-        self.browser_view.pages.insert(key);
-        self.browser_view.synced_url.clear();
+        self.browser.view.pages.insert(key);
+        self.browser.view.synced_url.clear();
         cx.notify();
     }
 
     /// Back to the dev-server list, closing the session's page.
     fn close_page(&mut self, cx: &mut Context<Self>) {
         let key = self.browser_key();
-        if let Some(engine) = &self.browser {
+        if let Some(engine) = &self.browser.engine {
             engine.show(None);
             engine.close(key);
         }
-        self.browser_view.pages.remove(&key);
-        self.browser_view.frame = None;
+        self.browser.view.pages.remove(&key);
+        self.browser.view.frame = None;
         cx.notify();
     }
 
-    /// Called every display frame: pick up new frames, follow the panel's size and the
-    /// selected session, and free the textures of frames no longer shown.
+    /// Whether the selected session's page is on screen: the Browser tab open on it, with
+    /// the window itself on screen.
+    pub(crate) fn browser_page_shown(&self, cx: &App) -> bool {
+        self.browser.main
+            && self.view == View::Session
+            && wake::shown()
+            && self.browser.view.pages.contains(&self.browser_key())
+            && cx.global::<AppSettings>().browser_enabled
+    }
+
+    /// Called every display frame while a page is on screen (see `ensure_browser_pump`):
+    /// pick up new frames, follow the panel's size and the selected session, and free the
+    /// textures of frames no longer shown.
     pub(crate) fn pump_browser(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.browser.clone() else {
+        let Some(engine) = self.browser.engine.clone() else {
             return;
         };
         let key = self.browser_key();
-        let shown = self.browser_main && self.view == View::Session;
-        let visible = shown
-            && self.browser_view.pages.contains(&key)
-            && cx.global::<AppSettings>().browser_enabled;
+        let visible = self.browser_page_shown(cx);
         engine.show(visible.then_some(key));
         if let Some(note) = engine.take_notes().pop() {
             self.info = Some((note, std::time::Instant::now()));
             cx.notify();
         }
         if !visible {
-            if let Some((old, _)) = self.browser_view.frame.take() {
+            if let Some((old, _)) = self.browser.view.frame.take() {
                 cx.drop_image(old, None);
             }
             return;
         }
-        let v = &self.browser_view;
+        let v = &self.browser.view;
         engine.resize(key, viewport(v.bounds.get(), v.scale.get()));
         let seq = engine.seq.load(std::sync::atomic::Ordering::Relaxed);
-        if seq == self.browser_view.seen {
+        if seq == self.browser.view.seen {
             return;
         }
-        self.browser_view.seen = seq;
+        self.browser.view.seen = seq;
         if let Some(frame) = engine.take_frame() {
-            if let Some(stale) = self.browser_view.stale.take() {
+            if let Some(stale) = self.browser.view.stale.take() {
                 cx.drop_image(stale, None);
             }
-            self.browser_view.stale = self.browser_view.frame.take().map(|(img, _)| img);
-            self.browser_view.frame = Some((frame.image, frame.css));
+            self.browser.view.stale = self.browser.view.frame.take().map(|(img, _)| img);
+            self.browser.view.frame = Some((frame.image, frame.css));
         }
         cx.notify();
     }
@@ -499,24 +577,31 @@ impl RunoApp {
         let key = self.browser_key();
         let url = self
             .browser
+            .engine
             .as_ref()
-            .filter(|_| self.browser_view.pages.contains(&key))
+            .filter(|_| self.browser.view.pages.contains(&key))
             .and_then(|e| e.info(key))
             .map(|info| info.url)
             .filter(|url| url != "about:blank")
             .unwrap_or_default();
-        if url == self.browser_view.synced_url
-            || self.address.read(cx).focus_handle(cx).is_focused(window)
+        if url == self.browser.view.synced_url
+            || self
+                .browser
+                .address
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
         {
             return;
         }
-        self.browser_view.synced_url = url.clone();
-        self.address
+        self.browser.view.synced_url = url.clone();
+        self.browser
+            .address
             .update(cx, |input, cx| input.set_value(url, window, cx));
     }
 
     pub(crate) fn submit_address(&mut self, open: bool, cx: &mut Context<Self>) {
-        let raw = self.address.read(cx).value().to_string();
+        let raw = self.browser.address.read(cx).value().to_string();
         let panel = cx.global::<AppSettings>().browser_enabled;
         match normalize_url(&raw) {
             Some(url) if open && panel => self.open_in_panel(url, cx),
@@ -532,9 +617,9 @@ impl RunoApp {
 
     /// A panel point as page CSS pixels.
     fn page_point(&self, pos: Point<Pixels>) -> (f64, f64) {
-        let b = self.browser_view.bounds.get();
+        let b = self.browser.view.bounds.get();
         let panel = (f32::from(b.size.width), f32::from(b.size.height));
-        let page = self.browser_view.frame.as_ref().map_or(panel, |f| f.1);
+        let page = self.browser.view.frame.as_ref().map_or(panel, |f| f.1);
         let local = (f32::from(pos.x - b.origin.x), f32::from(pos.y - b.origin.y));
         to_page(local, panel, page)
     }
@@ -548,13 +633,13 @@ impl RunoApp {
         m: Modifiers,
         wheel: (f64, f64),
     ) {
-        let Some(engine) = self.browser.clone() else {
+        let Some(engine) = self.browser.engine.clone() else {
             return;
         };
         let (name, bit) = button.map(button_name).unwrap_or(("none", 0));
         match kind {
-            "mousePressed" => self.browser_view.buttons |= bit,
-            "mouseReleased" => self.browser_view.buttons &= !bit,
+            "mousePressed" => self.browser.view.buttons |= bit,
+            "mouseReleased" => self.browser.view.buttons &= !bit,
             _ => {}
         }
         let mods = modifier_bits(m.alt, m.control, m.platform, m.shift);
@@ -563,7 +648,7 @@ impl RunoApp {
             kind,
             self.page_point(pos),
             name,
-            self.browser_view.buttons,
+            self.browser.view.buttons,
             clicks,
             mods,
             wheel,
@@ -573,7 +658,7 @@ impl RunoApp {
     /// Keys typed with the page focused: text goes in as text, other keys as key events,
     /// and the usual ⌘ shortcuts do what they do in a browser.
     fn page_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(engine) = self.browser.clone() else {
+        let Some(engine) = self.browser.engine.clone() else {
             return;
         };
         let key = self.browser_key();
@@ -617,7 +702,7 @@ impl RunoApp {
                                 return;
                             };
                             cx.write_to_clipboard(ClipboardItem::new_string(text));
-                            if let (true, Some(engine)) = (cut, this.browser.clone()) {
+                            if let (true, Some(engine)) = (cut, this.browser.engine.clone()) {
                                 let spec = KeySpec {
                                     key: "Delete",
                                     code: "Delete",
@@ -636,7 +721,7 @@ impl RunoApp {
                 "r" => engine.reload(key),
                 "[" => engine.history(key, true),
                 "]" => engine.history(key, false),
-                "l" => window.focus(&self.address.read(cx).focus_handle(cx), cx),
+                "l" => window.focus(&self.browser.address.read(cx).focus_handle(cx), cx),
                 _ => return,
             }
             cx.stop_propagation();
@@ -653,7 +738,8 @@ impl RunoApp {
     }
 
     fn page_key_up(&mut self, ev: &KeyUpEvent) {
-        let (Some(engine), Some(spec)) = (self.browser.clone(), key_spec(&ev.keystroke.key)) else {
+        let (Some(engine), Some(spec)) = (self.browser.engine.clone(), key_spec(&ev.keystroke.key))
+        else {
             return;
         };
         let m = ev.keystroke.modifiers;
@@ -679,7 +765,7 @@ impl RunoApp {
             .child(
                 nav("page-back", IconName::ArrowLeft, "Back").on_click(cx.listener(
                     |this, _, _, _| {
-                        if let Some(e) = &this.browser {
+                        if let Some(e) = &this.browser.engine {
                             e.history(this.browser_key(), true);
                         }
                     },
@@ -688,7 +774,7 @@ impl RunoApp {
             .child(
                 nav("page-forward", IconName::ArrowRight, "Forward").on_click(cx.listener(
                     |this, _, _, _| {
-                        if let Some(e) = &this.browser {
+                        if let Some(e) = &this.browser.engine {
                             e.history(this.browser_key(), false);
                         }
                     },
@@ -705,7 +791,7 @@ impl RunoApp {
                     "Reload",
                 )
                 .on_click(cx.listener(|this, _, _, _| {
-                    if let Some(e) = &this.browser {
+                    if let Some(e) = &this.browser.engine {
                         e.reload(this.browser_key());
                     }
                 })),
@@ -714,7 +800,7 @@ impl RunoApp {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(Input::new(&self.address).bordered(true).h(px(28.))),
+                    .child(Input::new(&self.browser.address).bordered(true).h(px(28.))),
             )
             .child(
                 self.ghost_button_sized(
@@ -724,7 +810,7 @@ impl RunoApp {
                     26.,
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
-                    let raw = this.address.read(cx).value().to_string();
+                    let raw = this.browser.address.read(cx).value().to_string();
                     if let Some(url) = normalize_url(&raw) {
                         this.open_in_browser(url, cx);
                     }
@@ -742,7 +828,7 @@ impl RunoApp {
     fn page_view(&self, dialog: Option<(String, String)>, cx: &mut Context<Self>) -> AnyElement {
         let mouse_down = |button: MouseButton| {
             cx.listener(move |this: &mut Self, ev: &MouseDownEvent, window, cx| {
-                window.focus(&this.browser_focus, cx);
+                window.focus(&this.browser.focus, cx);
                 this.page_mouse(
                     "mousePressed",
                     ev.position,
@@ -769,7 +855,7 @@ impl RunoApp {
         let mut page = div()
             .id("browser-page")
             .key_context("RunoBrowser")
-            .track_focus(&self.browser_focus)
+            .track_focus(&self.browser.focus)
             .flex_1()
             .min_h_0()
             .relative()
@@ -793,7 +879,7 @@ impl RunoApp {
                 cx.listener(|this, ev: &KeyDownEvent, window, cx| this.page_key(ev, window, cx)),
             )
             .on_key_up(cx.listener(|this, ev: &KeyUpEvent, _, _| this.page_key_up(ev)));
-        match &self.browser_view.frame {
+        match &self.browser.view.frame {
             Some((image, _)) => {
                 page = page.child(
                     img(ImageSource::Render(image.clone()))
@@ -850,7 +936,7 @@ impl RunoApp {
                                         el.child(
                                             self.button("dialog-cancel", "Cancel", false).on_click(
                                                 cx.listener(|this, _, _, cx| {
-                                                    if let Some(e) = &this.browser {
+                                                    if let Some(e) = &this.browser.engine {
                                                         e.answer_dialog(this.browser_key(), false);
                                                     }
                                                     cx.notify();
@@ -860,7 +946,7 @@ impl RunoApp {
                                     })
                                     .child(self.button("dialog-ok", "OK", true).on_click(
                                         cx.listener(|this, _, _, cx| {
-                                            if let Some(e) = &this.browser {
+                                            if let Some(e) = &this.browser.engine {
                                                 e.answer_dialog(this.browser_key(), true);
                                             }
                                             cx.notify();
@@ -952,7 +1038,7 @@ impl RunoApp {
                     .text_color(rgb(c_muted()))
                     .child("Pages open here, in a headless Chrome. Bare ports like :5173 work."),
             );
-        if let Some(error) = &self.browser_view.error {
+        if let Some(error) = &self.browser.view.error {
             body = body.child(
                 div()
                     .p_3()
@@ -1035,20 +1121,20 @@ impl RunoApp {
                         })),
                 ),
         );
-        if self.browser_ports.is_empty() {
+        if self.browser.ports.is_empty() {
             body = body.child(
                 div()
                     .px_2()
                     .text_size(px(12.5))
                     .text_color(rgb(c_muted()))
-                    .child(if self.browser_scanning {
+                    .child(if self.browser.scanning {
                         "Looking for dev servers…"
                     } else {
                         "No dev server is listening on this machine. Start one in the Terminal."
                     }),
             );
         }
-        for (i, port) in self.browser_ports.iter().enumerate() {
+        for (i, port) in self.browser.ports.iter().enumerate() {
             body = body.child(self.url_row(
                 ("port-url", i),
                 &format!("http://localhost:{port}"),
@@ -1062,9 +1148,9 @@ impl RunoApp {
                 body = body.child(self.url_row(("term-url", i), url, IconName::SquareTerminal, cx));
             }
         }
-        if !self.browser_recent.is_empty() {
+        if !self.browser.recent.is_empty() {
             body = body.child(section("RECENT"));
-            for (i, url) in self.browser_recent.iter().enumerate() {
+            for (i, url) in self.browser.recent.iter().enumerate() {
                 body = body.child(self.url_row(("recent-url", i), url, IconName::Clock, cx));
             }
         }
@@ -1074,7 +1160,7 @@ impl RunoApp {
     /// Console errors of the page, under it: a count that opens the list, with buttons
     /// to send them to the session's agent or clear them.
     fn console_bar(&self, url: &str, errors: &[String], cx: &mut Context<Self>) -> AnyElement {
-        let open = self.browser_view.console_open;
+        let open = self.browser.view.console_open;
         let n = errors.len();
         let prompt = console_prompt(url, errors);
         let mut bar = div()
@@ -1113,7 +1199,7 @@ impl RunoApp {
                                 if n == 1 { "" } else { "s" }
                             ))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.browser_view.console_open = !this.browser_view.console_open;
+                                this.browser.view.console_open = !this.browser.view.console_open;
                                 cx.notify();
                             })),
                     )
@@ -1129,7 +1215,7 @@ impl RunoApp {
                                     this.send_or_queue(id, prompt.clone(), cx);
                                 }
                                 let key = this.browser_key();
-                                if let Some(engine) = &this.browser {
+                                if let Some(engine) = &this.browser.engine {
                                     engine.clear_console(key);
                                 }
                                 cx.notify();
@@ -1139,7 +1225,7 @@ impl RunoApp {
                         self.ghost_button_sized("console-clear", IconName::X, "Clear", 22.)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let key = this.browser_key();
-                                if let Some(engine) = &this.browser {
+                                if let Some(engine) = &this.browser.engine {
                                     engine.clear_console(key);
                                 }
                                 cx.notify();
@@ -1170,8 +1256,9 @@ impl RunoApp {
         let key = self.browser_key();
         let info = self
             .browser
+            .engine
             .as_ref()
-            .filter(|_| self.browser_view.pages.contains(&key))
+            .filter(|_| self.browser.view.pages.contains(&key))
             .and_then(|e| e.info(key));
         let page = info.is_some();
         let (url, console) = info
@@ -1180,8 +1267,8 @@ impl RunoApp {
             .unwrap_or_default();
         let (loading, dialog) = info.map_or((false, None), |i| (i.loading, i.dialog));
         let (bounds, scale) = (
-            self.browser_view.bounds.clone(),
-            self.browser_view.scale.clone(),
+            self.browser.view.bounds.clone(),
+            self.browser.view.scale.clone(),
         );
         div()
             .flex_1()
@@ -1226,6 +1313,29 @@ mod tests {
     use super::*;
     // `super::*` brings in gpui's own `test` attribute; use the built-in one.
     use std::prelude::v1::test;
+
+    #[test]
+    fn ports_are_looked_up_for_runos_programs_and_the_sessions_folder() {
+        use crate::procs::Proc;
+        let at = |pid, ppid, cwd: &str| Proc {
+            pid,
+            ppid,
+            cwd: (!cwd.is_empty()).then(|| std::path::PathBuf::from(cwd)),
+        };
+        let procs = [
+            at(1, 0, "/"),
+            at(100, 1, "/Applications"),
+            at(101, 100, "/Users/me"),
+            at(102, 101, "/elsewhere"),
+            at(200, 1, "/work/app/web"),
+            at(300, 1, "/work/other"),
+            at(400, 1, ""),
+        ];
+        let dir = Path::new("/work/app");
+        assert_eq!(server_pids(&procs, 100, dir), vec![101, 102, 200]);
+        // Nothing of Runo's runs and no folder: nothing to look up, so no lsof.
+        assert!(server_pids(&procs[..1], 100, Path::new("")).is_empty());
+    }
 
     #[test]
     fn listening_ports_are_read_from_proc_and_lsof() {

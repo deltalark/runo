@@ -13,10 +13,34 @@ fn last_turn(session: &Session) -> Option<usize> {
 }
 
 impl RunoApp {
+    /// What the session's project runs after a turn, as Runo plans it.
+    fn check_plan(&self, session: &Session, cx: &Context<Self>) -> proof::Plan {
+        let default = proof::Level::parse(&cx.global::<AppSettings>().check_level);
+        self.state
+            .projects
+            .iter()
+            .find(|p| p.id == session.project_id)
+            .map(|p| proof::plan(p.check_level.as_deref(), &p.checks, default))
+            .unwrap_or(proof::Plan::Off)
+    }
+
+    /// The commands to run on the session's turn: the person's own, or those Runo finds
+    /// in the session's folder at the project's level.
+    fn turn_checks(&self, session: &Session, cx: &Context<Self>) -> Vec<String> {
+        match self.check_plan(session, cx) {
+            proof::Plan::Off => Vec::new(),
+            proof::Plan::Custom(commands) => commands,
+            proof::Plan::Detect(level) => {
+                proof::detect_at(std::path::Path::new(&session.dir), level)
+            }
+        }
+    }
+
     /// Run the project's checks on the session's last turn. `auto` is set when a turn
     /// just finished, so failures may go back to the agent on their own.
     pub(crate) fn prove_turn(&mut self, id: u64, auto: bool, cx: &mut Context<Self>) {
-        if self.proving.contains(&id) {
+        // Checks still waiting for their go move on to the newer turn, keeping their place.
+        if self.proving.contains(&id) && !self.check_queue.is_waiting(id) {
             return;
         }
         let Some(session) = self.state.session(id) else {
@@ -25,18 +49,57 @@ impl RunoApp {
         let Some(turn) = last_turn(session) else {
             return;
         };
-        let checks = self
-            .state
-            .projects
-            .iter()
-            .find(|p| p.id == session.project_id)
-            .map(|p| proof::commands(&p.checks))
-            .unwrap_or_default();
+        let remote = session.connection != 0;
+        // Runo can't look for checks in a folder on a connection, so only the person's
+        // own commands show there, as skipped.
+        let checks = match self.check_plan(session, cx) {
+            proof::Plan::Detect(_) if remote => Vec::new(),
+            _ => self.turn_checks(session, cx),
+        };
         if checks.is_empty() {
             return;
         }
-        let dir = session.dir.clone();
-        let remote = session.connection != 0;
+        // A turn that changed only docs can't break the checks; a full test run then
+        // costs minutes and gigabytes for nothing. Asked for by hand, they run anyway.
+        let changed: Vec<String> = session.messages[turn..]
+            .iter()
+            .rfind(|m| m.role == Role::Agent)
+            .map(|m| m.changed.clone())
+            .unwrap_or_default();
+        let docs_only = auto && proof::only_docs(&changed);
+        // Checks run the project's own scripts on this computer, which the agent may just
+        // have rewritten. After a turn they run on their own only when nothing says to
+        // wait (`proof::hold`); Run on the card is the person's go-ahead, and in a mode
+        // that asks before shell commands it holds until what the checks run changes.
+        let mode = session
+            .selections()
+            .get("mode")
+            .cloned()
+            .unwrap_or_default();
+        let asks_shell = agent::effective_mode(&session.provider, &mode) != "full";
+        let print =
+            (!remote).then(|| proof::fingerprint(std::path::Path::new(&session.dir), &checks));
+        let fork = session.fork;
+        let project = session.project_id;
+        let held = if auto && !remote && !docs_only {
+            let approved = self
+                .state
+                .projects
+                .iter()
+                .find(|p| p.id == project)
+                .is_some_and(|p| Some(&p.checks_ok) == print.as_ref());
+            proof::hold(fork, &changed, asks_shell, approved)
+        } else {
+            None
+        };
+        if !auto && !fork {
+            if let (Some(print), Some(p)) = (
+                print,
+                self.state.projects.iter_mut().find(|p| p.id == project),
+            ) {
+                p.checks_ok = print;
+            }
+        }
         let Some(session) = self.state.session_mut(id) else {
             return;
         };
@@ -45,16 +108,25 @@ impl RunoApp {
             Some(p) if auto => (p.rounds, p.last_failure),
             _ => (0, String::new()),
         };
-        if remote {
+        let skipped = if remote {
+            "Checks run on this computer, and this session runs on a connection."
+        } else if docs_only {
+            proof::DOCS_ONLY
+        } else {
+            held.as_deref().unwrap_or("")
+        };
+        if !skipped.is_empty() {
+            crate::applog::info("proof", format!("session #{id}: {skipped}"));
             session.proof = Some(Proof {
                 turn,
                 rounds,
                 last_failure,
-                skipped: "Checks run on this computer, and this session runs on a connection."
-                    .into(),
+                skipped: skipped.into(),
+                held: held.is_some(),
                 ..Default::default()
             });
             self.save();
+            cx.notify();
             return;
         }
         session.proof = Some(Proof {
@@ -64,15 +136,78 @@ impl RunoApp {
             ..Default::default()
         });
         self.proving.insert(id);
+        self.check_queue.join(id, auto);
+        self.fill_checks(cx);
+        if self.check_queue.is_waiting(id) {
+            crate::applog::info(
+                "proof",
+                format!("session #{id}: checks wait for other sessions' checks"),
+            );
+        }
+        cx.notify();
+    }
+
+    /// Start the session's checks on the turn its card is for. False when there is
+    /// nothing to run any more, such as a deleted session or one already on a newer turn.
+    fn start_checks(&mut self, id: u64, auto: bool, low: bool, cx: &mut Context<Self>) -> bool {
+        let Some(session) = self.state.session(id) else {
+            self.proving.remove(&id);
+            return false;
+        };
+        let turn = session.proof.as_ref().map(|p| p.turn);
+        let checks = self.turn_checks(session, cx);
+        let Some(turn) = turn.filter(|t| last_turn(session) == Some(*t) && !checks.is_empty())
+        else {
+            self.proving.remove(&id);
+            cx.notify();
+            return false;
+        };
+        let dir = session.dir.clone();
         crate::applog::info(
             "proof",
-            format!("session #{id}: running {} check(s)", checks.len()),
+            format!(
+                "session #{id}: running {} check(s){}",
+                checks.len(),
+                if low { " in the background" } else { "" }
+            ),
         );
         self.bg(
-            move || proof::run_all(&dir, &checks, proof::CHECK_LIMIT),
+            move || {
+                let env: Vec<(String, String)> = proof::shared_target(&dir, &checks)
+                    .map(|t| ("CARGO_TARGET_DIR".into(), t.to_string_lossy().into_owned()))
+                    .into_iter()
+                    .collect();
+                proof::run_all(&dir, &checks, proof::CHECK_LIMIT, low, &env)
+            },
             move |this, results, cx| this.proof_done(id, turn, auto, results, cx),
         );
-        cx.notify();
+        true
+    }
+
+    /// Start checks waiting in line while there is room for them, as many as Settings
+    /// allows at once. Ones with nothing left to run give their place straight on.
+    fn fill_checks(&mut self, cx: &mut Context<Self>) {
+        loop {
+            let settings = cx.global::<AppSettings>();
+            let (limit, low) = (settings.checks_limit(), settings.checks_low_priority);
+            let next = self.check_queue.fill(limit);
+            if next.is_empty() {
+                return;
+            }
+            for (id, auto) in next {
+                if !self.start_checks(id, auto, low, cx) {
+                    self.check_queue.done(id);
+                }
+            }
+        }
+    }
+
+    /// Take the session's checks out of the line while they wait. Running ones finish.
+    pub(crate) fn cancel_checks(&mut self, id: u64) {
+        if self.check_queue.drop_waiting(id) {
+            self.proving.remove(&id);
+            crate::applog::info("proof", format!("session #{id}: waiting checks cancelled"));
+        }
     }
 
     fn proof_done(
@@ -84,6 +219,8 @@ impl RunoApp {
         cx: &mut Context<Self>,
     ) {
         self.proving.remove(&id);
+        self.check_queue.done(id);
+        self.fill_checks(cx);
         let busy = self.handles.contains_key(&Target::Session(id));
         let rounds_allowed = self
             .state
@@ -104,11 +241,15 @@ impl RunoApp {
         let key = proof::failure_key(&verdict.results);
         let passed = verdict.passed();
         let failed = verdict.failed().len();
+        // Checks the computer stopped, such as on a full disk, say nothing about the code:
+        // no fix turn, and the rounds and last failure stay as they were.
+        let couldnt = verdict.couldnt_run().join(", ");
         let mut fix = None;
         if passed {
             verdict.rounds = 0;
             verdict.last_failure.clear();
-        } else if auto
+        } else if failed > 0
+            && auto
             && !busy
             && session.queue.is_empty()
             && verdict.rounds < rounds_allowed
@@ -117,7 +258,7 @@ impl RunoApp {
             verdict.rounds += 1;
             fix = Some(proof::fix_prompt(&verdict.results));
         }
-        if !passed {
+        if failed > 0 {
             verdict.last_failure = key;
         }
         let round = verdict.rounds;
@@ -128,15 +269,23 @@ impl RunoApp {
             id,
             if passed {
                 format!("Checks passed: {title}")
-            } else {
+            } else if failed > 0 {
                 format!("Checks failed ({failed}): {title}")
+            } else {
+                format!("Couldn't run checks ({couldnt}): {title}")
             },
         );
         crate::applog::info(
             "proof",
             format!(
                 "session #{id}: checks {}",
-                if passed { "passed" } else { "failed" }
+                if passed {
+                    "passed".to_string()
+                } else if failed > 0 {
+                    "failed".to_string()
+                } else {
+                    format!("couldn't run: {couldnt}")
+                }
             ),
         );
         self.save();
@@ -156,7 +305,7 @@ impl RunoApp {
         let Some(session) = self.state.session(id) else {
             return;
         };
-        let Some(p) = session.proof.as_ref().filter(|p| !p.passed()) else {
+        let Some(p) = session.proof.as_ref().filter(|p| !p.failed().is_empty()) else {
             return;
         };
         let prompt = proof::fix_prompt(&p.results);
@@ -316,6 +465,8 @@ impl RunoApp {
             if !found.is_empty() {
                 form.sync_checks = Some(found.join("\n"));
             }
+            // Checks were off or left empty: Runo picks them at the Settings level.
+            form.check_level = proof::LEVEL_DEFAULT.into();
         }
         cx.notify();
     }
@@ -326,7 +477,27 @@ impl RunoApp {
             return div().into_any_element();
         };
         let rounds = form.fix_rounds;
-        let path = form.path.clone();
+        let level = form.check_level.clone();
+        let custom = level == proof::LEVEL_CUSTOM;
+        let path = form.path.clone().filter(|_| custom);
+        let default = match proof::Level::parse(&cx.global::<AppSettings>().check_level) {
+            proof::Level::Quick => "Default (Quick)",
+            proof::Level::Full => "Default (Full)",
+        };
+        let levels = [
+            (proof::LEVEL_DEFAULT, default),
+            (proof::LEVEL_QUICK, "Quick"),
+            (proof::LEVEL_FULL, "Full"),
+            (proof::LEVEL_CUSTOM, "Custom"),
+            (proof::LEVEL_OFF, "Off"),
+        ];
+        let about = match level.as_str() {
+            proof::LEVEL_CUSTOM => "One command per line, such as tests, lint and build. They run in the session's folder after every turn that changes files, and a failure can go straight back to the agent.",
+            proof::LEVEL_OFF => "No checks run after turns in this project.",
+            proof::LEVEL_FULL => "Runo runs the project's tests, lint and build scripts it finds (such as cargo test, npm test, go test or pytest) after every turn that changes files.",
+            proof::LEVEL_QUICK => "Runo runs each language's fast check it finds (such as cargo check, a typecheck or lint script, go vet or ruff), no tests, after every turn that changes files. CI can run the rest.",
+            _ => "Follows Settings → Safety. Quick runs each language's fast check (a compile, type check or lint); Full runs the tests too.",
+        };
         div()
             .v_flex()
             .gap_1p5()
@@ -370,12 +541,31 @@ impl RunoApp {
                         )
                     }),
             )
-            .child(Textarea::new(&self.project_checks).bordered(true).h(px(72.)))
+            .child(div().flex().flex_wrap().items_center().gap_1p5().children(
+                levels.into_iter().enumerate().map(|(i, (key, label))| {
+                    self.chip(("project-check-level", i), label.to_string(), level == key)
+                        .h(px(24.))
+                        .text_size(px(11.5))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(form) = this.project_form.as_mut() {
+                                form.check_level = key.to_string();
+                            }
+                            cx.notify();
+                        }))
+                }),
+            ))
+            .when(custom, |el| {
+                el.child(
+                    Textarea::new(&self.project_checks)
+                        .bordered(true)
+                        .h(px(72.)),
+                )
+            })
             .child(
                 div()
                     .text_size(px(11.5))
                     .text_color(rgb(c_muted()))
-                    .child("One command per line, such as tests, lint and build. They run in the session's folder after every turn that changes files, and a failure can go straight back to the agent."),
+                    .child(about),
             )
             .child(
                 div()
@@ -424,6 +614,7 @@ impl RunoApp {
             return None;
         }
         let proving = self.proving.contains(&id);
+        let waiting = self.check_queue.is_waiting(id);
         let reviewer = self.reviewing.get(&id).copied();
         let verdict = session.proof.as_ref().filter(|p| p.turn == turn);
         let changed = self.turn_files.get(&id).copied().unwrap_or(0) > 0;
@@ -432,7 +623,15 @@ impl RunoApp {
             .projects
             .iter()
             .find(|p| p.id == session.project_id)?;
-        let has_checks = !proof::commands(&project.checks).is_empty();
+        let has_checks = match proof::plan(
+            project.check_level.as_deref(),
+            &project.checks,
+            proof::Level::Quick,
+        ) {
+            proof::Plan::Off => false,
+            proof::Plan::Custom(commands) => !commands.is_empty(),
+            proof::Plan::Detect(_) => true,
+        };
         if verdict.is_none() && !proving && reviewer.is_none() && !changed {
             return None;
         }
@@ -446,11 +645,17 @@ impl RunoApp {
         };
 
         let (tone, glyph, headline) = match verdict {
+            _ if waiting => (
+                c_secondary(),
+                IconName::Clock,
+                "Waiting for another check…".to_string(),
+            ),
             _ if proving => (
                 c_secondary(),
                 IconName::LoaderCircle,
                 "Running the checks…".to_string(),
             ),
+            Some(v) if v.held => (c_amber(), IconName::ShieldAlert, v.skipped.clone()),
             Some(v) if !v.skipped.is_empty() => (c_muted(), IconName::Info, v.skipped.clone()),
             Some(v) if v.passed() => (
                 c_green(),
@@ -459,6 +664,11 @@ impl RunoApp {
                     1 => "The check passed".to_string(),
                     n => format!("All {n} checks passed"),
                 },
+            ),
+            Some(v) if v.failed().is_empty() && !v.couldnt_run().is_empty() => (
+                c_muted(),
+                IconName::Info,
+                format!("Couldn't run checks: {}", v.couldnt_run().join(", ")),
             ),
             Some(v) if !v.results.is_empty() => {
                 let failed = v.failed().len();
@@ -483,7 +693,8 @@ impl RunoApp {
                 "Prove this turn: set up checks, or ask another agent".to_string(),
             ),
         };
-        let red = verdict.is_some_and(|v| !v.results.is_empty() && !v.passed());
+        let red = verdict.is_some_and(|v| !v.failed().is_empty());
+        let held = verdict.is_some_and(|v| v.held);
         let rounds = verdict.map(|v| v.rounds).unwrap_or(0);
         let border = if red {
             c_red()
@@ -525,7 +736,38 @@ impl RunoApp {
                         })),
                 )
             })
-            .when(has_checks && !proving, |el| {
+            .when(waiting, |el| {
+                el.child(
+                    small(self, "proof-cancel", "Cancel", false)
+                        .child(icon(IconName::X, 12., c_secondary()))
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(
+                                "Another session's checks are running. These start when they finish; Cancel skips them for this turn",
+                            )
+                            .build(window, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.cancel_checks(id);
+                            cx.notify();
+                        })),
+                )
+            })
+            .when(held && !proving && !waiting, |el| {
+                el.child(
+                    small(self, "proof-run-held", "Run", true)
+                        .child(icon(IconName::Play, 12., c_canvas()))
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(
+                                "Runs the checks now, as the project's files define them. Look at what changed first",
+                            )
+                            .build(window, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.prove_turn(id, false, cx);
+                        })),
+                )
+            })
+            .when(has_checks && !proving && !held, |el| {
                 el.child(
                     small(self, "proof-rerun", "Run again", false)
                         .child(icon(IconName::RotateCw, 12., c_secondary()))
@@ -576,11 +818,13 @@ impl RunoApp {
                             .items_center()
                             .gap_2()
                             .text_size(px(12.))
-                            .child(icon(
-                                if r.ok { IconName::Check } else { IconName::X },
-                                12.,
-                                if r.ok { c_green() } else { c_red() },
-                            ))
+                            .child(if r.ok {
+                                icon(IconName::Check, 12., c_green())
+                            } else if !r.infra.is_empty() {
+                                icon(IconName::Info, 12., c_muted())
+                            } else {
+                                icon(IconName::X, 12., c_red())
+                            })
                             .child(
                                 div()
                                     .flex_1()

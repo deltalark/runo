@@ -29,6 +29,62 @@ const CONTEXT_CHARS: usize = 1500;
 const EARLIER_REQUESTS: usize = 10;
 const EARLIER_CHARS: usize = 120;
 
+/// Tells a sent turn's checkpoint from one sent after it was stopped.
+static START_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// What a sent turn does once its checkpoint is in.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Gate {
+    /// The turn was deleted, or stopped and sent again: this checkpoint is no one's.
+    Stale,
+    /// Stopped before the agent started: it ends without running.
+    Stopped,
+    /// The agent starts now, after the checkpoint, so Undo finds the folder as it was.
+    Run,
+}
+
+/// `waiting` is the session's sent turn still waiting, as (token, stopped).
+pub(crate) fn gate(waiting: Option<(u64, bool)>, token: u64) -> Gate {
+    match waiting {
+        Some((t, _)) if t != token => Gate::Stale,
+        None => Gate::Stale,
+        Some((_, true)) => Gate::Stopped,
+        Some((_, false)) => Gate::Run,
+    }
+}
+
+/// The background half of sending a turn: whether the folder is in git, and the
+/// checkpoint of it that Undo goes back to (empty outside git or when it fails).
+pub(crate) fn take_checkpoint(dir: &str) -> (bool, String) {
+    let in_git = git::is_repo(dir);
+    let checkpoint = if in_git {
+        git::checkpoint(dir).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    (in_git, checkpoint)
+}
+
+/// A sent turn whose checkpoint is being taken: everything its agent starts with.
+pub(crate) struct Starting {
+    token: u64,
+    /// Stop was pressed before the agent started.
+    pub(crate) stopped: bool,
+    provider: String,
+    prompt: String,
+    sent: String,
+    native: bool,
+    sel: HashMap<String, String>,
+    opts: AgentOptions,
+    agent_session: String,
+    sandbox: Option<crate::connections::Sandbox>,
+    attached: Vec<String>,
+    dir: String,
+    thread: u64,
+    /// The person trusts the project's agent settings (`Project::trust_agent_config`).
+    trusted: bool,
+}
+
 impl RunoApp {
     /// Start one agent turn: snapshot the worktree, then launch the CLI.
     pub(crate) fn start_turn(
@@ -38,11 +94,17 @@ impl RunoApp {
         images: Vec<String>,
         opts: &AgentOptions,
     ) {
+        // The agent is found on the login shell's PATH, which may still be on its way in
+        // the first moment after launch: the checkpoint's background thread waits for it.
         // Whatever goes to a Crew thread next answers the decision it waits on: a choice,
         // a reply typed in the thread, or a message from Crew.
         if let Some(info) = self.state.session_mut(id).and_then(|s| s.crew.as_mut()) {
             if info.decision.take().is_some() {
                 info.attention = None;
+            }
+            // So does whatever comes after the PR watcher gave up and asked for the person.
+            if let Some(w) = info.watch.as_mut() {
+                w.needs = None;
             }
         }
         // The worktree is still being made: the turn starts once it is ready.
@@ -52,6 +114,7 @@ impl RunoApp {
                 images,
                 opts: opts.clone(),
                 tag: None,
+                from_thread: None,
             });
             self.info = Some((
                 "Starts as soon as the worktree is ready.".into(),
@@ -61,7 +124,7 @@ impl RunoApp {
         }
         // One run per session: a prompt that arrives while the agent or the worktree setup
         // command is running waits its turn, unless the agent takes it as it works.
-        if self.handles.contains_key(&Target::Session(id)) || self.pending_start.contains_key(&id) {
+        if self.turn_running(id) || self.pending_start.contains_key(&id) {
             if images.is_empty() && self.steer(id, &prompt) {
                 return;
             }
@@ -97,13 +160,19 @@ impl RunoApp {
             return;
         }
         // Crew's rules and what changed in its threads, or a thread's rules: unseen context.
-        let preface = self.crew_preface(id);
+        let preface = self.crew_preface(id, &prompt);
         // Notes the person shared with agents open each new conversation in the project.
         let notes = self
             .state
             .session(id)
             .filter(|s| !s.has_conversation())
             .and_then(|s| self.shared_notes(s.project_id));
+        // Settings the repository brings run only when the person trusts the project's.
+        let trusted = self
+            .state
+            .session(id)
+            .and_then(|s| self.state.projects.iter().find(|p| p.id == s.project_id))
+            .is_some_and(|p| p.trust_agent_config);
         // A playbook's own session names it on its first message, however late that starts.
         let playbook = self
             .state
@@ -137,6 +206,9 @@ impl RunoApp {
         }
         let has = session.has_conversation();
         let provider = session.provider.clone();
+        if !agent::can_resume(&provider, &session.agent_session) {
+            session.agent_session.clear();
+        }
         // Resume the CLI's own conversation when its id is known (Claude Code and Codex can
         // also pick up the newest one in the folder). Otherwise the history goes in the prompt.
         let native = has
@@ -148,7 +220,6 @@ impl RunoApp {
         }
         let resume = has;
         let dir = session.dir.clone();
-        let in_git = git::is_repo(&dir);
         // Agents that cannot resume their own conversation get it written into the prompt.
         let handoff = std::mem::take(&mut session.handoff);
         // Once a message goes out the switch is final.
@@ -203,9 +274,7 @@ impl RunoApp {
         let mut user = Message::now(Role::User, prompt.clone());
         user.images = images.clone();
         user.playbook = playbook.unwrap_or_default();
-        if in_git {
-            user.checkpoint = git::checkpoint(&dir).unwrap_or_default();
-        }
+        // The checkpoint goes on this message once it is taken, before the agent runs.
         session.messages.push(user);
         session.messages.push(Message::now(Role::Agent, ""));
         let sel = session.selections();
@@ -218,15 +287,6 @@ impl RunoApp {
             let at = session.messages.len() - 1;
             session.messages.insert(at, hint);
         }
-        crate::connections::prepare_run(
-            Some((provider.clone(), agent_session.clone())),
-            crate::settings::sync_backup(),
-        );
-        // On a connection the agent reaches Runo's memory server through a relay.
-        let exe = std::env::current_exe()
-            .ok()
-            .map(|p| p.to_string_lossy().into_owned())
-            .filter(|_| memory_server() && crate::connections::mcp_reachable(sandbox.as_ref()));
         // Images inside the session folder go by their place in it, which is the same on
         // a connection; others by their full path.
         let attached: Vec<String> = images
@@ -238,32 +298,151 @@ impl RunoApp {
                     .unwrap_or_else(|_| path.clone())
             })
             .collect();
+        let thread = if session.crew.is_some() && sandbox.is_none() {
+            id
+        } else {
+            0
+        };
+        // Working from now on; the agent starts once the checkpoint is taken.
+        session.status = Status::Working;
+        let token = START_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.starting.insert(
+            id,
+            Starting {
+                token,
+                stopped: false,
+                provider,
+                prompt,
+                sent,
+                native,
+                sel,
+                opts: opts.clone(),
+                agent_session,
+                sandbox,
+                attached,
+                dir: dir.clone(),
+                thread,
+                trusted,
+            },
+        );
+        // Counted as it starts, so turns running side by side can't pass the limit.
+        self.state.add_turn(&store::today());
+        // Git takes the checkpoint off the UI thread: 0.1 s in a small repository, a
+        // second or more in a large one. Undo needs it to hold the folder as it was
+        // before the agent changed anything, so the agent starts only after it.
+        self.bg(
+            move || take_checkpoint(&dir),
+            move |this, (in_git, checkpoint), cx| {
+                this.launch_turn(id, token, in_git, checkpoint, cx);
+                cx.notify();
+            },
+        );
+        self.save();
+        if self.selected == Some(id) {
+            self.follow_bottom();
+        }
+        self.keep_awake_update();
+    }
+
+    /// The checkpoint for a sent turn is taken: record it on the prompt, then start the
+    /// agent. A turn stopped meanwhile ends here without running.
+    pub(crate) fn launch_turn(
+        &mut self,
+        id: u64,
+        token: u64,
+        in_git: bool,
+        checkpoint: String,
+        cx: &mut Context<Self>,
+    ) {
+        let waiting = self.starting.get(&id).map(|s| (s.token, s.stopped));
+        if gate(waiting, token) == Gate::Stale {
+            return;
+        }
+        let Some(start) = self.starting.remove(&id) else {
+            return;
+        };
+        let Some(session) = self.state.session_mut(id) else {
+            return;
+        };
+        let user = session.messages.iter().rposition(|m| m.role == Role::User);
+        if let Some(m) = user.map(|i| &mut session.messages[i]) {
+            m.checkpoint = checkpoint;
+        }
+        if start.stopped {
+            if let Some(at) = session
+                .messages
+                .iter()
+                .rposition(|m| m.role == Role::Agent && m.text.is_empty() && m.steps.is_empty())
+            {
+                session.messages.remove(at);
+            }
+            session.status = Status::Stopped;
+            let mut m = Message::new(Role::System, "Stopped.");
+            m.meta = "stopped".into();
+            session.messages.push(m);
+            crate::applog::info(
+                "turn",
+                format!("session #{id}: stopped before the agent started"),
+            );
+            self.finish_turn(id, false, true, false, cx);
+            self.design_turn_done(id, true, cx);
+            self.playbook_turn_done(id, false);
+            self.save();
+            return;
+        }
+        let Starting {
+            provider,
+            prompt,
+            sent,
+            native,
+            sel,
+            opts,
+            agent_session,
+            sandbox,
+            attached,
+            dir,
+            thread,
+            trusted,
+            ..
+        } = start;
+        crate::connections::prepare_run(
+            Some((provider.clone(), agent_session.clone())),
+            crate::settings::sync_backup(),
+        );
+        // On a connection the agent reaches Runo's memory server through a relay.
+        let exe = std::env::current_exe()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|_| memory_server() && crate::connections::mcp_reachable(sandbox.as_ref()));
         let spec = agent::RunSpec {
             provider: &provider,
             prompt: &sent,
             resume: native,
             sel: &sel,
-            opts,
+            opts: &opts,
             in_git,
             session_id: &agent_session,
             images: &attached,
             memory: exe.as_deref().map(|exe| (exe, dir.as_str())),
             local: sandbox.is_none(),
-            thread: if session.crew.is_some() && sandbox.is_none() {
-                id
-            } else {
-                0
-            },
+            thread,
+            trusted,
         };
-        match agent::run_agent(
+        let result = agent::run_agent(
             Target::Session(id),
             &spec,
             &dir,
             sandbox.as_ref(),
             self.tx.clone(),
-        ) {
+        );
+        let Some(session) = self.state.session_mut(id) else {
+            if let Ok(handle) = result {
+                handle.kill();
+            }
+            return;
+        };
+        match result {
             Ok(handle) => {
-                session.status = Status::Working;
                 session.remote_turn =
                     matches!(sandbox, Some(crate::connections::Sandbox::Remote(_)));
                 let turn = session
@@ -280,8 +459,6 @@ impl RunoApp {
                 self.turns.insert(id, running);
                 self.handles.insert(Target::Session(id), handle);
                 self.turn_files.remove(&id);
-                // Counted as it starts, so turns running side by side can't pass the limit.
-                self.state.add_turn(&store::today());
                 crate::applog::info(
                     "turn",
                     format!(
@@ -307,12 +484,20 @@ impl RunoApp {
                     format!("session #{id} ({provider}): could not start the agent: {error}"),
                 );
                 session.status = Status::Failed;
-                session.messages.pop();
+                if let Some(at) = session
+                    .messages
+                    .iter()
+                    .rposition(|m| m.role == Role::Agent && m.text.is_empty() && m.steps.is_empty())
+                {
+                    session.messages.remove(at);
+                }
                 session.messages.push(Message::new(Role::System, error));
             }
         }
         self.save();
-        self.chat_scroll.scroll_to_bottom();
+        if self.selected == Some(id) {
+            self.follow_bottom();
+        }
         self.keep_awake_update();
     }
 
@@ -328,6 +513,76 @@ impl RunoApp {
         if let Some(handle) = self.handles.get(&Target::Session(id)) {
             handle.kill();
         }
+    }
+
+    /// A turn failed with what reads like a sign-in error: ask the CLI whether it is
+    /// signed in, off the UI thread. Signed in, the turn goes again once after a short
+    /// wait (most often another run was renewing the login token); otherwise, or with no
+    /// way to check, it says the agent isn't signed in, as before.
+    pub(crate) fn check_sign_in(&mut self, id: u64) {
+        let Some(provider) = self.state.session(id).map(|s| s.provider.clone()) else {
+            return;
+        };
+        self.sign_in_checks.insert(id);
+        self.bg(
+            move || {
+                let signed_in = crate::signin::verify(&provider);
+                if signed_in == Some(true) {
+                    std::thread::sleep(crate::turnend::retry_delay());
+                }
+                signed_in
+            },
+            move |this, signed_in, cx| this.sign_in_checked(id, signed_in, cx),
+        );
+    }
+
+    fn sign_in_checked(&mut self, id: u64, signed_in: Option<bool>, cx: &mut Context<Self>) {
+        if !self.sign_in_checks.remove(&id) {
+            return;
+        }
+        // The person sent something else meanwhile; that turn speaks for itself.
+        if self.turn_running(id) {
+            return;
+        }
+        let Some(session) = self.state.session_mut(id) else {
+            return;
+        };
+        let provider = session.provider.clone();
+        let waiting = crate::turnend::checking(&provider);
+        let note = session
+            .messages
+            .iter()
+            .rposition(|m| m.meta == "note" && m.text == waiting);
+        let next = crate::turnend::sign_in(signed_in, false);
+        crate::applog::info(
+            "turn",
+            format!("session #{id} ({provider}): sign-in check found {signed_in:?}, {next:?}"),
+        );
+        match next {
+            crate::turnend::SignIn::Retry => {
+                if let Some(m) = note.map(|i| &mut session.messages[i]) {
+                    m.text = crate::turnend::RETRIED.into();
+                }
+                self.sign_in_retried.insert(id);
+                self.save();
+                self.retry_last(id, cx);
+            }
+            crate::turnend::SignIn::SignedOut => {
+                if let Some(i) = note {
+                    session.messages.remove(i);
+                }
+                let hint = crate::agent::sign_in_help(&provider);
+                session.messages.push(Message::new(Role::System, hint));
+                crate::signin::turn_showed(&provider, false);
+                let title = session.title.clone();
+                crate::desktop_notify::send(cx, Some(id), &title, "Agent failed");
+                self.finish_turn(id, false, false, true, cx);
+                self.design_turn_done(id, false, cx);
+                self.playbook_turn_done(id, false);
+                self.save();
+            }
+        }
+        cx.notify();
     }
 
     /// Copilot without `--session-id` prints no conversation id. After a run, take the
@@ -522,7 +777,7 @@ impl RunoApp {
     /// Send queued prompt `index` of a session now. While the agent works it is stopped
     /// first, and the prompt goes out once it has exited.
     pub(crate) fn send_queued(&mut self, id: u64, index: usize, cx: &mut Context<Self>) {
-        if self.handles.contains_key(&Target::Session(id)) {
+        if self.turn_running(id) {
             if let Some(s) = self.state.session_mut(id) {
                 if index < s.queue.len() {
                     let item = s.queue.remove(index);
@@ -540,13 +795,16 @@ impl RunoApp {
             .map(|s| (s.queue.remove(index), s.provider.clone()));
         if let Some((item, provider)) = next {
             let opts = cx.global::<AppSettings>().agent(&provider);
-            self.start_turn(id, item.text, item.images, &opts);
+            match item.from_thread {
+                Some(thread) => self.start_from_thread(id, thread, item.text, &opts),
+                None => self.start_turn(id, item.text, item.images, &opts),
+            }
         }
     }
 
     /// Send the last prompt again, with its images, after a failed or stopped turn.
     pub(crate) fn retry_last(&mut self, id: u64, cx: &mut Context<Self>) {
-        if self.handles.contains_key(&Target::Session(id)) {
+        if self.turn_running(id) {
             return;
         }
         let last = self.state.session(id).and_then(|s| {
@@ -569,7 +827,7 @@ impl RunoApp {
             .sessions
             .iter()
             .filter(|s| !s.queue.is_empty() && !s.cli && !s.archived)
-            .filter(|s| !self.handles.contains_key(&Target::Session(s.id)))
+            .filter(|s| !self.turn_running(s.id))
             .map(|s| s.id)
             .collect();
         for id in ids {
@@ -613,6 +871,8 @@ impl RunoApp {
             }
         }
         self.prompt.update(cx, |p, cx| p.set_value("", window, cx));
+        // Sending goes to the newest, even when the person had scrolled up.
+        self.jump_to_bottom();
         self.drafts.remove(&id);
         self.mention = None;
         self.thread_mention = None;
@@ -629,7 +889,7 @@ impl RunoApp {
         }
         // While the agent or its setup command runs, the prompt and its images wait,
         // unless the agent takes messages as it works.
-        if self.handles.contains_key(&Target::Session(id)) || self.pending_start.contains_key(&id) {
+        if self.turn_running(id) || self.pending_start.contains_key(&id) {
             self.editing = None;
             if images.is_empty() && playbook.is_none() && self.steer(id, &text) {
                 return;
@@ -702,7 +962,7 @@ impl RunoApp {
     /// staging, and the branch if the agent committed. A snapshot taken first makes it
     /// redoable, and files changed after the agent's last turn are left alone.
     pub(crate) fn undo_to(&mut self, id: u64, index: usize) {
-        if self.handles.contains_key(&Target::Session(id)) {
+        if self.turn_running(id) {
             self.fail("turn", "Stop the agent before undoing its changes.".into());
             return;
         }
@@ -778,7 +1038,7 @@ impl RunoApp {
 
     /// Bring back what an Undo removed, from the snapshot it took.
     pub(crate) fn redo_turn(&mut self, id: u64, index: usize) {
-        if self.handles.contains_key(&Target::Session(id)) || self.git_busy.contains_key(&id) {
+        if self.turn_running(id) || self.git_busy.contains_key(&id) {
             return;
         }
         let Some(session) = self.state.session(id) else {
@@ -848,7 +1108,7 @@ impl RunoApp {
     /// Answer the agent: a follow-up prompt, optionally with tools allowed for this turn.
     pub(crate) fn answer(&mut self, prompt: String, allow: Vec<String>, cx: &mut Context<Self>) {
         let Some(id) = self.selected else { return };
-        if self.handles.contains_key(&Target::Session(id)) {
+        if self.turn_running(id) {
             return;
         }
         let Some(provider) = self.current().map(|s| s.provider.clone()) else {
@@ -868,37 +1128,49 @@ impl RunoApp {
         self.start_turn(id, prompt, Vec::new(), &opts);
     }
 
-    /// Always allow these tools for this agent (Settings > agent > Allowed tools).
-    pub(crate) fn allow_always(&mut self, tools: &[String], cx: &mut Context<Self>) {
-        let Some(provider) = self.current().map(|s| s.provider.clone()) else {
-            return;
+    /// Always allow these tools for this agent in the current session's project. Returns
+    /// the ones that can't be saved (see `allow_tools_for`), to allow once instead.
+    pub(crate) fn allow_always(&mut self, tools: &[String], cx: &mut Context<Self>) -> Vec<String> {
+        let Some((provider, project)) = self.current().map(|s| (s.provider.clone(), s.project_id))
+        else {
+            return tools.to_vec();
         };
-        self.allow_tools_for(&provider, tools, cx);
+        self.allow_tools_for(&provider, project, tools, cx)
     }
 
+    /// Save rules that never ask for this agent, in `project` only. A bare `Bash` (any
+    /// command at all) is never saved: it is returned with whatever else couldn't be, for
+    /// the caller to allow once.
     pub(crate) fn allow_tools_for(
         &mut self,
         provider: &str,
-        tools: &[String],
+        project: u64,
+        rules: &[String],
         cx: &mut Context<Self>,
-    ) {
-        let provider = provider.to_string();
-        let mut st = cx.global::<AppSettings>().clone();
-        let entry = st.agents.entry(provider).or_default();
-        let mut list: Vec<String> = entry
-            .allowed_tools
-            .split(',')
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .collect();
-        for tool in tools {
-            if !list.contains(tool) {
-                list.push(tool.clone());
+    ) -> Vec<String> {
+        let (kept, refused): (Vec<&String>, Vec<&String>) = rules
+            .iter()
+            .filter(|r| !r.trim().is_empty())
+            .partition(|r| !crate::approvals::is_bare_bash(r));
+        if !kept.is_empty() {
+            let mut st = cx.global::<AppSettings>().clone();
+            let entry = st.agents.entry(provider.to_string()).or_default();
+            let saved = entry.project_tools.entry(project.to_string()).or_default();
+            let mut list: Vec<String> = saved
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            for rule in kept {
+                if !list.contains(rule) {
+                    list.push(rule.clone());
+                }
             }
+            *saved = list.join(",");
+            st.save();
+            cx.set_global(st);
         }
-        entry.allowed_tools = list.join(",");
-        st.save();
-        cx.set_global(st);
+        refused.into_iter().cloned().collect()
     }
 
     /// Attach an image from the clipboard, or pick files when the clipboard has none.
@@ -1785,13 +2057,14 @@ impl RunoApp {
                         .px_2()
                         .text_size(px(12.))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.allow_always(&always, cx);
+                            // A bare Bash isn't saved; it is allowed for this answer.
+                            let once = this.allow_always(&always, cx);
                             this.answer(
                                 format!(
                                     "You now have permission to use {}. Continue.",
                                     always.join(", ")
                                 ),
-                                Vec::new(),
+                                once,
                                 cx,
                             );
                             cx.notify();
@@ -1810,7 +2083,9 @@ impl RunoApp {
         let attached = self.attached();
         let working = self.handles.contains_key(&Target::Session(id));
         // A turn that failed or was stopped can be sent again as it was.
+        // Not while a sign-in error is checked: the turn may yet go again by itself.
         let retry = !working
+            && !self.sign_in_checks.contains(&id)
             && matches!(session.status, Status::Failed | Status::Stopped)
             && session
                 .messages
@@ -1968,10 +2243,17 @@ impl RunoApp {
                         .border_1()
                         .border_color(divider())
                         .child(
-                            img(std::path::PathBuf::from(path))
-                                .size(px(40.))
-                                .rounded_sm()
-                                .object_fit(ObjectFit::Cover),
+                            self.viewable(
+                                ("attached-img", i),
+                                id,
+                                crate::lightbox::Pick::Attached(i),
+                                img(std::path::PathBuf::from(path))
+                                    .size(px(40.))
+                                    .rounded_sm()
+                                    .object_fit(ObjectFit::Cover),
+                                cx,
+                            )
+                            .size(px(40.)),
                         )
                         .child(
                             div()
@@ -2510,16 +2792,15 @@ fn mentions_folder(text: &str, dir: &str) -> bool {
 /// queue, in the order they were sent.
 fn take_unsent(session: &mut store::Session, unsent: &[String]) {
     for text in unsent.iter().rev() {
+        let mut queued = Queued::new(text.clone(), Vec::new());
         if let Some(i) = session
             .messages
             .iter()
             .rposition(|m| m.role == Role::User && m.meta == STEER && m.text == *text)
         {
-            session.messages.remove(i);
+            queued.from_thread = session.messages.remove(i).from_thread;
         }
-        session
-            .queue
-            .insert(0, Queued::new(text.clone(), Vec::new()));
+        session.queue.insert(0, queued);
     }
 }
 
@@ -2528,6 +2809,77 @@ mod tests {
     use super::*;
     // `super::*` brings in gpui's own `test` attribute; use the built-in one.
     use std::prelude::v1::test;
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn the_agent_starts_only_after_its_checkpoint_so_undo_restores_the_folder() {
+        let repo = std::env::temp_dir().join(format!("runo-turn-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+        let dir = repo.to_str().unwrap().to_string();
+        git_in(&repo, &["init", "-q"]);
+        git_in(&repo, &["config", "user.email", "t@t"]);
+        git_in(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "one\n").unwrap();
+        git_in(&repo, &["add", "-A"]);
+        git_in(&repo, &["commit", "-q", "-m", "init"]);
+        let head = git_in(&repo, &["rev-parse", "HEAD"]);
+        // The person's own work before sending: one change staged, one not.
+        std::fs::write(repo.join("b.txt"), "staged\n").unwrap();
+        git_in(&repo, &["add", "b.txt"]);
+        std::fs::write(repo.join("a.txt"), "draft\n").unwrap();
+        // As when sending: the checkpoint runs on a background thread, and the agent is
+        // started from its completion, never before.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let bg = dir.clone();
+        std::thread::spawn(move || tx.send(take_checkpoint(&bg)).unwrap());
+        let (in_git, checkpoint) = rx.recv().unwrap();
+        assert!(in_git && !checkpoint.is_empty());
+        // The "agent": edits, deletes, creates, and commits.
+        std::fs::write(repo.join("a.txt"), "agent\n").unwrap();
+        std::fs::remove_file(repo.join("b.txt")).unwrap();
+        std::fs::write(repo.join("c.txt"), "new\n").unwrap();
+        git_in(&repo, &["add", "-A"]);
+        git_in(&repo, &["commit", "-q", "-m", "agent"]);
+        // Turn end takes its snapshot; Undo puts the folder back as it was when sent.
+        let end = git::checkpoint(&dir).unwrap();
+        git::restore(&dir, &checkpoint, Some(&end)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "draft\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("b.txt")).unwrap(),
+            "staged\n"
+        );
+        assert!(!repo.join("c.txt").exists());
+        assert_eq!(git_in(&repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git_in(&repo, &["diff", "--cached", "--name-only"]), "b.txt");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn a_checkpoint_starts_its_own_turn_only() {
+        assert_eq!(gate(Some((4, false)), 4), Gate::Run);
+        // Stop pressed while the checkpoint was taken: the agent never starts.
+        assert_eq!(gate(Some((4, true)), 4), Gate::Stopped);
+        // Stopped and sent again: the first checkpoint must not start the second turn.
+        assert_eq!(gate(Some((5, false)), 4), Gate::Stale);
+        // The session was deleted meanwhile.
+        assert_eq!(gate(None, 4), Gate::Stale);
+    }
 
     #[test]
     fn messages_the_agent_never_read_go_back_to_the_queue() {
@@ -2546,6 +2898,18 @@ mod tests {
         assert_eq!(texts, ["Fix it", "also the docs", "Done."]);
         let queued: Vec<&str> = session.queue.iter().map(|q| q.text.as_str()).collect();
         assert_eq!(queued, ["and the tests", "later"]);
+    }
+
+    #[test]
+    fn a_thread_message_the_agent_never_read_keeps_its_thread() {
+        let mut session = store::Session::default();
+        let mut wake = Message::new(Role::User, "Thread #7 (Docs) says: done");
+        wake.meta = STEER.into();
+        wake.from_thread = Some(7);
+        session.messages.push(wake);
+        take_unsent(&mut session, &["Thread #7 (Docs) says: done".to_string()]);
+        assert!(session.messages.is_empty());
+        assert_eq!(session.queue[0].from_thread, Some(7));
     }
 
     #[test]

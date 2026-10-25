@@ -58,6 +58,23 @@ pub struct ThreadInfo {
     /// Hidden from the open threads; the session itself stays.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resolved: bool,
+    /// The pull request Runo watches for the thread after it opened one and ended its
+    /// turn (`prwatch.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch: Option<crate::prwatch::Watch>,
+    /// The last decision Crew answered for the person, shown on the thread's card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crew_answer: Option<CrewAnswer>,
+}
+
+/// A thread's decision that Crew answered itself instead of passing it to the person.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
+pub struct CrewAnswer {
+    pub question: String,
+    pub answer: String,
+    /// Seconds since the epoch.
+    #[serde(default)]
+    pub at: u64,
 }
 
 /// Who started a thread.
@@ -97,7 +114,7 @@ pub struct Report {
     pub at: u64,
 }
 
-#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Hash, Debug)]
 pub struct Choice {
     pub label: String,
     /// What happens if the person picks it.
@@ -106,7 +123,7 @@ pub struct Choice {
 }
 
 /// One question for the person, with two to four answers and the one the thread would pick.
-#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Hash, Debug)]
 pub struct Decision {
     pub question: String,
     pub options: Vec<Choice>,
@@ -361,12 +378,28 @@ pub fn apply(info: &mut ThreadInfo, kind: &EventKind, at: u64) -> bool {
             Ok(decision) => {
                 info.decision = Some(decision);
                 info.attention = Some(Attention::NeedsYou);
+                info.crew_answer = None;
                 true
             }
             Err(_) => false,
         },
         EventKind::Message { .. } => false,
     }
+}
+
+/// Crew sent `text` to a thread: when the thread waits on a decision, that answers it, and
+/// the answer is kept as Crew's. The decision itself closes when the message starts the
+/// thread's turn. Returns whether it answered one.
+pub fn answer_by_crew(info: &mut ThreadInfo, text: &str, at: u64) -> bool {
+    let Some(d) = &info.decision else {
+        return false;
+    };
+    info.crew_answer = Some(CrewAnswer {
+        question: clip(&d.question, MAX_LINE),
+        answer: clip(text, MAX_TEXT),
+        at,
+    });
+    true
 }
 
 /// A thread's turn ended cleanly with nothing asked of the person, so its agent is done:
@@ -548,6 +581,89 @@ pub const MAX_ACTIONS: usize = 12;
 /// Turns Crew takes on its own, to answer threads, between two messages from the person.
 pub const MAX_WAKES: u32 = 4;
 
+/// The prompt that gives Crew a thread's message: who sent it, then what it says.
+pub fn wake_text(thread: u64, title: &str, text: &str) -> String {
+    format!("Thread #{thread} ({title}) says: {text}")
+}
+
+/// The thread and its words in a prompt `wake_text` made.
+pub fn parse_wake(text: &str) -> Option<(u64, &str)> {
+    let rest = text.strip_prefix("Thread #")?;
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let thread = rest[..digits].parse().ok()?;
+    let rest = rest[digits..].strip_prefix(" (")?;
+    let at = rest.find(") says: ")?;
+    Some((thread, &rest[at + ") says: ".len()..]))
+}
+
+/// What a thread sent Crew in one look at its events, ready to wake Crew with.
+pub enum Wake {
+    Message(String),
+    Decision(Decision),
+}
+
+/// The words a decision wakes Crew with: the question, its options, and that Crew may
+/// answer it itself when it doesn't need the person.
+pub fn decision_wake(d: &Decision) -> String {
+    let options: Vec<String> = d
+        .options
+        .iter()
+        .enumerate()
+        .map(|(i, o)| {
+            let mut line = format!("{}. {}", i + 1, o.label);
+            if !o.consequence.is_empty() {
+                line.push_str(&format!(": {}", o.consequence));
+            }
+            if i == d.recommended {
+                line.push_str(" (recommended)");
+            }
+            line
+        })
+        .collect();
+    format!(
+        "Decision: {}\n{}\nIf you can answer this from what you know (the brief, the plan, other threads), send the choice with message_thread. If it needs the person, leave it: they see it.",
+        d.question,
+        options.join("\n")
+    )
+}
+
+/// One prompt per thread for what threads sent in one look, in the order they first
+/// spoke: a thread's messages in order, exact repeats dropped, then its decision. Items
+/// are `(chat, thread, title, wake)`; out come `(chat, thread, prompt)`.
+pub fn wake_prompts(items: Vec<(u64, u64, String, Wake)>) -> Vec<(u64, u64, String)> {
+    let mut batches: Vec<(u64, u64, String, Vec<String>)> = Vec::new();
+    for (chat, thread, title, wake) in items {
+        let said = match wake {
+            Wake::Message(text) => text,
+            Wake::Decision(d) => decision_wake(&d),
+        };
+        match batches.iter_mut().find(|b| b.0 == chat && b.1 == thread) {
+            Some(b) => {
+                b.2 = title;
+                if !b.3.contains(&said) {
+                    b.3.push(said);
+                }
+            }
+            None => batches.push((chat, thread, title, vec![said])),
+        }
+    }
+    batches
+        .into_iter()
+        .map(|(chat, thread, title, said)| {
+            (chat, thread, wake_text(thread, &title, &said.join("\n\n")))
+        })
+        .collect()
+}
+
+/// The heading Crew's prompt puts above what this turn says: a thread's words under
+/// their own, so Crew never takes them for the person's.
+pub fn prompt_heading(prompt: &str) -> String {
+    match parse_wake(prompt) {
+        Some((thread, _)) => format!("## From thread #{thread} (not the person)"),
+        None => "## The person says".into(),
+    }
+}
+
 /// What Crew asks Runo to do, from the `runo-actions` block that ends its reply.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(tag = "do", rename_all = "snake_case")]
@@ -563,6 +679,16 @@ pub enum Action {
         /// Work in its own worktree; unset leaves it to the person's New session default.
         #[serde(default)]
         isolated: Option<bool>,
+        /// A model its agent knows, such as "sonnet"; empty for the agent's default.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        model: String,
+        /// Reasoning effort, such as "low"; empty for the default.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        effort: String,
+        /// What the thread may cost in US dollars before its next turn waits for the
+        /// person; 0 for no limit.
+        #[serde(default, skip_serializing_if = "is_zero_dollars")]
+        budget_usd: f64,
     },
     /// Send a thread a message, as its next prompt.
     MessageThread { thread: u64, text: String },
@@ -572,9 +698,32 @@ pub enum Action {
     ResolveThread { thread: u64 },
 }
 
+/// By hand for the dollar budget, which hashes by its bits.
+impl std::hash::Hash for Action {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Action::StartThread {
+                title,
+                brief,
+                agent,
+                isolated,
+                model,
+                effort,
+                budget_usd,
+            } => {
+                (title, brief, agent, isolated, model, effort).hash(state);
+                budget_usd.to_bits().hash(state);
+            }
+            Action::MessageThread { thread, text } => (thread, text).hash(state),
+            Action::ReadThread { thread } | Action::ResolveThread { thread } => thread.hash(state),
+        }
+    }
+}
+
 /// A card shown with a message in Crew's chat. Threads are drawn live from the sessions,
 /// so a card shows where each one stands now, not when it was posted.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Hash, Debug)]
 #[serde(tag = "card", rename_all = "snake_case")]
 pub enum Card {
     /// Threads started together.
@@ -589,7 +738,49 @@ pub enum Card {
     News { thread: u64 },
 }
 
+/// The optional parts of a thread Crew starts: model, effort and budget.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct ThreadPick {
+    pub model: String,
+    pub effort: String,
+    pub budget_usd: f64,
+}
+
+fn is_zero_dollars(n: &f64) -> bool {
+    *n == 0.0
+}
+
+/// A model or effort name as an agent takes it: letters, digits and `-._:/[]`.
+fn option_name(text: &str, max: usize) -> String {
+    let name = clip(text, max);
+    if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-._:/[]".contains(c))
+    {
+        name
+    } else {
+        String::new()
+    }
+}
+
 impl Action {
+    /// A new thread's model, effort and budget; the defaults for any other action.
+    pub fn pick(&self) -> ThreadPick {
+        match self {
+            Action::StartThread {
+                model,
+                effort,
+                budget_usd,
+                ..
+            } => ThreadPick {
+                model: model.clone(),
+                effort: effort.clone(),
+                budget_usd: *budget_usd,
+            },
+            _ => ThreadPick::default(),
+        }
+    }
+
     /// The thread it is about, for actions on an existing one.
     pub fn thread(&self) -> Option<u64> {
         match self {
@@ -651,6 +842,9 @@ pub fn parse_actions(body: &str) -> (Vec<Action>, Vec<String>) {
                 brief,
                 agent,
                 isolated,
+                model,
+                effort,
+                budget_usd,
             } => {
                 let title = clip(&title, 80);
                 let brief = clip(&brief, MAX_TEXT);
@@ -663,6 +857,13 @@ pub fn parse_actions(body: &str) -> (Vec<Action>, Vec<String>) {
                     brief,
                     agent: clip(&agent, 40).to_ascii_lowercase(),
                     isolated,
+                    model: option_name(&model, 80),
+                    effort: option_name(&effort, 20).to_ascii_lowercase(),
+                    budget_usd: if budget_usd.is_finite() {
+                        budget_usd.clamp(0.0, 1000.0)
+                    } else {
+                        0.0
+                    },
                 }
             }
             Action::MessageThread { thread, text } => {
@@ -939,6 +1140,13 @@ pub fn board_line(id: u64, title: &str, status: &str, info: &ThreadInfo) -> Stri
             clip(&d.question, 160)
         ));
     }
+    if let Some(w) = &info.watch {
+        match &w.needs {
+            Some(why) => line.push_str(&format!(" PR #{} needs the person: {why}.", w.pr)),
+            None if crate::prwatch::green(w) => line.push_str(&format!(" PR #{}: CI green.", w.pr)),
+            None => line.push_str(&format!(" Runo watches PR #{} and wakes it.", w.pr)),
+        }
+    }
     if let Some(r) = info.reports.last() {
         line.push_str(&format!(" Last report: {}", clip(&r.summary, 240)));
     }
@@ -967,12 +1175,22 @@ pub fn board_changes(before: &str, now: &[String]) -> String {
 }
 
 /// Crew's rules, sent with the first message of its conversation.
-pub fn rules(project: &str, agents: &[(&str, &str)], default_agent: &str) -> String {
+pub fn rules(
+    project: &str,
+    agents: &[(&str, &str)],
+    default_agent: &str,
+    models: &[String],
+) -> String {
     let roster = agents
         .iter()
         .map(|(id, name)| format!("{id} ({name})"))
         .collect::<Vec<_>>()
         .join(", ");
+    let models = if models.is_empty() {
+        String::new()
+    } else {
+        format!(" {default_agent}'s models: {}.", models.join(", "))
+    };
     format!(
         r##"## You are Crew
 You run the project "{project}" for the person in this chat. You can read the code here but never change it: threads do the work. A thread is an agent session of its own.
@@ -986,12 +1204,18 @@ To act, end your reply with one fenced block like this, and nothing after it:
 ```
 
 Actions:
-- start_thread: title (2 to 5 words), brief (complete: the thread has not seen this chat), agent (empty for the default, {default_agent}; or one of: {roster}), isolated (true for its own worktree and branch, false to work in the project folder).
+- start_thread: title (2 to 5 words), brief (complete: the thread has not seen this chat; name the files, lines and findings you already have, so it doesn't search for them again), agent (empty for the default, {default_agent}; or one of: {roster}), isolated (true for its own worktree and branch, false to work in the project folder). Optional: model (empty for the agent's default; pick a smaller, cheaper model for mechanical work such as renames, docs, copy or simple UI tweaks, and keep the default for hard or risky work),{models} effort (such as "low" or "high"; empty for the default), budget_usd (what the thread may cost before its next turn waits for the person; 0 or absent for no limit).
 - message_thread: thread (its number), text. It becomes that thread's next prompt.
 - read_thread: thread. Its latest replies come back with the next message.
 - resolve_thread: thread. Use it once its work is merged or no longer needed.
 
+Threads' messages and decisions come under their own heading, From thread #N, never as the person's words. When a thread asks for a decision you can make from what you know (the brief, the plan, what the person already said, other threads), answer it with message_thread and say so in a sentence; leave the ones that change what the person gets, or can't be undone, for the person.
+
 Limits: at most {MAX_NEW_THREADS} new threads and one message per thread per reply. Never start a thread for something you can answer. Say in your reply what you started and why, in a sentence.
+
+Cost: every thread is a full agent session that reads the code afresh, and the person's plan has a usage window shared by all of them. Split work into threads by independent area, not by item: one thread for related fixes beats one per fix. When the work has an order (the riskiest first), start those threads first and the rest once they report. Only a few threads run at once; the others wait for a slot and start on their own, so don't start a thread again because it is waiting.
+
+Speed: give each thread one focused goal, with what done looks like; a thread with three unrelated goals takes as long as all three in a row. Say in the brief to skip local benchmarks, screenshots and app launches unless the task needs them, and to leave tests and lints to CI. For a big review, start several narrow reviewers, each on one area and asked for its top issues only, rather than one that reads everything. Fit model and effort to the task: a smaller model and low effort for mechanical work such as releases, merges, renames, docs or copy, and the default for design, debugging or risky changes.
 
 Each message may open with a Threads section: what changed in this project's threads since your last turn. Threads report through their own tools; use those reports to answer the person, with links.
 "##
@@ -1006,13 +1230,116 @@ pub fn thread_rules(tools: bool) -> String {
         "Write these fenced blocks in your reply; Runo takes them out of the text. ```runo-checklist with a first line such as \"title: Settings spacing pass\" naming the task in 2 to 5 words, then one step per line (- [x] done, - [~] doing, - [ ] to do), written again at the end so every step shows how it ended, ```runo-report opening with a short sentence on the outcome, then a few sentences and any links on lines of their own, and ```runo-decision with JSON {\"question\":…, \"options\":[{\"label\":…, \"consequence\":…}], \"recommended\":0} when a choice changes what the person gets or can't be undone."
     };
     format!(
-        "## You are a Crew thread\nCrew, which runs this project for the person, started you for the task below. Work on it until it's done. {how}\n\n## Your task\n"
+        "## You are a Crew thread\nCrew, which runs this project for the person, started you for the task below. Work on it until it's done. {how}\n\nOther threads may be running side by side, and all of them share the person's plan usage. Do the work in this thread. Use subagents only for independent lookups or reviews that would otherwise fill your context, at most two at a time, and never one per item of a list. Before you push, run the project's quick local check once (a compile or type check), not after every change. When the project has CI, let it run the full tests and lints on the pull request. Don't wait for other threads' builds to finish.\n\nOnce you have pushed and opened the pull request, report and end your turn. Don't wait for CI: no `gh pr checks --watch`, `gh run watch` or sleep loops. Runo watches the pull request and wakes you if a check fails, someone reviews or comments, or the branch conflicts with its base.\n\n## Your task\n"
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quit_decision() -> Decision {
+        Decision {
+            question: "Which version to tag?".into(),
+            options: vec![
+                Choice {
+                    label: "v0.5.9".into(),
+                    consequence: "Ships with the watcher".into(),
+                },
+                Choice {
+                    label: "v0.6.0".into(),
+                    consequence: String::new(),
+                },
+            ],
+            recommended: 0,
+        }
+    }
+
+    #[test]
+    fn messages_and_decisions_both_wake_crew() {
+        let wakes = wake_prompts(vec![
+            (
+                1,
+                5,
+                "Docs".into(),
+                Wake::Message("Done with the guide".into()),
+            ),
+            (1, 6, "Release".into(), Wake::Decision(quit_decision())),
+        ]);
+        assert_eq!(wakes.len(), 2);
+        assert_eq!(wakes[0].1, 5);
+        assert_eq!(parse_wake(&wakes[0].2), Some((5, "Done with the guide")));
+        let (thread, said) = parse_wake(&wakes[1].2).unwrap();
+        assert_eq!(thread, 6);
+        assert!(said.starts_with("Decision: Which version to tag?"));
+        assert!(said.contains("1. v0.5.9: Ships with the watcher (recommended)"));
+        assert!(said.contains("2. v0.6.0\n"));
+        assert!(said.contains("message_thread"));
+    }
+
+    #[test]
+    fn several_messages_from_a_thread_wake_crew_once_in_order() {
+        let msg =
+            |thread, text: &str| (1, thread, format!("T{thread}"), Wake::Message(text.into()));
+        let wakes = wake_prompts(vec![
+            msg(5, "First"),
+            msg(7, "Other thread"),
+            msg(5, "Second"),
+            msg(5, "First"),
+            (1, 5, "T5".into(), Wake::Decision(quit_decision())),
+            (2, 5, "T5".into(), Wake::Message("Another chat".into())),
+        ]);
+        assert_eq!(wakes.len(), 3);
+        assert_eq!((wakes[0].0, wakes[0].1), (1, 5));
+        let (_, said) = parse_wake(&wakes[0].2).unwrap();
+        let parts: Vec<&str> = said.split("\n\n").collect();
+        assert_eq!(parts[0], "First");
+        assert_eq!(parts[1], "Second");
+        assert!(parts[2].starts_with("Decision: "));
+        assert_eq!(said.matches("First").count(), 1);
+        assert_eq!(parse_wake(&wakes[1].2), Some((7, "Other thread")));
+        assert_eq!((wakes[2].0, wakes[2].1), (2, 5));
+    }
+
+    #[test]
+    fn a_threads_words_get_their_own_heading() {
+        let wake = wake_text(12, "Docs", "Ready");
+        assert_eq!(prompt_heading(&wake), "## From thread #12 (not the person)");
+        assert_eq!(prompt_heading("Ship it"), "## The person says");
+        // A person quoting a thread's words loosely is still the person.
+        assert_eq!(
+            prompt_heading("Thread #12 said it's ready"),
+            "## The person says"
+        );
+    }
+
+    #[test]
+    fn crew_answering_a_decision_is_kept_until_the_next_one() {
+        let mut info = ThreadInfo::default();
+        assert!(!answer_by_crew(&mut info, "Tag v0.5.9", 10));
+        assert!(info.crew_answer.is_none());
+        assert!(apply(&mut info, &EventKind::Decision(quit_decision()), 5));
+        assert!(answer_by_crew(&mut info, "On it: tag v0.5.9.", 10));
+        let a = info.crew_answer.clone().unwrap();
+        assert_eq!(a.question, "Which version to tag?");
+        assert_eq!(a.answer, "On it: tag v0.5.9.");
+        assert_eq!(a.at, 10);
+        // A new decision clears it, so the card doesn't claim Crew answered that one.
+        assert!(apply(&mut info, &EventKind::Decision(quit_decision()), 20));
+        assert!(info.crew_answer.is_none());
+        // Saved threads from before load without it.
+        let old: ThreadInfo = serde_json::from_str("{}").unwrap();
+        assert!(old.crew_answer.is_none());
+    }
+
+    #[test]
+    fn wake_text_reads_back() {
+        let text = wake_text(41, "Refine Arcade: pro + fun", "Line one\nLine two");
+        assert_eq!(parse_wake(&text), Some((41, "Line one\nLine two")));
+        assert_eq!(parse_wake("Thread # (x) says: y"), None);
+        assert_eq!(parse_wake("Thread #4 says hi"), None);
+        assert_eq!(parse_wake("Fix the build"), None);
+    }
 
     #[test]
     fn old_titles_are_cut_back_to_a_word() {
@@ -1369,6 +1696,9 @@ mod tests {
             brief: format!("Do {title}"),
             agent: String::new(),
             isolated: None,
+            model: String::new(),
+            effort: String::new(),
+            budget_usd: 0.0,
         }
     }
 
@@ -1384,8 +1714,35 @@ mod tests {
                 brief: "Measure it".into(),
                 agent: "codex".into(),
                 isolated: Some(true),
+                model: String::new(),
+                effort: String::new(),
+                budget_usd: 0.0,
             }]
         );
+        let picked = r#"{"do":"start_thread","title":"Docs","brief":"Fix typos","model":"sonnet","effort":"LOW","budget_usd":2.5}"#;
+        match &parse_actions(picked).0[..] {
+            [Action::StartThread {
+                model,
+                effort,
+                budget_usd,
+                ..
+            }] => {
+                assert_eq!(model, "sonnet");
+                assert_eq!(effort, "low");
+                assert_eq!(*budget_usd, 2.5);
+            }
+            other => panic!("{other:?}"),
+        }
+        let odd = r#"{"do":"start_thread","title":"Docs","brief":"Fix typos","model":"sonnet; rm -rf","budget_usd":-4}"#;
+        match &parse_actions(odd).0[..] {
+            [Action::StartThread {
+                model, budget_usd, ..
+            }] => {
+                assert!(model.is_empty());
+                assert_eq!(*budget_usd, 0.0);
+            }
+            other => panic!("{other:?}"),
+        }
         let list = r#"[{"do":"message_thread","thread":4,"text":"Also the docs"},{"do":"read_thread","thread":4}]"#;
         assert_eq!(parse_actions(list).0.len(), 2);
         let wrapped = r#"{"actions":[{"do":"resolve_thread","thread":9}]}"#;
@@ -1638,16 +1995,24 @@ mod tests {
             "runo",
             &[("claude", "Claude Code"), ("codex", "Codex")],
             "Claude Code",
+            &["opus".to_string(), "sonnet".to_string()],
         );
         assert!(rules.contains("```runo-actions"));
+        assert!(rules.contains("Claude Code's models: opus, sonnet."));
         assert!(rules.contains("codex (Codex)"));
         assert!(rules.contains(&format!("at most {MAX_NEW_THREADS} new threads")));
+        assert!(rules.contains("one focused goal"));
+        assert!(rules.contains("top issues only"));
         // The example in the rules is itself a valid block.
         let example = rules.split("```runo-actions\n").nth(1).unwrap();
         let example = example.split("\n```").next().unwrap();
         assert_eq!(parse_actions(example).0.len(), 1);
         assert!(thread_rules(true).contains("set_checklist"));
         assert!(thread_rules(false).contains("```runo-checklist"));
+        assert!(thread_rules(true).contains("subagents only for independent"));
+        assert!(thread_rules(true).contains("quick local check"));
+        assert!(!thread_rules(true).contains("full test suite"));
+        assert!(thread_rules(false).contains("no `gh pr checks --watch`, `gh run watch`"));
     }
 
     #[test]

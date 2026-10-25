@@ -365,7 +365,7 @@ fn switch_row(title: &str, desc: &str, on: bool, set: fn(&mut AppSettings, bool)
 
 /// A path with the home folder shown as ~.
 pub(crate) fn tilde(path: &std::path::Path) -> String {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    let home = crate::store::home_dir();
     match home.and_then(|h| path.strip_prefix(h).ok().map(|p| p.display().to_string())) {
         Some(rest) => format!("~/{rest}"),
         None => path.display().to_string(),
@@ -422,6 +422,19 @@ fn assistant_models(st: &AppSettings) -> Vec<(String, String)> {
         out.push((st.assistant_model.clone(), st.assistant_model.clone()));
     }
     out
+}
+
+/// A concurrency setting's choices: Auto, showing what it comes to on this computer, the
+/// given numbers, and `none` for no limit.
+fn limit_options(auto: usize, numbers: &[usize], none: &str) -> Vec<(String, String)> {
+    let auto = format!(
+        "Auto ({auto} at a time on {})",
+        hardware::describe(hardware::here())
+    );
+    std::iter::once(("auto".to_string(), auto))
+        .chain(numbers.iter().map(|n| (n.to_string(), n.to_string())))
+        .chain([("0".to_string(), none.to_string())])
+        .collect()
 }
 
 fn options(items: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -801,6 +814,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     switch_row("Notifications", "Show a desktop notification when an agent finishes, fails or needs you. Clicking it opens the session.", st.notifications, |s, v| s.notifications = v),
                 ];
                 if cfg!(target_os = "macos") {
+                    rows.push(switch_row("Show badge on Dock icon", "A red count on Runo's Dock icon of what needs you: agents waiting, runs you haven't seen, Crew replies and reviews. It clears as you open them.", st.dock_badge, |s, v| s.dock_badge = v));
                     rows.push(switch_row("Show Runo in the menu bar", "A Runo glyph by the clock counts what needs you and what's working. Click it to allow or stop agents and Ask Runo without opening the window.", st.menu_bar, |s, v| s.menu_bar = v));
                     if st.menu_bar {
                         rows.push(switch_row("Keep running in the menu bar", "⌘Q and closing the window hide Runo to the menu bar, and agents keep working. Quit from the menu bar to quit.", st.run_in_background, |s, v| s.run_in_background = v));
@@ -810,9 +824,19 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             }),
             section("Behavior", "Motion, sleep and how the sidebar groups sessions.", vec![
                 switch_row("Animations", "Fade, slide and pulse effects. Turn off for instant changes.", st.animations, |s, v| s.animations = v),
-                switch_row("Keep the computer awake", "Hold off sleep while any agent is running (caffeinate on macOS, systemd-inhibit on Linux).", st.keep_awake, |s, v| s.keep_awake = v),
+                switch_row(
+                    "Keep the computer awake",
+                    if cfg!(any(target_os = "macos", target_os = "linux")) {
+                        "Hold off sleep while any agent is running (caffeinate on macOS, systemd-inhibit on Linux)."
+                    } else {
+                        "Hold off sleep while any agent is running. Not available on this system yet, so this does nothing here."
+                    },
+                    st.keep_awake,
+                    |s, v| s.keep_awake = v,
+                ),
                 switch_row("Group sidebar by status", "Show Needs you, Running, Ready to review and Done groups instead of projects.", st.group_by_status, |s, v| s.group_by_status = v),
                 switch_row("Show deleted threads", "Keep a line in Crew's chat where a thread you deleted was.", st.show_deleted_threads, |s, v| s.show_deleted_threads = v),
+                switch_row("Thread titles beside numbers", "In Crew's chat, #34 shows the thread's title next to it. The number alone still opens the thread, and shows its title on hover.", st.thread_ref_titles, |s, v| s.thread_ref_titles = v),
             ]),
             section("Rail", "Pin places out on the rail so they're one click away. The rest stay in its ⋯ menu.", vec![
                 switch_row("Playbooks", "Saved tasks you run in any project.", st.pinned("Playbooks"), |s, v| s.pin("Playbooks", v)),
@@ -833,7 +857,20 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     };
                     row("Check for updates", &desc, Ctl::Button("Check now".into(), Rc::new(|this, cx| this.check_runo_now(cx))))
                 },
-                row("Logs and crash reports", &format!("Each launch writes a log, and crashes leave a report, in {}.", tilde(&crate::applog::logs_dir())), Ctl::Button("Show".into(), Rc::new(|_, cx| cx.reveal_path(&crate::applog::logs_dir())))),
+                row(
+                    "Logs and crash reports",
+                    &format!("Each launch writes a log, and crashes leave a report, in {}. Copy diagnostics copies your version, system, agent CLIs, settings without secrets and the end of the log, to paste into a bug report.", tilde(&crate::applog::logs_dir())),
+                    Ctl::Buttons(vec![
+                        ("Show".into(), Rc::new(|_: &mut RunoApp, cx: &mut Context<RunoApp>| cx.reveal_path(&crate::applog::logs_dir())) as Action),
+                        (
+                            "Copy diagnostics".into(),
+                            Rc::new(|this: &mut RunoApp, cx: &mut Context<RunoApp>| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(crate::applog::diagnostics()));
+                                this.info = Some(("Copied diagnostics. Look them over before you share them.".into(), std::time::Instant::now()));
+                            }) as Action,
+                        ),
+                    ]),
+                ),
             ]),
             section("Git", "How Runo commits for you.", vec![
                 switch_row("Credit the agent in commits", "Adds a line such as \"Made with Claude Code in Runo\" to commits made from the Changes panel.", st.attribution, |s, v| s.attribution = v),
@@ -873,6 +910,11 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 row("Turns per day", "Across every session and every agent. New turns wait once this many have started today.", Ctl::Dropdown(options(&[("0", "No limit"), ("25", "25"), ("50", "50"), ("100", "100"), ("200", "200"), ("500", "500")]), st.daily_turn_limit.to_string(), Rc::new(|s, v| s.daily_turn_limit = v.parse().unwrap_or(0)))),
                 row("Tokens per day", "Across every session. Counts the input and output tokens agents report, not cached ones; agents that report no tokens, such as Grok, don't count toward it. New turns wait once today's count reaches it.", Ctl::Dropdown(options(&[("0", "No limit"), ("1000", "1M"), ("5000", "5M"), ("10000", "10M"), ("25000", "25M"), ("50000", "50M"), ("100000", "100M")]), st.daily_token_limit_k.to_string(), Rc::new(|s, v| s.daily_token_limit_k = v.parse().unwrap_or(0)))),
                 row("Agents running at once", "Turns past this many wait for a free slot, shown as Waiting for a slot, and start in order.", Ctl::Dropdown(options(&[("0", "No cap"), ("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("6", "6"), ("8", "8")]), st.max_running.to_string(), Rc::new(|s, v| s.max_running = v.parse().unwrap_or(0)))),
+                row("Checks running at once", "The checks Runo runs after each turn (set in a project's Edit dialog) across every session. Past this many, the others show Waiting for another check and start in order as running ones finish. Auto allows one set per 4 cores and per 6 GB of memory, from 1 to 6, since each is usually a full build and test run.", Ctl::Dropdown(limit_options(hardware::checks_auto(hardware::here()), &[1, 2, 4], "No limit"), st.checks_at_once.clone(), Rc::new(|s, v| s.checks_at_once = v))),
+                switch_row("Run checks at low priority", "Checks and everything they start get low CPU and disk priority, so the app, the agents and your own tools stay quick while they run. Off runs them at normal priority.", st.checks_low_priority, |s, v| s.checks_low_priority = v),
+                row("Checks after each turn", "What Runo runs after a turn that changed files, for projects that don't pick their own in their Edit dialog. Quick runs each language's fast check, such as cargo check, a typecheck or lint script, go vet or ruff, and leaves tests to CI. Full runs the tests too. Commands typed in a project stay as they are.", Ctl::Segment(options(&[("quick", "Quick"), ("full", "Full")]), st.check_level.clone(), Rc::new(|s, v| s.check_level = v))),
+                row("Crew threads running at once", "Threads Crew starts past this many wait for a slot and start in order as others finish; Start now on a waiting thread lets it go ahead. Sessions you start yourself never wait for it. Each thread is a full agent, often with subagents of its own, so a few at once keep a plan's usage window from running out. Auto allows one per 3 cores and per 4 GB of memory, from 2 to 8, for the builds and tests the agents run.", Ctl::Dropdown(limit_options(hardware::crew_auto(hardware::here()), &[1, 2, 3, 4, 6, 8], "No cap"), st.crew_threads.clone(), Rc::new(|s, v| s.crew_threads = v))),
+                row("Hold threads and playbooks past", "Once an agent's plan has used this share of its 5-hour or weekly window, new turns of Crew threads and playbook runs wait until it resets, so what you start yourself still has room. A used-up window always holds every turn of that agent until it resets, whatever this says.", Ctl::Dropdown(options(&[("0", "Never"), ("70", "70%"), ("80", "80%"), ("90", "90%"), ("95", "95%")]), st.plan_hold_percent.to_string(), Rc::new(|s, v| s.plan_hold_percent = v.parse().unwrap_or(0)))),
             ]),
             section("Permissions", "What agents may do without asking you first.", vec![
                 row("Default permission level", "Maps to each agent's closest mode: auto edit, read-only, or full access.", Ctl::Segment(options(&[("edit", "Auto edit"), ("plan", "Plan only"), ("full", "Full access")]), st.default_mode.clone(), Rc::new(|s, v| s.default_mode = v))),
@@ -1090,6 +1132,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 agent_text("claude", st, "Denied tools", "Comma-separated rules that are always blocked.", "None", |o| o.disallowed_tools.clone(), |o, v| o.disallowed_tools = v),
                 agent_text("claude", st, "Extra directories", "Comma-separated folders Claude may access besides the project (--add-dir).", "None", |o| o.add_dirs.clone(), |o, v| o.add_dirs = v),
                 agent_text("claude", st, "Fallback model", "Used automatically when the main model is overloaded (--fallback-model).", "None", |o| o.fallback_model.clone(), |o, v| o.fallback_model = v),
+                agent_text("claude", st, "Subagent model", "The model Claude's subagents run on, such as sonnet or haiku, while the session keeps its own. A smaller one makes searches and reviews it hands off much cheaper. Empty lets each subagent use the session's model.", "Same as the session", |o| o.subagent_model.clone(), |o, v| o.subagent_model = v.trim().to_string()),
                 agent_choice("claude", st, "Default effort", "How much thinking Claude does when the composer has none selected.", std::iter::once(("".to_string(), "Default".to_string())).chain(caps::get("claude").efforts.iter().map(|c| (c.value.clone(), c.label.clone()))).collect(), |o| o.effort.clone(), |o, v| o.effort = v),
             ]),
         ]).collect(),
@@ -1296,6 +1339,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
         SettingsPage::Worktrees => vec![section("Location", "Isolated sessions get their own git worktree and branch.", vec![
             row("Worktree folder", "Created next to each repository as .runo-worktrees/<repo>/<branch>.", Ctl::Chip(".runo-worktrees".into(), 3)),
             row("Runo data", "Projects are saved in state.json and each session in its own file under sessions. Settings live next to them in settings.json.", Ctl::Chip(tilde(&store::data_dir()), 3)),
+            switch_row("Remove build output when a thread is done", "Once a thread is resolved, archived or merged, delete the build and dependency folders git ignores in its worktree (target, node_modules, .venv, dist, build and the like). The worktree, its code and branch stay, so it can be opened and built again. Skipped while anything runs there.", st.remove_build_output, |s, v| s.remove_build_output = v),
         ])],
     }
 }
@@ -1533,6 +1577,8 @@ impl Ctl {
 /// A setting the assistant named, found by the words Settings shows.
 pub(crate) struct Found {
     pub page: SettingsPage,
+    /// The title of the section it sits in.
+    pub section: String,
     pub title: String,
     pub knob: Knob,
 }
@@ -1569,6 +1615,9 @@ pub(crate) fn place(page: SettingsPage) -> String {
 /// it is always the page as it is.
 pub(crate) fn describe_page(page: SettingsPage, data: &Discovered, cx: &App) -> String {
     let st = cx.global::<AppSettings>();
+    // Phone and Connections rows carry pairing links, hosts and keys in their text, so
+    // only their names go to the agent.
+    let private = private_page(page);
     let mut out = format!("{}: {}\n", place(page), page.subtitle());
     for sec in page_sections(page, st, data) {
         if sec.rows.is_empty() {
@@ -1583,7 +1632,7 @@ pub(crate) fn describe_page(page: SettingsPage, data: &Discovered, cx: &App) -> 
             if r.title.trim().is_empty() {
                 continue;
             }
-            let shown = r.ctl.shown(cx);
+            let shown = r.ctl.shown(cx).filter(|_| !private).map(|t| redact(&t));
             let now = match r.ctl.knob() {
                 Some(Knob::Switch(on, _)) => format!("switch, {}", if on { "on" } else { "off" }),
                 Some(Knob::Choice(opts, now, _)) => {
@@ -1609,14 +1658,40 @@ pub(crate) fn describe_page(page: SettingsPage, data: &Discovered, cx: &App) -> 
                     (None, None) => "a list or form".to_string(),
                 },
             };
-            out.push_str(&format!("- {} [{now}]", r.title));
-            if !r.desc.is_empty() {
-                out.push_str(&format!(": {}", r.desc));
+            out.push_str(&format!("- {} [{now}]", redact(&r.title)));
+            if !r.desc.is_empty() && !private {
+                out.push_str(&format!(": {}", redact(&r.desc)));
             }
             out.push('\n');
         }
     }
     out
+}
+
+/// Pages whose rows show pairing links, hosts or keys: the assistant sees only their names.
+pub(crate) fn private_page(page: SettingsPage) -> bool {
+    matches!(page, SettingsPage::Phone | SettingsPage::Connections)
+}
+
+/// `text` with anything that looks like a token or key, and any link that carries one,
+/// replaced by "[hidden]", so a row that shows one can't hand it to the agent.
+pub(crate) fn redact(text: &str) -> String {
+    let secret = |word: &str| {
+        let w = word.trim_matches(|c: char| !c.is_alphanumeric());
+        let run = w
+            .split(|c: char| !(c.is_ascii_alphanumeric() || "-_+=".contains(c)))
+            .any(|part| {
+                part.len() >= 24
+                    && part.chars().any(|c| c.is_ascii_digit())
+                    && part.chars().any(|c| c.is_ascii_alphabetic())
+            });
+        let link = w.contains("://") && (w.contains('?') || w.contains('#') || w.contains('@'));
+        run || link
+    };
+    text.split(' ')
+        .map(|word| if secret(word) { "[hidden]" } else { word })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The setting called `name` on the page called `page` (any page when that's empty), by
@@ -1645,6 +1720,7 @@ pub(crate) fn find_setting(page: &str, name: &str, data: &Discovered, cx: &App) 
                 if hit && !title.trim().is_empty() {
                     return Some(Found {
                         page: p,
+                        section: sec.title.clone(),
                         title,
                         knob,
                     });
@@ -1852,6 +1928,26 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
         rows.push(conn_text(c, "Keys passed in", "Environment variables from this machine the agent gets there, comma separated. Nothing else reaches it.", connections::DEFAULT_KEYS, c.keys.clone(), |c, v| c.keys = v));
         rows.push(conn_switch(c, "GitHub access", "Give the agent your GitHub login (from gh auth token) for its own work there, such as cloning or opening PRs. Syncing never needs it. Passed per command, never saved there.", c.github, |c, v| c.github = v));
         rows.push(conn_switch(c, "Agents may use it", "Lets agents in any session run commands here with Runo's run_on tool, for research, untrusted code or heavy jobs.", c.agents, |c, v| c.agents = v));
+        // What agents running here may reach on this machine through Runo's tools. Off
+        // by default: code in a VM or on a server shouldn't drive this machine.
+        for (key, title, desc) in connections::RELAY_GROUPS {
+            let on = c.relay_tools.iter().any(|g| g == key);
+            rows.push(row(
+                &format!("Agents here: {title}"),
+                &format!("{desc} Leave off unless you trust what runs on this connection."),
+                Ctl::Switch(
+                    on,
+                    Rc::new(move |s, v| {
+                        if let Some(c) = s.connections.iter_mut().find(|c| c.id == id) {
+                            c.relay_tools.retain(|g| g != key);
+                            if v {
+                                c.relay_tools.push(key.to_string());
+                            }
+                        }
+                    }),
+                ),
+            ));
+        }
         rows.push(row(
             "Remove",
             "Sessions that run here move back to this machine, and their copies there are deleted.",
@@ -2755,7 +2851,7 @@ impl RunoApp {
                                     .size(px(6.))
                                     .rounded_full()
                                     .bg(rgb(c_blue()))
-                                    .with_animation(
+                                    .animated(
                                         "key-rec",
                                         Animation::new(std::time::Duration::from_millis(1000))
                                             .repeat()

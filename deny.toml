@@ -1,0 +1,39 @@
+# cargo-deny: known vulnerabilities, licenses that can't ship in an MIT app, and crates
+# from anywhere but crates.io. Run `cargo deny check` locally; CI runs it on pull requests
+# and every Monday, so a new advisory shows up without a push.
+
+[advisories]
+# Unmaintained crates only warn: most come in through gpui and can't be swapped here.
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "MPL-2.0",
+    "Unlicense",
+    "0BSD",
+    # libbz2-rs-sys, through gpui's HTTP client: a BSD-style licence.
+    "bzip2-1.0.6",
+]
+
+[bans]
+# Duplicate versions are listed, not failed: almost all come through gpui.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

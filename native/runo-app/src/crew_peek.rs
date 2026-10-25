@@ -3,17 +3,29 @@
 //! where it was; "Open in main" moves the thread to the main view.
 
 use super::*;
+use crate::chat_list::ChatRow;
 use crate::crew_ui::thread_status;
 
 impl RunoApp {
     /// Open `thread` in the Threads tab.
     pub(crate) fn open_peek(&mut self, thread: u64) {
         if self.peek != Some(thread) {
-            self.peek_scroll.scroll_to_bottom();
+            self.peek_jump_to_bottom();
         }
         self.peek = Some(thread);
         self.right_tab = RightTab::Threads;
         self.show_panel = true;
+    }
+
+    /// Open `thread` from a "#34" in Crew's chat: beside the chat as its cards do, or in
+    /// the main view when `main` (a ⌘-click) or when the chat isn't open.
+    pub(crate) fn open_thread_ref(&mut self, thread: u64, main: bool) {
+        if !main && self.current().is_some_and(|s| s.canvas == crew::CANVAS) {
+            self.open_peek(thread);
+        } else {
+            self.close_peek();
+            self.select(thread);
+        }
     }
 
     /// Back from the thread to the list of threads.
@@ -34,7 +46,7 @@ impl RunoApp {
         self.peek_prompt
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.message_thread(thread, text, Vec::new(), cx);
-        self.peek_scroll.scroll_to_bottom();
+        self.peek_jump_to_bottom();
         self.save();
     }
 
@@ -113,21 +125,41 @@ impl RunoApp {
                     .child("Open in main"),
             );
 
-        let mut list = div().v_flex().gap_3().px_3().py_3();
-        if let Some(strip) = self.thread_strip(session, true, cx) {
-            list = list.child(strip);
+        let mut rows = Vec::with_capacity(session.messages.len() + 2);
+        if let Some(crew) = &session.crew {
+            rows.push((ChatRow::Strip, chat_list::hash(&crew.decision)));
         }
-        for (i, message) in session.messages.iter().enumerate() {
-            list = list.child(peek_message(thread, i, message));
-        }
+        rows.extend(session.messages.iter().enumerate().map(|(i, m)| {
+            (
+                ChatRow::Message(i),
+                (m.text.len() as u64) << 20 | m.steps.len() as u64,
+            )
+        }));
         if working {
-            let since = self
-                .turns
-                .get(&thread)
-                .map(|t| &t.started)
-                .map(|t| elapsed(t.elapsed()));
-            list = list.child(div().text_size(px(12.5)).child(working_indicator(since)));
+            rows.push((
+                ChatRow::Working,
+                self.working_version(thread, &session.messages),
+            ));
+        } else if self
+            .finished
+            .get(&thread)
+            .is_some_and(|(at, _)| at.elapsed() < working::FINISH)
+        {
+            rows.push((ChatRow::Finished, 0));
         }
+        self.peek_rows.borrow_mut().update(
+            &self.peek_list,
+            thread,
+            true,
+            rows,
+            chat_list::layout_epoch(cx),
+        );
+        let view = cx.entity().downgrade();
+        let list = list(self.peek_list.clone(), move |ix, _, cx| {
+            view.update(cx, |this, cx| this.peek_row(thread, ix, cx))
+                .unwrap_or_else(|_| div().into_any_element())
+        })
+        .size_full();
         let queued = session.queue.len();
 
         let composer = div()
@@ -193,12 +225,23 @@ impl RunoApp {
                 .child(head)
                 .child(
                     div()
-                        .id(SharedString::from(format!("peek-scroll-{thread}")))
+                        .relative()
                         .flex_1()
                         .min_h_0()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.peek_scroll)
-                        .child(list),
+                        .v_flex()
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("peek-scroll-{thread}")))
+                                .flex_1()
+                                .min_h_0()
+                                .on_scroll_wheel(cx.listener(
+                                    |this, e: &ScrollWheelEvent, window, _| {
+                                        this.peek_wheel(e, window)
+                                    },
+                                ))
+                                .child(list),
+                        )
+                        .children(self.peek_messages_pill(session, cx)),
                 )
                 .child(composer)
                 .into_any_element(),
@@ -206,54 +249,129 @@ impl RunoApp {
     }
 }
 
-/// One message of a thread, compact: the person's words on the right, the agent's reply
-/// with how many steps it took, and anything else as a quiet line.
-fn peek_message(thread: u64, index: usize, message: &Message) -> AnyElement {
-    match message.role {
-        Role::User => div()
-            .flex()
-            .justify_end()
-            .child(
+impl RunoApp {
+    /// One message of a thread, compact: the person's words on the right, the agent's reply
+    /// with how many steps it took, and anything else as a quiet line. Thread numbers in
+    /// the reply link to their thread through `links`.
+    fn peek_message(
+        &self,
+        thread: u64,
+        index: usize,
+        message: &Message,
+        links: Option<&crate::thread_refs::ThreadLinks>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match message.role {
+            Role::User => div()
+                .flex()
+                .justify_end()
+                .child(
+                    div()
+                        .max_w(relative(0.88))
+                        .px_3()
+                        .py(px(6.))
+                        .rounded_xl()
+                        .bg(tint(c_raised()))
+                        .text_size(px(12.5))
+                        .child(message.text.clone()),
+                )
+                .into_any_element(),
+            Role::Agent => {
+                let n = message.steps.len();
                 div()
-                    .max_w(relative(0.88))
-                    .px_3()
-                    .py(px(6.))
-                    .rounded_xl()
-                    .bg(tint(c_raised()))
-                    .text_size(px(12.5))
-                    .child(message.text.clone()),
-            )
-            .into_any_element(),
-        Role::Agent => {
-            let n = message.steps.len();
-            div()
-                .v_flex()
-                .gap_1()
-                .when(n > 0, |el| {
-                    el.child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(rgb(c_muted()))
-                            .child(format!("{n} step{}", if n == 1 { "" } else { "s" })),
-                    )
-                })
-                .when(!message.text.trim().is_empty(), |el| {
-                    el.child(
-                        div().text_size(px(12.5)).child(
-                            TextView::markdown(
-                                SharedString::from(format!("peek-body-{thread}-{index}")),
-                                message.text.clone(),
-                            )
-                            .selectable(true),
-                        ),
-                    )
-                })
-                .into_any_element()
+                    .v_flex()
+                    .gap_1()
+                    .when(n > 0, |el| {
+                        el.child(
+                            div()
+                                .text_size(px(11.5))
+                                .text_color(rgb(c_muted()))
+                                .child(format!("{n} step{}", if n == 1 { "" } else { "s" })),
+                        )
+                    })
+                    .when(!message.text.trim().is_empty(), |el| {
+                        el.child(div().text_size(px(12.5)).child(self.markdown_view(
+                            thread,
+                            index,
+                            1,
+                            &message.text,
+                            links,
+                            cx,
+                        )))
+                    })
+                    .into_any_element()
+            }
+            _ => div()
+                .text_size(px(11.5))
+                .text_color(rgb(c_muted()))
+                .child(crew::plain(&message.text))
+                .into_any_element(),
         }
-        _ => div()
-            .text_size(px(11.5))
-            .text_color(rgb(c_muted()))
-            .child(crew::plain(&message.text))
-            .into_any_element(),
+    }
+
+    /// Row `ix` of the thread open in the Threads tab, as `peek_view` listed them last.
+    fn peek_row(&self, thread: u64, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let (row, fresh, count) = {
+            let rows = self.peek_rows.borrow();
+            let Some((row, fresh)) = rows.row(ix) else {
+                return div().into_any_element();
+            };
+            (row, fresh, rows.len())
+        };
+        let Some(session) = self.state.session(thread) else {
+            return div().into_any_element();
+        };
+        chat_list::ROW_SETTLED.set(!fresh);
+        let content = match row {
+            ChatRow::Strip => self.thread_strip(session, true, cx),
+            ChatRow::Message(i) => {
+                let links = self.thread_links(cx);
+                session.messages.get(i).map(|m| {
+                    let text = self.peek_message(thread, i, m, links.as_ref(), cx);
+                    if m.role != Role::User || m.images.is_empty() {
+                        return text;
+                    }
+                    let mut images = div().flex().flex_wrap().justify_end().gap_1();
+                    for (k, path) in m.images.iter().enumerate() {
+                        images = images.child(
+                            self.viewable(
+                                SharedString::from(format!("peek-img-{thread}-{i}-{k}")),
+                                thread,
+                                crate::lightbox::Pick::Message(i, k),
+                                img(std::path::PathBuf::from(path))
+                                    .size(px(56.))
+                                    .rounded_md()
+                                    .object_fit(ObjectFit::Cover),
+                                cx,
+                            )
+                            .size(px(56.)),
+                        );
+                    }
+                    div()
+                        .v_flex()
+                        .gap_3()
+                        .child(images)
+                        .child(text)
+                        .into_any_element()
+                })
+            }
+            ChatRow::Working => Some(
+                div()
+                    .text_size(px(12.5))
+                    .child(self.working_line(thread, &session.messages, cx))
+                    .into_any_element(),
+            ),
+            ChatRow::Finished => self
+                .finished_row(thread)
+                .map(|done| div().text_size(px(12.5)).child(done).into_any_element()),
+            _ => None,
+        };
+        chat_list::ROW_SETTLED.set(false);
+        div()
+            .px_3()
+            .pt_3()
+            .when(ix + 1 == count, |el| el.pb_3())
+            .children(content)
+            .into_any_element()
     }
 }
