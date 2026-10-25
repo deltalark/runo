@@ -298,3 +298,52 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+  checksums:
+    # Lists the SHA-256 of every file in the release in SHA256SUMS, signed with the
+    # UPDATE_SIGNING_KEY secret (make it with scripts/update-key.sh). Runo's updater
+    # refuses a download that doesn't match, or whose list isn't signed by update.pub.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List the checksums
+        working-directory: dist
+        run: |
+          sha256sum -- * > ../SHA256SUMS
+          cat ../SHA256SUMS
+
+      - name: Sign the checksums
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          pub=$(tr -d '[:space:]' < native/runo-app/src/update.pub)
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            if [ -n "$pub" ]; then
+              echo "::error::update.pub is set but UPDATE_SIGNING_KEY isn't, so Runo would refuse this release."
+              exit 1
+            fi
+            echo "::warning::UPDATE_SIGNING_KEY isn't set, so SHA256SUMS is published unsigned. Run scripts/update-key.sh."
+            exit 0
+          fi
+          umask 077
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > "$RUNNER_TEMP/key.pem"
+          openssl pkeyutl -sign -inkey "$RUNNER_TEMP/key.pem" -rawin -in SHA256SUMS | base64 -w0 > SHA256SUMS.sig
+          rm "$RUNNER_TEMP/key.pem"
+          # Check it against the key Runo is built with.
+          printf '302a300506032b6570032100' | xxd -r -p > pub.der
+          printf '%s' "$pub" | base64 -d >> pub.der
+          base64 -d SHA256SUMS.sig > sig.bin
+          openssl pkeyutl -verify -pubin -keyform DER -inkey pub.der -rawin -in SHA256SUMS -sigfile sig.bin
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" SHA256SUMS $(ls SHA256SUMS.sig 2>/dev/null) --clobber

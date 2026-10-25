@@ -953,8 +953,9 @@ impl RunoApp {
                     _ => None,
                 };
                 let mut actions = div().flex().gap_2();
-                if let Some((name, url)) = release.asset.clone() {
+                if release.asset.is_some() {
                     let slot = self.health.download.clone();
+                    let release = release.clone();
                     actions = actions.child(
                         self.button(
                             "runo-download",
@@ -971,11 +972,10 @@ impl RunoApp {
                             if let Ok(mut s) = slot.lock() {
                                 *s = Some(Download::Running);
                             }
-                            let (slot, name, url) = (slot.clone(), name.clone(), url.clone());
+                            let (slot, release) = (slot.clone(), release.clone());
                             std::thread::spawn(move || {
                                 let done = crate::applog::download(
-                                    &name,
-                                    &url,
+                                    &release,
                                     &crate::applog::downloads_dir(),
                                 );
                                 if let Ok(mut s) = slot.lock() {
