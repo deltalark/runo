@@ -4,6 +4,24 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-10-25
+
+### Added
+
+- Image viewer. Click a picture in a chat, in the composer's attachments or in a thread in the Threads tab to open it large over the window, with pinch and ⌘ + scroll zoom, fit and 100%, ← and → through every picture in the conversation, and Copy image, Open in Preview, Show in Finder and Save as…. Esc or a click on the backdrop closes it.
+
+### Changed
+
+- The window is smooth when typing, scrolling, idle and with agents streaming. Only the chat rows in view are laid out, each message's Markdown is parsed once, the window's parts are drawn as cached views so typing doesn't redraw the rest of the window, and agents' JSON output and turn logs are handled off the main thread. The same goes for the thread open in the Threads tab. `RUNO_BENCH=1` plays the same scenes every time for frame times before and after.
+- Crew's threads show only under Crew, grouped into Needs you, Working, Waiting and a folded "N done", in one-line rows with their status and time. The selected thread shows its agent, branch and worktree size, and a hover card has its details. The sessions you started yourself are listed under "Sessions".
+- The status bar's plan usage is a small ring around each agent's mark, with the percentage only from 75%, a dot for a problem, and the full line in its tooltip. Clicking a mark opens the Usage popover with that agent highlighted.
+- Crew's route bar lines up with the composer.
+- The Arcade's games are tighter and more polished.
+
+### Fixed
+
+- A turn is no longer stopped with a false "isn't signed in" when the agent's own output mentions a browser sign-in. Only a plain line from the CLI counts as waiting for sign-in.
+
 ## [0.5.6] - 2026-10-25
 
 ### Added
