@@ -37,10 +37,9 @@ jobs:
             libxcb1-dev libxcb-render0-dev libxcb-shm0-dev libxcb-xkb-dev \
             libwayland-dev libvulkan-dev
 
+      # The release named in rust-toolchain.toml.
       - name: Install Rust
-        run: |
-          rustup update stable
-          rustup default stable
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 

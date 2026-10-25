@@ -7,6 +7,8 @@ exclude = ["vendor/block", "vendor/portable-pty", "vendor/gpui-pre-apple", "vend
 version = "0.5.9"
 edition = "2021"
 license = "MIT"
+# The toolchain in rust-toolchain.toml; older ones aren't tested.
+rust-version = "1.99"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
