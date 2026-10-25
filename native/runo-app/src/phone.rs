@@ -910,6 +910,7 @@ fn session(base: &Path, id: u64) -> Option<Value> {
             "id": r.id,
             "tool": r.tool,
             "what": approvals::describe(&r.tool, &r.input),
+            "command": approvals::full_text(&r.tool, &r.input),
             "asked": r.asked,
         })).collect::<Vec<_>>(),
     }))

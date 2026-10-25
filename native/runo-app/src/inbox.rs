@@ -43,18 +43,24 @@ impl RunoApp {
                             .h(px(26.))
                             .child(icon(IconName::ShieldCheck, 12., c_canvas()))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(provider) =
-                                    this.state.session(id).map(|s| s.provider.clone())
+                                // A bare Bash isn't saved; it is allowed for this answer.
+                                let once = match this
+                                    .state
+                                    .session(id)
+                                    .map(|s| (s.provider.clone(), s.project_id))
                                 {
-                                    this.allow_tools_for(&provider, &always, cx);
-                                }
+                                    Some((provider, project)) => {
+                                        this.allow_tools_for(&provider, project, &always, cx)
+                                    }
+                                    None => always.clone(),
+                                };
                                 this.answer_session(
                                     id,
                                     format!(
                                         "You now have permission to use {}. Continue.",
                                         always.join(", ")
                                     ),
-                                    Vec::new(),
+                                    once,
                                     cx,
                                 );
                                 cx.notify();
