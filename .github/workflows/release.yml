@@ -334,7 +334,7 @@ jobs:
     # Lists the SHA-256 of every file in the release in SHA256SUMS, signed with the
     # UPDATE_SIGNING_KEY secret (make it with scripts/update-key.sh). Runo's updater
     # refuses a download that doesn't match, or whose list isn't signed by update.pub.
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Test builds get them too, as a workflow artifact, so a run by hand checks this job.
     needs: [macos, linux, windows]
     runs-on: ubuntu-latest
     steps:
@@ -374,7 +374,16 @@ jobs:
           base64 -d SHA256SUMS.sig > sig.bin
           openssl pkeyutl -verify -pubin -keyform DER -inkey pub.der -rawin -in SHA256SUMS -sigfile sig.bin
 
+      - name: Upload the checksums
+        if: "!startsWith(github.ref, 'refs/tags/v')"
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: SHA256SUMS
+          path: SHA256SUMS*
+          if-no-files-found: error
+
       - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$GITHUB_REF_NAME" SHA256SUMS $(ls SHA256SUMS.sig 2>/dev/null) --clobber
