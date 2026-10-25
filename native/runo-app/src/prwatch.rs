@@ -2,6 +2,9 @@
 //! turn instead of waiting on CI; Runo reads the pull request every couple of minutes
 //! (`load_pr_status`) and wakes the thread only when there is something to do: a check
 //! failed, someone else reviewed or commented, or the branch conflicts with its base.
+//! Only comments from the repository's owner, members and collaborators wake it: anyone
+//! can comment on a public repository, so another person's comment only shows on the
+//! card ("New comment from @x") for the person to read.
 //! Checks passing only turn the thread's card green, without a wake: a turn just to
 //! answer "done" would reload the thread's whole context for nothing.
 //!
@@ -14,7 +17,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 
 use super::*;
-use crate::github::PrStatus;
+use crate::github::{PrStatus, Voice};
 
 /// How often a watched pull request is read.
 pub const POLL: Duration = Duration::from_secs(120);
@@ -73,6 +76,13 @@ pub struct Watch {
     /// Why the watcher stopped waking the thread and wants the person.
     #[serde(default)]
     pub needs: Option<String>,
+    /// Who last commented without being one of the repository's people, shown on the
+    /// card instead of waking the thread, until its next turn ends.
+    #[serde(default)]
+    pub stranger: Option<String>,
+    /// The time of that latest comment already shown.
+    #[serde(default)]
+    pub stranger_seen: String,
 }
 
 /// What to do after one read of the pull request.
@@ -85,6 +95,8 @@ pub enum Step {
     WakeCi,
     WakeReview,
     WakeConflict,
+    /// Someone outside the repository commented: show it on the card, without a wake.
+    Stranger(String),
     /// Stop waking the thread and show it as needing the person, for this reason.
     NeedsYou(String),
     /// Stop watching, for this reason.
@@ -101,17 +113,32 @@ pub fn start(pr: &PrStatus, branch: &str) -> Option<Watch> {
     })
 }
 
-/// The latest review or comment on `pr` from someone other than its author (the account
-/// the thread pushes with) posted after `seen`. Bots' conversation comments, such as
+/// Reviews and comments on `pr` from someone other than its author (the account the
+/// thread pushes with) posted after `seen`. Bots' conversation comments, such as
 /// coverage or preview links, don't count; their reviews do.
-pub fn new_feedback(pr: &PrStatus, seen: &str) -> Option<String> {
+fn others_since<'a>(pr: &'a PrStatus, seen: &'a str) -> impl Iterator<Item = &'a Voice> {
     pr.voices
         .iter()
         .filter(|v| !v.author.is_empty() && v.author != pr.author)
         .filter(|v| v.review || !v.author.ends_with("[bot]"))
-        .filter(|v| v.at.as_str() > seen)
+        .filter(move |v| v.at.as_str() > seen)
+}
+
+/// The time of the latest feedback since `seen` from the repository's people, which wakes
+/// the thread.
+pub fn new_feedback(pr: &PrStatus, seen: &str) -> Option<String> {
+    others_since(pr, seen)
+        .filter(|v| v.trusted)
         .map(|v| v.at.clone())
         .max()
+}
+
+/// The latest comment since `seen` from anyone else, as (who, when): shown, never sent.
+pub fn new_stranger(pr: &PrStatus, seen: &str) -> Option<(String, String)> {
+    others_since(pr, seen)
+        .filter(|v| !v.trusted)
+        .max_by(|a, b| a.at.cmp(&b.at))
+        .map(|v| (v.author.clone(), v.at.clone()))
 }
 
 fn conflicts(pr: &PrStatus) -> bool {
@@ -179,6 +206,11 @@ pub fn decide(w: &mut Watch, pr: &PrStatus, busy: bool) -> Step {
         w.comment_wakes += 1;
         return Step::WakeReview;
     }
+    if let Some((who, at)) = new_stranger(pr, &w.stranger_seen) {
+        w.stranger_seen = at;
+        w.stranger = Some(who.clone());
+        return Step::Stranger(who);
+    }
     if pr.pending == 0 && pr.passed > 0 && w.green_head != pr.head {
         w.green_head = pr.head.clone();
         w.ci_streak = 0;
@@ -219,6 +251,10 @@ pub fn label(w: &Watch, working: bool) -> Option<(String, bool)> {
         (true, Some(Wake::Review)) => "Answering review",
         (true, Some(Wake::Conflict)) => "Fixing conflicts",
         (true, None) => return None,
+        (false, _) if w.stranger.is_some() => {
+            let who = w.stranger.as_deref().unwrap_or_default();
+            return Some((format!("New comment from @{who}"), false));
+        }
         (false, _) if green(w) => "CI green",
         (false, _) => "Watching CI",
     };
@@ -273,7 +309,10 @@ impl RunoApp {
             return;
         };
         match info.watch.as_mut() {
-            Some(w) => w.waking = None,
+            Some(w) => {
+                w.waking = None;
+                w.stranger = None;
+            }
             None if ok && on_branch => {
                 self.pr_watch.probing.insert(id);
             }
@@ -386,6 +425,18 @@ impl RunoApp {
                 self.state.log(id, format!("Stopped watching CI: {why}"));
                 self.pr_watch.next.remove(&id);
                 self.set_watch(id, None);
+            }
+            Step::Stranger(who) => {
+                let n = watch.pr;
+                self.state.log(
+                    id,
+                    format!("New comment from @{who} on #{n}; not sent to the thread, since they aren't one of the repository's people"),
+                );
+                self.set_watch(id, Some(watch));
+                self.watch_news(
+                    id,
+                    format!("has a new comment from @{who} on #{n}. It wasn't sent to the thread: read it and pass on what should be."),
+                );
             }
             Step::NeedsYou(why) => {
                 self.state.log(id, format!("Watching CI needs you: {why}"));
@@ -552,6 +603,7 @@ mod tests {
             author: author.into(),
             at: at.into(),
             review,
+            trusted: true,
         }
     }
 
@@ -650,6 +702,27 @@ mod tests {
         // Feedback that came while the thread was busy waits, then wakes.
         p.voices.push(voice("bo", "2026-10-25T10:04:00Z", false));
         assert_eq!(decide(&mut w, &p, true), Step::Wait);
+        assert_eq!(decide(&mut w, &p, false), Step::WakeReview);
+    }
+
+    #[test]
+    fn a_strangers_comment_shows_on_the_card_but_never_wakes() {
+        let mut w = start(&pr(), "runo/x").unwrap();
+        let mut p = pr();
+        p.voices = vec![Voice {
+            trusted: false,
+            ..voice("eve", "2026-10-25T10:00:00Z", false)
+        }];
+        assert_eq!(decide(&mut w, &p, false), Step::Stranger("eve".into()));
+        assert_eq!(w.comment_wakes, 0);
+        assert_eq!(
+            label(&w, false),
+            Some(("New comment from @eve".into(), false))
+        );
+        // Shown once.
+        assert_eq!(decide(&mut w, &p, false), Step::Wait);
+        // A collaborator's comment still wakes it.
+        p.voices.push(voice("ann", "2026-10-25T10:01:00Z", false));
         assert_eq!(decide(&mut w, &p, false), Step::WakeReview);
     }
 
