@@ -1191,8 +1191,9 @@ fn elapsed(d: Duration) -> String {
     }
 }
 
-/// "38k tokens · 19% context" for an agent turn.
-fn usage_label(usage: &store::Usage) -> String {
+/// "38k tokens · 19% context" for an agent turn, against a window of `known` when the
+/// turn didn't report its own.
+fn usage_label(usage: &store::Usage, known: u64) -> String {
     let k = |n: u64| {
         if n >= 1000 {
             format!("{:.0}k", n as f64 / 1000.0)
@@ -1200,11 +1201,7 @@ fn usage_label(usage: &store::Usage) -> String {
             n.to_string()
         }
     };
-    let window = if usage.window > 0 {
-        usage.window
-    } else {
-        200_000
-    };
+    let window = usage.window_or(known);
     let pct = (usage.context() as f64 / window as f64 * 100.0).round() as u64;
     format!("{} tokens · {pct}% context", k(usage.context()))
 }
@@ -5747,7 +5744,10 @@ impl RunoApp {
                                 el.child("·").child(message.meta.clone())
                             })
                             .when(!message.usage.is_empty(), |el| {
-                                el.child("·").child(usage_label(&message.usage))
+                                let known = self
+                                    .current()
+                                    .map_or(0, |s| store::known_window(&s.messages));
+                                el.child("·").child(usage_label(&message.usage, known))
                             })
                             .when(!live, |el| {
                                 let sid = self.selected.unwrap_or(0);
@@ -6077,7 +6077,11 @@ impl RunoApp {
                                     .iter()
                                     .rev()
                                     .find(|m| !m.usage.is_empty())
-                                    .map(|m| m.usage)
+                                    .map(|m| {
+                                        let mut u = m.usage;
+                                        u.window = u.window_or(store::known_window(&s.messages));
+                                        u
+                                    })
                                     .map(|u| {
                                         let cost: f64 =
                                             s.messages.iter().map(|m| m.usage.cost_cents).sum();
@@ -6090,11 +6094,7 @@ impl RunoApp {
                                     })
                             }),
                         |el, (usage, cost, reports, about)| {
-                            let window = if usage.window > 0 {
-                                usage.window
-                            } else {
-                                200_000
-                            };
+                            let window = usage.window;
                             let pct = (usage.context() as f32 / window as f32).min(1.0);
                             el.child(
                                 div()
