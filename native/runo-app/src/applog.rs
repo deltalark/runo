@@ -846,6 +846,79 @@ mod tests {
     }
 
     #[test]
+    fn each_platform_gets_its_own_file_from_a_real_release() {
+        // The files v0.5.9 shipped, plus the checksum list releases are getting.
+        let names = [
+            "Runo-0.5.9-linux-arm64.deb",
+            "Runo-0.5.9-linux-arm64.tar.gz",
+            "Runo-0.5.9-linux-x86_64.deb",
+            "Runo-0.5.9-linux-x86_64.tar.gz",
+            "Runo-0.5.9-macos-arm64.dmg",
+            "Runo-0.5.9-macos-arm64.zip",
+            "Runo-0.5.9-macos-x86_64.dmg",
+            "Runo-0.5.9-macos-x86_64.zip",
+            "Runo-0.5.9-windows-x86_64.zip",
+            "SHA256SUMS",
+        ];
+        let assets: Vec<(String, String)> = names
+            .iter()
+            .map(|n| (n.to_string(), format!("https://x/{n}")))
+            .collect();
+        let pick = |os, arch| pick_asset(&assets, os, arch).map(|a| a.0);
+        assert_eq!(
+            pick("macos", "aarch64").as_deref(),
+            Some("Runo-0.5.9-macos-arm64.dmg")
+        );
+        assert_eq!(
+            pick("macos", "x86_64").as_deref(),
+            Some("Runo-0.5.9-macos-x86_64.dmg")
+        );
+        assert_eq!(
+            pick("linux", "x86_64").as_deref(),
+            Some("Runo-0.5.9-linux-x86_64.deb")
+        );
+        assert_eq!(
+            pick("linux", "aarch64").as_deref(),
+            Some("Runo-0.5.9-linux-arm64.deb")
+        );
+        assert_eq!(
+            pick("windows", "x86_64").as_deref(),
+            Some("Runo-0.5.9-windows-x86_64.zip")
+        );
+        // No Windows build for ARM: nothing rather than the x86_64 one.
+        assert_eq!(pick("windows", "aarch64"), None);
+    }
+
+    #[test]
+    fn only_a_newer_final_release_is_offered() {
+        let reply = |tag: &str, extra: &str| {
+            format!(
+                r#"{{"tag_name":"{tag}","html_url":"https://x/{tag}","draft":false,
+                "prerelease":false,{extra}"assets":[]}}"#
+            )
+        };
+        let found =
+            |tag: &str, current: &str| newer_release(&reply(tag, ""), current).map(|r| r.version);
+        // Numbers compare as numbers, not text.
+        assert_eq!(found("v0.10.0", "0.9.9").as_deref(), Some("0.10.0"));
+        assert_eq!(found("v0.5.10", "0.5.9").as_deref(), Some("0.5.10"));
+        assert_eq!(found("v1.0.0", "0.99.0").as_deref(), Some("1.0.0"));
+        // The same or an older one is never offered, which would be a downgrade.
+        assert_eq!(found("v0.5.9", "0.5.9"), None);
+        assert_eq!(found("v0.5.8", "0.5.9"), None);
+        assert_eq!(found("v0.4.12", "0.5.0"), None);
+        // A tag that isn't a version is ignored rather than offered.
+        assert_eq!(found("nightly", "0.5.9"), None);
+        // Drafts never count, even when newer.
+        let draft = reply("v9.0.0", "").replace(r#""draft":false"#, r#""draft":true"#);
+        assert!(newer_release(&draft, "0.5.9").is_none());
+        // With no file for this platform, the release page is still offered.
+        let release = newer_release(&reply("v9.0.0", ""), "0.5.9").unwrap();
+        assert_eq!(release.asset, None);
+        assert_eq!(release.page, "https://x/v9.0.0");
+    }
+
+    #[test]
     fn newer_releases_are_found_with_their_download() {
         let json = r#"{"tag_name":"v0.3.0","html_url":"https://github.com/deltalark/runo/releases/tag/v0.3.0",
             "draft":false,"prerelease":false,"assets":[
