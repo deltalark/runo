@@ -20,6 +20,10 @@ under 4 ms at p95, at the display's full rate. What users will still feel:
 - **Typing in Crew's chat stutters.** 12% of frames are slow, p95 35 ms, max 105–136 ms.
 - **Idle cost.** About 109 wakeups a second and 3–7% CPU while doing nothing, plus a stream
   of `lsof`, git and `gh` processes. Every timer keeps running when Runo is hidden.
+- **Post-turn checks rebuild each Rust worktree from scratch.** The proof check runs plain
+  `cargo test` with each worktree's own `target/` (`proof.rs:110`). During this audit, the
+  check for this thread's docs-only turn spent over 15 minutes compiling a fresh debug
+  build and filled 1.5 GB+ of disk (see [Found while measuring](#found-while-measuring)).
 
 ## How it was measured
 
@@ -43,6 +47,9 @@ under 4 ms at p95, at the display's full rate. What users will still feel:
   rebuilt; making the extra scenes a permanent part of the bench is the first quick win.
 - **Two bench runs.** Both had the window uncovered on screen. The second reproduced the
   Crew numbers and took a `sample` profile during that scene.
+  - **Caveat:** both on-screen runs overlapped a `cargo test` build that the installed Runo
+    had started in this worktree as a post-turn check. The frames are main-thread bound, so
+    comparisons between scenes hold, but absolute times may read a little high.
 - **Idle.** `top -stats cpu,idlew` (idle wakeups a second), `sample`, and a poll of the
   child processes Runo starts. These used a copy of `~/.runo` with build-output cleanup,
   automations, phone, sync and updates switched off.
@@ -243,7 +250,43 @@ days, L is a week or more.
 | | • `connections::all()` clones the whole list just to test `is_empty` | `connections_ui.rs:524` | | | S | | |
 | | • Opening a diff (`open_change` → `load_diff`) and a file (`open_file`) read synchronously on the UI thread: 8–10 ms for the bench files, more on slow disks | `main.rs:2343,7918`, `fileview.rs:179-215` | | | S | | |
 
+## Found while measuring
+
+This ranks with #1–#3 for anyone working on Rust projects.
+
+**Post-turn checks build every Rust worktree from scratch.** `proof.rs:110` adds a plain
+`cargo test` for any folder with a `Cargo.toml`. It runs in the session's worktree with
+no `CARGO_TARGET_DIR`, so each worktree compiles every dependency into its own `target/`.
+
+What happened during this audit:
+
+- The installed Runo (`/Applications/Runo.app`, pid 99061) started `cargo test` in this
+  thread's worktree after a turn that changed only Markdown.
+- It was still compiling after 15 minutes.
+- It had written 1.5 GB to `target/` by then, on a disk with under 5 GB free.
+- It ran alongside the user's other work, and alongside this audit's bench.
+
+With Crew starting several threads, every thread repeats the full build.
+
+| | |
+|---|---|
+| **Effort** | S–M |
+| **Risk** | Low–Med (a shared target serializes builds through Cargo's lock) |
+| **Expected gain** | Minutes of CPU and GBs of disk saved per thread |
+
+Fixes:
+
+- Point the checks at one target dir per project, for example `<repo>/target`. Either set
+  `CARGO_TARGET_DIR`, or reuse the repo's own dir when the worktree is under
+  `.runo-worktrees`.
+- Skip the checks when the turn changed no source files: here it changed only docs.
+- Optionally run the checks at a lower priority with `nice`, since the queue from #244
+  already runs them one at a time.
+
 ## Quick wins (S effort, low risk)
+
+0. Share one Cargo target dir per project for post-turn checks, and skip the checks for
+   turns that touched no source files (see [Found while measuring](#found-while-measuring)).
 
 1. Stop `notify_chat` from redrawing the Right pane unless the event is for the peeked
    thread (#3).
@@ -292,4 +335,4 @@ days, L is a week or more.
 | #250, virtualized chat and markdown cache | Works | Scrolling a 300-message chat: 75 fps on a 75 Hz display, p95 2.8 ms, about 3 rows drawn per frame. |
 | Cached panes | Work | Typing in the composer redrew the panes 4 times in 168 frames, p95 2.9 ms. Also typing with 600 sessions: p95 3.5 ms. |
 | Cached panes: exceptions | See findings | The Right pane is still redrawn by `notify_chat` (#3); hover refreshes skip the caches (#10). |
-| #244, low-priority post-turn checks | Not exercised | The bench's turns run in a temporary folder without git, so no checks ran. No problem was seen. |
+| #244, low-priority post-turn checks | Queue works; builds are costly | The bench's turns run in a temporary folder without git, so no checks ran there. The installed Runo's check for this thread compiled a fresh debug target, see [Found while measuring](#found-while-measuring). |
