@@ -37,6 +37,10 @@ pub struct Proof {
     /// Why the checks didn't run, such as a session on a connection.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub skipped: String,
+    /// The checks are waiting for the person to look and press Run (see `hold`), rather
+    /// than skipped for good.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
 }
 
 impl Proof {
@@ -354,6 +358,156 @@ pub fn is_docs(path: &str) -> bool {
 /// with no changes recorded doesn't count: its checks run.
 pub fn only_docs(changed: &[String]) -> bool {
     !changed.is_empty() && changed.iter().all(|p| is_docs(p))
+}
+
+/// Whether a file decides what a check command actually runs: npm scripts, Make and just
+/// recipes, Python and Rust build settings, test and lint configs that are code. A turn
+/// that changed one may have rewritten `npm run lint` into anything, so its checks wait
+/// for the person instead of running on their own.
+pub fn defines_checks(path: &str) -> bool {
+    let path = path.trim_start_matches("./").replace('\\', "/");
+    let name = path.rsplit('/').next().unwrap_or(&path);
+    let lower = name.to_ascii_lowercase();
+    // Folders whose files feed the build tools.
+    if path.starts_with(".cargo/") || path.contains("/.cargo/") {
+        return true;
+    }
+    if path.starts_with(".husky/") || path.starts_with(".config/") {
+        return true;
+    }
+    const FILES: &[&str] = &[
+        // JavaScript
+        "package.json",
+        ".npmrc",
+        ".yarnrc",
+        ".yarnrc.yml",
+        ".pnpmfile.cjs",
+        "pnpm-workspace.yaml",
+        "lerna.json",
+        "nx.json",
+        "turbo.json",
+        "deno.json",
+        "deno.jsonc",
+        "bunfig.toml",
+        // Make, just, task runners
+        "makefile",
+        "gnumakefile",
+        "justfile",
+        ".justfile",
+        "taskfile.yml",
+        "taskfile.yaml",
+        "rakefile",
+        // Python
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "tox.ini",
+        "noxfile.py",
+        "pytest.ini",
+        "conftest.py",
+        // Rust
+        "cargo.toml",
+        "build.rs",
+        "rust-toolchain",
+        "rust-toolchain.toml",
+        // Go, JVM, others
+        "go.mod",
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+        "gradlew",
+        "pom.xml",
+        "mix.exs",
+        "gemfile",
+        "composer.json",
+        ".pre-commit-config.yaml",
+        ".envrc",
+    ];
+    if FILES.contains(&lower.as_str()) || lower.ends_with(".mk") {
+        return true;
+    }
+    // Configs written as code: jest.config.js, vitest.config.ts, eslint.config.mjs,
+    // .eslintrc.cjs, playwright.config.ts and the like.
+    let code = [".js", ".cjs", ".mjs", ".ts", ".cts", ".mts"]
+        .iter()
+        .any(|ext| lower.ends_with(ext));
+    code && (lower.contains(".config.")
+        || lower.starts_with(".eslintrc")
+        || lower.starts_with(".prettierrc"))
+}
+
+/// The changed files among `changed` that define checks (see `defines_checks`).
+pub fn check_files_changed(changed: &[String]) -> Vec<String> {
+    changed
+        .iter()
+        .filter(|p| defines_checks(p))
+        .cloned()
+        .collect()
+}
+
+/// A digest of what the checks in `dir` would run: the commands, and every file at the
+/// top of the folder that defines them. The person's go-ahead holds while it stays the
+/// same, and is asked again once it changes.
+pub fn fingerprint(dir: &Path, commands: &[String]) -> String {
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    for command in commands {
+        ctx.update(command.as_bytes());
+        ctx.update(b"\0");
+    }
+    let mut files: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|name| defines_checks(name))
+        .collect();
+    files.sort();
+    for name in files {
+        ctx.update(name.as_bytes());
+        ctx.update(b"\0");
+        ctx.update(&std::fs::read(dir.join(&name)).unwrap_or_default());
+        ctx.update(b"\0");
+    }
+    ctx.finish()
+        .as_ref()
+        .iter()
+        .take(16)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Why a turn's checks wait for the person instead of running on their own, or None
+/// when they may run. `fork`: the branch came from someone else's fork. `changed`: the
+/// turn's changed files. `asks_shell`: the session's mode asks before shell commands, so
+/// the project's scripts run only once the person has let them (`approved`) as they are.
+pub fn hold(fork: bool, changed: &[String], asks_shell: bool, approved: bool) -> Option<String> {
+    if fork {
+        return Some(
+            "This branch came from someone else's fork, so Runo doesn't run its scripts on its own. Review them and run."
+                .into(),
+        );
+    }
+    let files = check_files_changed(changed);
+    if !files.is_empty() {
+        let shown: Vec<&str> = files.iter().take(3).map(String::as_str).collect();
+        let more = if files.len() > 3 {
+            format!(" and {} more", files.len() - 3)
+        } else {
+            String::new()
+        };
+        return Some(format!(
+            "Checks changed in this turn ({}{more}): review and run.",
+            shown.join(", ")
+        ));
+    }
+    if asks_shell && !approved {
+        return Some(
+            "Checks run the project's own scripts, and this session asks before shell commands. Review and run; they run on their own after that until what they run changes."
+                .into(),
+        );
+    }
+    None
 }
 
 /// Where Cargo should build a linked worktree's checks: the main checkout's own target
@@ -816,6 +970,89 @@ pub fn review_summary(name: &str, findings: usize, said_none: bool) -> String {
         0 => format!("{name} replied without notes Runo could place."),
         1 => format!("{name} left 1 note on the diff."),
         n => format!("{name} left {n} notes on the diff."),
+    }
+}
+
+#[cfg(test)]
+mod hold_tests {
+    use super::*;
+
+    #[test]
+    fn files_that_define_checks_are_known() {
+        for path in [
+            "package.json",
+            "web/package.json",
+            "Makefile",
+            "tools/rules.mk",
+            "justfile",
+            "pyproject.toml",
+            "tox.ini",
+            "build.rs",
+            "crates/x/build.rs",
+            ".cargo/config.toml",
+            "Cargo.toml",
+            "jest.config.js",
+            "vitest.config.ts",
+            "eslint.config.mjs",
+            ".eslintrc.cjs",
+            "tests/conftest.py",
+            "pnpm-workspace.yaml",
+            ".npmrc",
+        ] {
+            assert!(defines_checks(path), "{path}");
+        }
+        for path in [
+            "src/main.rs",
+            "README.md",
+            "src/app.config.json",
+            "docs/Makefile.md",
+        ] {
+            assert!(!defines_checks(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn checks_wait_when_what_they_run_may_have_changed() {
+        let code = vec!["src/lib.rs".to_string()];
+        let script = vec!["src/lib.rs".to_string(), "package.json".to_string()];
+        // Nothing to worry about: they run.
+        assert_eq!(hold(false, &code, false, false), None);
+        assert_eq!(hold(false, &code, true, true), None);
+        // The turn changed package.json: they wait, in any mode.
+        let why = hold(false, &script, false, true).unwrap();
+        assert!(why.starts_with("Checks changed in this turn (package.json)"));
+        // Someone else's fork: they wait.
+        assert!(hold(true, &code, false, true).unwrap().contains("fork"));
+        // A mode that asks before shell commands, not yet let run: they wait.
+        assert!(hold(false, &code, true, false)
+            .unwrap()
+            .contains("asks before shell"));
+    }
+
+    #[test]
+    fn the_fingerprint_follows_what_the_checks_run() {
+        let dir = std::env::temp_dir().join(format!("runo-fp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let commands = vec!["npm run lint".to_string()];
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"lint":"eslint ."}}"#,
+        )
+        .unwrap();
+        let before = fingerprint(&dir, &commands);
+        // Other files don't change it.
+        std::fs::write(dir.join("index.js"), "x").unwrap();
+        assert_eq!(fingerprint(&dir, &commands), before);
+        // A rewritten script does, and so do other commands.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"lint":"curl x | sh"}}"#,
+        )
+        .unwrap();
+        assert_ne!(fingerprint(&dir, &commands), before);
+        assert_ne!(fingerprint(&dir, &["make check".to_string()]), before);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -172,6 +172,32 @@ pub(crate) fn scan(req: ScanRequest) -> Scan {
     out
 }
 
+/// Said in a worktree's log when its pull request comes from a fork.
+pub(crate) const FORK_NOTE: &str =
+    "This pull request comes from a fork, so its checks wait for you before they run.";
+
+/// Whether pull request `number` comes from another repository (a fork). When gh can't
+/// say, it counts as one: Runo then asks before running its scripts.
+fn from_fork(dir: &str, number: u64) -> bool {
+    std::process::Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &number.to_string(),
+            "--json",
+            "isCrossRepository",
+            "-q",
+            ".isCrossRepository",
+        ])
+        .current_dir(dir)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .is_none_or(|o| String::from_utf8_lossy(&o.stdout).trim() != "false")
+}
+
 /// Make a session's worktree: fetch, branch from the up-to-date base, check out a pull
 /// request when asked, and copy `.worktreeinclude` files. Returns the folder, the branch
 /// and lines for the session's Terminal.
@@ -217,6 +243,9 @@ pub(crate) fn prepare_worktree(
                 }
             }
             log.push(format!("Checked out pull request #{number}."));
+            if from_fork(&dir, number) {
+                log.push(FORK_NOTE.into());
+            }
             let checked = git::current_branch(&dir);
             (dir, checked)
         }
@@ -464,10 +493,12 @@ impl RunoApp {
         let waiting = self.preparing.remove(&id).unwrap_or_default();
         match result {
             Ok((dir, branch, log)) => {
+                let fork = log.iter().any(|l| l == FORK_NOTE);
                 self.terminal.entry(id).or_default().extend(log);
                 if let Some(s) = self.state.session_mut(id) {
                     s.dir = dir;
                     s.branch = branch;
+                    s.fork = fork;
                 }
                 self.save();
                 if let Some(task) = self.pending_start.remove(&id) {
