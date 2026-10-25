@@ -7,9 +7,14 @@
 //! loops move on those frames too. While the window isn't the
 //! active one, with Animations off, or with Reduce motion on in macOS, loops hold still
 //! and the window redraws only twice a second, for elapsed times.
+//!
+//! Only the part of the window a loop is in draws again: each pane (see `panes`) notes
+//! itself while it renders, and the next frame notifies the panes that asked, or for loops
+//! outside any pane the window's ticker, which redraws the window's frame and leaves the
+//! panes as they were.
 
 use super::*;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::time::Instant;
 
 /// The shortest gap between two frames of motion: a little under a 30 Hz refresh, so a
@@ -34,19 +39,38 @@ thread_local! {
     /// Whether loops may move this frame.
     static MOVING: Cell<bool> = const { Cell::new(false) };
     static WANT: Cell<Want> = const { Cell::new(Want::Nothing) };
-    /// A next frame is already asked for.
-    static PENDING: Cell<bool> = const { Cell::new(false) };
+    /// A smooth frame, or a tick for running times, is already asked for.
+    static PENDING_SMOOTH: Cell<bool> = const { Cell::new(false) };
+    static PENDING_SECONDS: Cell<bool> = const { Cell::new(false) };
     static LAST: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// The pane rendering now; `None` outside the panes, in the window's own frame.
+    static VIEW: Cell<Option<EntityId>> = const { Cell::new(None) };
+    /// What draws the window's frame again without the panes: its ticker.
+    static ROOT: Cell<Option<EntityId>> = const { Cell::new(None) };
+    /// The views that asked for motion this frame, and those the next frame notifies.
+    static ASKED: RefCell<Vec<EntityId>> = const { RefCell::new(Vec::new()) };
+    static NEXT: RefCell<Vec<EntityId>> = const { RefCell::new(Vec::new()) };
 }
 
-/// The main window starts drawing a frame. `active`: it is the active window.
-pub(crate) fn begin(active: bool, cx: &App) {
+/// The main window starts drawing a frame. `active`: it is the active window. `root`
+/// redraws the window's frame on its own (see the module docs).
+pub(crate) fn begin(active: bool, root: EntityId, cx: &App) {
     let now = Instant::now();
     NOW.set(Some(now));
     LAST.set(Some(now));
     DRAWING.set(true);
     MOVING.set(active && anim_on() && !calm(cx));
     WANT.set(Want::Nothing);
+    ROOT.set(Some(root));
+    VIEW.set(None);
+}
+
+/// Run `f`, which renders pane `view`: motion asked for meanwhile redraws that pane.
+pub(crate) fn within<R>(view: EntityId, f: impl FnOnce() -> R) -> R {
+    let outer = VIEW.replace(Some(view));
+    let out = f();
+    VIEW.set(outer);
+    out
 }
 
 /// Whether motion should be calmed: the system asks for less (Accessibility > Display >
@@ -95,6 +119,21 @@ fn want(w: Want) {
     if w > WANT.get() {
         WANT.set(w);
     }
+    if let Some(view) = VIEW.get().or(ROOT.get()) {
+        ASKED.with(|a| {
+            let mut a = a.borrow_mut();
+            if !a.contains(&view) {
+                a.push(view);
+            }
+        });
+    }
+}
+
+/// Notify every view the next frame is for.
+fn notify_next(cx: &mut App) {
+    for view in NEXT.with(|n| std::mem::take(&mut *n.borrow_mut())) {
+        cx.notify(view);
+    }
 }
 
 /// Seconds since the clock started, at the frame being drawn.
@@ -116,19 +155,28 @@ pub(crate) fn phase(period: Duration) -> f32 {
 pub(crate) fn end(window: &mut Window, cx: &mut App) {
     DRAWING.set(false);
     let want = WANT.replace(Want::Nothing);
-    if want == Want::Nothing || PENDING.get() {
+    let asked = ASKED.with(|a| std::mem::take(&mut *a.borrow_mut()));
+    if want == Want::Nothing {
         return;
     }
-    PENDING.set(true);
-    let view = window.current_view();
+    NEXT.with(|n| {
+        let mut n = n.borrow_mut();
+        for view in asked {
+            if !n.contains(&view) {
+                n.push(view);
+            }
+        }
+    });
     if want == Want::Smooth {
-        window.on_next_frame(move |window, cx| next_frame(view, window, cx));
-    } else {
+        if !PENDING_SMOOTH.replace(true) {
+            window.on_next_frame(next_frame);
+        }
+    } else if !PENDING_SECONDS.replace(true) {
         window
             .spawn(cx, async move |cx| {
                 cx.background_executor().timer(SECONDS_GAP).await;
-                PENDING.set(false);
-                cx.update(move |_, cx| cx.notify(view)).ok();
+                PENDING_SECONDS.set(false);
+                cx.update(|_, cx| notify_next(cx)).ok();
             })
             .detach();
     }
@@ -136,13 +184,13 @@ pub(crate) fn end(window: &mut Window, cx: &mut App) {
 
 /// A display refresh: draws if the last frame is far enough back, else waits for the
 /// next refresh.
-fn next_frame(view: EntityId, window: &mut Window, cx: &mut App) {
+fn next_frame(window: &mut Window, cx: &mut App) {
     if LAST.get().is_some_and(|at| at.elapsed() < MIN_GAP) {
-        window.on_next_frame(move |window, cx| next_frame(view, window, cx));
+        window.on_next_frame(next_frame);
         return;
     }
-    PENDING.set(false);
-    cx.notify(view);
+    PENDING_SMOOTH.set(false);
+    notify_next(cx);
 }
 
 #[cfg(test)]

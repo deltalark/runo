@@ -3717,7 +3717,13 @@ impl RunoApp {
                     .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, window, _| {
                         this.chat_wheel(e, window)
                     }))
-                    .child(self.chat_list(session, working, true, cx)),
+                    .child({
+                        self.chat_shown[1].set(Some(session.id));
+                        self.part(
+                            panes::Part::CanvasChat,
+                            StyleRefinement::default().size_full(),
+                        )
+                    }),
             )
             .children(self.new_messages_pill(session, cx));
         let (top, right, bottom) = inset;

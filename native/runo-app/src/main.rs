@@ -73,6 +73,7 @@ mod modelcheck;
 mod models;
 mod motion;
 mod notes;
+mod panes;
 mod parts;
 mod pattern;
 mod pbfile;
@@ -440,6 +441,10 @@ struct RunoApp {
     tx: Sender<Event>,
     /// The chat as a list that lays out only the rows in view; see `chat_list`.
     chat_list: ListState,
+    /// The window's parts as cached views; see `panes`.
+    panes: Option<panes::Panes>,
+    /// The session the chat pane shows, and the one floating over a canvas.
+    chat_shown: [std::cell::Cell<Option<u64>>; 2],
     chat_rows: std::cell::RefCell<chat_list::ChatRows>,
     /// Parsed Markdown of the messages of recently shown chats.
     md_cache: std::cell::RefCell<chat_list::MarkdownCache>,
@@ -1463,10 +1468,11 @@ impl RunoApp {
                         *secondary
                     }
                 }
-                // Repaint so the send button reflects whether there is anything to send.
+                // The composer and its send button are in the window's own frame, which
+                // the keystroke draws again anyway; notifying the app would draw every
+                // pane too (see `panes`).
                 InputEvent::Change => {
                     this.update_mention(cx);
-                    cx.notify();
                     false
                 }
                 _ => false,
@@ -1652,6 +1658,8 @@ impl RunoApp {
             handles: HashMap::new(),
             tx,
             chat_list: chat_list::new_list_state(),
+            panes: None,
+            chat_shown: Default::default(),
             chat_rows: Default::default(),
             md_cache: Default::default(),
             chat_follow: Default::default(),
@@ -5830,7 +5838,8 @@ impl RunoApp {
         let provider = agent::provider(&session.provider);
         let working = self.handles.contains_key(&Target::Session(session.id));
         let id = session.id;
-        let list = self.chat_list(session, working, false, cx);
+        self.chat_shown[0].set(Some(id));
+        let list = self.part(panes::Part::Chat, StyleRefinement::default().size_full());
         let header = self.session_header(session, working, cx);
         // Chat and CLI are two views of one conversation; the swap crossfades.
         let cli = session.cli;
@@ -5879,6 +5888,175 @@ impl RunoApp {
             .h_full()
             .flex()
             .child(main)
+            .into_any_element()
+    }
+
+    /// The status bar along the window's foot: what just happened, the agents running,
+    /// usage and cost, the branch, and where agents run.
+    fn status_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.log_notice();
+        let (status, status_color, status_icon) = if let Some(notice) = &self.notice {
+            (notice.clone(), c_red(), Some(IconName::CircleAlert))
+        } else if let Some((info, _)) = &self.info {
+            (info.clone(), c_blue(), Some(IconName::Check))
+        } else {
+            (String::new(), c_muted(), None)
+        };
+        let running = self.turns.len();
+        let (where_name, where_color, _) = self.runs_on();
+        let summary = match self.state.sessions.len() {
+            0 => String::new(),
+            n => format!("{n} session{}", if n == 1 { "" } else { "s" }),
+        };
+        div()
+            .id("status")
+            .h(px(24.))
+            .flex_none()
+            .px_3()
+            .flex()
+            .items_center()
+            .justify_between()
+            .bg(settings::frame())
+            .relative()
+            .children(pattern::chrome())
+            .text_size(px(11.5))
+            .gap_4()
+            .child(fade(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap_2()
+                    .text_color(rgb(status_color))
+                    .when_some(status_icon, |el, i| el.child(icon(i, 12., status_color)))
+                    .child(div().truncate().child(status.clone()))
+                    .when(self.notice.is_some(), |el| {
+                        el.child(
+                            div()
+                                .id("dismiss-notice")
+                                .px_1()
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .hover(|el| el.bg(tint(c_subtle())))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.notice = None;
+                                    cx.notify();
+                                }))
+                                .child(icon(IconName::X, 11., c_muted())),
+                        )
+                    }),
+                SharedString::from(format!("status-{status}")),
+                300,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_3()
+                    .text_color(rgb(c_muted()))
+                    .children(self.usage_status(cx))
+                    .when(running > 0, |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(5.))
+                                .text_color(rgb(c_secondary()))
+                                .child(self.status_dot(Status::Working, "sb-run", 6.))
+                                .child(format!("{running} running")),
+                        )
+                    })
+                    .when_some(
+                        self.current()
+                            .filter(|_| self.view == View::Session)
+                            .map(|s| s.branch.clone())
+                            .filter(|b| !b.is_empty()),
+                        |el, branch| {
+                            el.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(icon(IconName::GitBranch, 11., c_muted()))
+                                    .child(branch),
+                            )
+                        },
+                    )
+                    .when_some(
+                        self.current()
+                            .filter(|_| self.view == View::Session)
+                            .and_then(|s| {
+                                s.messages
+                                    .iter()
+                                    .rev()
+                                    .find(|m| !m.usage.is_empty())
+                                    .map(|m| m.usage)
+                                    .map(|u| {
+                                        let cost: f64 =
+                                            s.messages.iter().map(|m| m.usage.cost_cents).sum();
+                                        let reports = agent::reports_cost(&s.provider);
+                                        let about = agent::cost_limit_note(&s.provider)
+                                            .unwrap_or_else(|| {
+                                                format!("session cost ${:.2}", cost / 100.0)
+                                            });
+                                        (u, cost, reports, about)
+                                    })
+                            }),
+                        |el, (usage, cost, reports, about)| {
+                            let window = if usage.window > 0 {
+                                usage.window
+                            } else {
+                                200_000
+                            };
+                            let pct = (usage.context() as f32 / window as f32).min(1.0);
+                            el.child(
+                                div()
+                                    .id("ctx-meter")
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .tooltip(move |window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(format!(
+                                            "Context used by the latest turn · {about}"
+                                        ))
+                                        .build(window, cx)
+                                    })
+                                    .child(
+                                        div()
+                                            .w(px(48.))
+                                            .h(px(4.))
+                                            .rounded_full()
+                                            .bg(tint(c_active()))
+                                            .child(
+                                                div().h_full().rounded_full().w(px(48. * pct)).bg(
+                                                    rgb(if pct > 0.8 {
+                                                        c_amber()
+                                                    } else {
+                                                        c_secondary()
+                                                    }),
+                                                ),
+                                            ),
+                                    )
+                                    .child(format!("{:.0}%", pct * 100.))
+                                    .when(cost > 0.0, |el| {
+                                        el.child(format!("· ${:.2}", cost / 100.0))
+                                    })
+                                    .when(!reports, |el| el.child("· no cost reported")),
+                            )
+                        },
+                    )
+                    .when(!summary.is_empty(), |el| el.child(summary))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .child(div().size(px(6.)).rounded_full().bg(rgb(where_color)))
+                            .child(where_name),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -8909,7 +9087,8 @@ impl RunoApp {
 impl Render for RunoApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         framestats::begin();
-        motion::begin(self.window_active, cx);
+        let ticker = self.panes(cx).ticker.clone();
+        motion::begin(self.window_active, ticker.entity_id(), cx);
         static FIRST: std::sync::Once = std::sync::Once::new();
         FIRST.call_once(|| {
             startup::mark("first render");
@@ -9183,7 +9362,7 @@ impl Render for RunoApp {
             show_left,
             self.sidebar_width,
             true,
-            || self.sidebar(cx).into_any_element(),
+            || self.part(panes::Part::Sidebar, StyleRefinement::default().size_full()),
         )
         .map(|el| page_fade(el, "sidebar-page"));
         let right = panel_slide(
@@ -9192,7 +9371,7 @@ impl Render for RunoApp {
             show_right,
             self.panel_width,
             false,
-            || self.right_pane(window, cx).into_any_element(),
+            || self.part(panes::Part::Right, StyleRefinement::default().size_full()),
         )
         .map(|el| page_fade(el, "right-page"));
         if self
@@ -9209,20 +9388,6 @@ impl Render for RunoApp {
         {
             self.git_toast = None;
         }
-        self.log_notice();
-        let (status, status_color, status_icon) = if let Some(notice) = &self.notice {
-            (notice.clone(), c_red(), Some(IconName::CircleAlert))
-        } else if let Some((info, _)) = &self.info {
-            (info.clone(), c_blue(), Some(IconName::Check))
-        } else {
-            (String::new(), c_muted(), None)
-        };
-        let running = self.turns.len();
-        let (where_name, where_color, _) = self.runs_on();
-        let summary = match self.state.sessions.len() {
-            0 => String::new(),
-            n => format!("{n} session{}", if n == 1 { "" } else { "s" }),
-        };
         let palette = self
             .palette
             .clone()
@@ -9581,13 +9746,25 @@ impl Render for RunoApp {
             .font_family(cx.theme().font_family.clone())
             .children(pattern::backdrop())
             .children(pattern::under())
-            .child(self.top_bar(cx))
+            .child(ticker)
+            .child(self.part(
+                panes::Part::TopBar,
+                StyleRefinement::default().w_full().h(px(44.)).flex_none(),
+            ))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(self.mode_rail(cx))
+                    .child(
+                        self.part(
+                            panes::Part::Rail,
+                            StyleRefinement::default()
+                                .w(px(shell::RAIL_WIDTH))
+                                .h_full()
+                                .flex_none(),
+                        ),
+                    )
                     .child(
                         // Everything beside the rail sits on the frame as islands, with a
                         // gutter of the frame's grey along the right and bottom.
@@ -9608,162 +9785,10 @@ impl Render for RunoApp {
                             .child(shell::gutter().h(px(shell::GUTTER)).w_full()),
                     ),
             )
-            .child(
-                div()
-                    .id("status")
-                    .h(px(24.))
-                    .flex_none()
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .bg(settings::frame())
-                    .relative()
-                    .children(pattern::chrome())
-                    .text_size(px(11.5))
-                    .gap_4()
-                    .child(fade(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .min_w_0()
-                            .items_center()
-                            .gap_2()
-                            .text_color(rgb(status_color))
-                            .when_some(status_icon, |el, i| el.child(icon(i, 12., status_color)))
-                            .child(div().truncate().child(status.clone()))
-                            .when(self.notice.is_some(), |el| {
-                                el.child(
-                                    div()
-                                        .id("dismiss-notice")
-                                        .px_1()
-                                        .rounded_sm()
-                                        .cursor_pointer()
-                                        .hover(|el| el.bg(tint(c_subtle())))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.notice = None;
-                                            cx.notify();
-                                        }))
-                                        .child(icon(IconName::X, 11., c_muted())),
-                                )
-                            }),
-                        SharedString::from(format!("status-{status}")),
-                        300,
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap_3()
-                            .text_color(rgb(c_muted()))
-                            .children(self.usage_status(cx))
-                            .when(running > 0, |el| {
-                                el.child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(5.))
-                                        .text_color(rgb(c_secondary()))
-                                        .child(self.status_dot(Status::Working, "sb-run", 6.))
-                                        .child(format!("{running} running")),
-                                )
-                            })
-                            .when_some(
-                                self.current()
-                                    .filter(|_| self.view == View::Session)
-                                    .map(|s| s.branch.clone())
-                                    .filter(|b| !b.is_empty()),
-                                |el, branch| {
-                                    el.child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .child(icon(IconName::GitBranch, 11., c_muted()))
-                                            .child(branch),
-                                    )
-                                },
-                            )
-                            .when_some(
-                                self.current()
-                                    .filter(|_| self.view == View::Session)
-                                    .and_then(|s| {
-                                        s.messages
-                                            .iter()
-                                            .rev()
-                                            .find(|m| !m.usage.is_empty())
-                                            .map(|m| m.usage)
-                                            .map(|u| {
-                                                let cost: f64 = s
-                                                    .messages
-                                                    .iter()
-                                                    .map(|m| m.usage.cost_cents)
-                                                    .sum();
-                                                let reports = agent::reports_cost(&s.provider);
-                                                let about = agent::cost_limit_note(&s.provider)
-                                                    .unwrap_or_else(|| {
-                                                        format!("session cost ${:.2}", cost / 100.0)
-                                                    });
-                                                (u, cost, reports, about)
-                                            })
-                                    }),
-                                |el, (usage, cost, reports, about)| {
-                                    let window = if usage.window > 0 {
-                                        usage.window
-                                    } else {
-                                        200_000
-                                    };
-                                    let pct = (usage.context() as f32 / window as f32).min(1.0);
-                                    el.child(
-                                        div()
-                                            .id("ctx-meter")
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(6.))
-                                            .tooltip(move |window, cx| {
-                                                gpui_kit::component::tooltip::Tooltip::new(format!(
-                                                    "Context used by the latest turn · {about}"
-                                                ))
-                                                .build(window, cx)
-                                            })
-                                            .child(
-                                                div()
-                                                    .w(px(48.))
-                                                    .h(px(4.))
-                                                    .rounded_full()
-                                                    .bg(tint(c_active()))
-                                                    .child(
-                                                        div()
-                                                            .h_full()
-                                                            .rounded_full()
-                                                            .w(px(48. * pct))
-                                                            .bg(rgb(if pct > 0.8 {
-                                                                c_amber()
-                                                            } else {
-                                                                c_secondary()
-                                                            })),
-                                                    ),
-                                            )
-                                            .child(format!("{:.0}%", pct * 100.))
-                                            .when(cost > 0.0, |el| {
-                                                el.child(format!("· ${:.2}", cost / 100.0))
-                                            })
-                                            .when(!reports, |el| el.child("· no cost reported")),
-                                    )
-                                },
-                            )
-                            .when(!summary.is_empty(), |el| el.child(summary))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(5.))
-                                    .child(div().size(px(6.)).rounded_full().bg(rgb(where_color)))
-                                    .child(where_name),
-                            ),
-                    ),
-            )
+            .child(self.part(
+                panes::Part::Status,
+                StyleRefinement::default().w_full().h(px(24.)).flex_none(),
+            ))
             .when(self.view == View::NewSession, |el| {
                 el.child(self.new_session_modal(f32::from(window.viewport_size().height) - 96., cx))
             })
