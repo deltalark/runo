@@ -350,9 +350,8 @@ struct RunoApp {
     sidebar_done_open: HashSet<u64>,
     /// Of those, projects listing every finished thread, not only the latest few.
     sidebar_done_all: HashSet<u64>,
-    /// The Browser is open as a tab beside the session tabs, and whether it is the one shown.
-    browser_open: bool,
-    browser_main: bool,
+    /// The Browser tab: whether it is open and shown, its address field, and its engine.
+    browser: browser::BrowserTab,
     /// Interactive shells, across all sessions.
     shells: Vec<pty::Shell>,
     /// The shell tab shown in the terminal panel, when one is selected.
@@ -476,20 +475,12 @@ struct RunoApp {
     prompt: Entity<TextareaState>,
     new_task: Entity<TextareaState>,
     branch: Entity<InputState>,
-    address: Entity<InputState>,
-    browser_recent: Vec<String>,
-    browser_ports: Vec<u16>,
-    browser_scanning: bool,
     /// Dev-server ports found where each session on a connection runs, or why not.
     remote_ports: HashMap<u64, Result<Vec<u16>, String>>,
     remote_scanning: std::collections::HashSet<u64>,
     /// Ports on connections forwarded to this machine: (session, port there).
     forwards: HashMap<(u64, u16), connections::Forward>,
     forwarding: Option<(u64, u16)>,
-    /// The headless Chromium behind the Browser tab, started on first use.
-    browser: Option<std::sync::Arc<browser_engine::Engine>>,
-    browser_view: browser::BrowserView,
-    browser_focus: FocusHandle,
     new_provider: usize,
     new_project: Option<u64>,
     new_isolated: bool,
@@ -1577,8 +1568,7 @@ impl RunoApp {
             threads_done_all: false,
             sidebar_done_open: HashSet::new(),
             sidebar_done_all: HashSet::new(),
-            browser_open: false,
-            browser_main: false,
+            browser: browser::BrowserTab::new(address, cx.focus_handle()),
             shells: Vec::new(),
             shell_tab: None,
             next_shell: 0,
@@ -1669,17 +1659,10 @@ impl RunoApp {
             branch: cx.new(|cx| {
                 InputState::new(window, cx).placeholder("Branch (optional, named after the task)")
             }),
-            address,
-            browser_recent: Vec::new(),
-            browser_ports: Vec::new(),
-            browser_scanning: false,
             remote_ports: HashMap::new(),
             remote_scanning: Default::default(),
             forwards: HashMap::new(),
             forwarding: None,
-            browser: None,
-            browser_view: browser::BrowserView::default(),
-            browser_focus: cx.focus_handle(),
             new_provider: agent::PROVIDERS
                 .iter()
                 .position(|p| p.id == cx.global::<AppSettings>().default_provider)
@@ -2035,7 +2018,7 @@ impl RunoApp {
         .detach();
         // Chromium would exit when its pipe closes, but stop it right away.
         cx.on_app_quit(|this, _| {
-            this.browser = None;
+            this.browser.engine = None;
             this.before_quit();
             // Events still on their way to the turn logs.
             harness::log::drain();
@@ -2409,7 +2392,7 @@ impl RunoApp {
             self.stash_open_file(old);
         }
         self.selected = Some(id);
-        self.browser_main = false;
+        self.browser.main = false;
         if !self.tabs.contains(&id) {
             self.tabs.push(id);
         }
@@ -9027,10 +9010,10 @@ impl Render for RunoApp {
         self.home_focus(window, cx);
         self.restore_open_file(window, cx);
         if !st.browser_enabled {
-            self.browser_open = false;
-            self.browser_main = false;
+            self.browser.open = false;
+            self.browser.main = false;
         }
-        if self.browser_main {
+        if self.browser.main {
             self.sync_browser_address(window, cx);
         }
         // Design and Architecture follow the project in the top bar.
@@ -9181,7 +9164,7 @@ impl Render for RunoApp {
             View::Architecture => self.architecture_view(cx),
             View::Data => self.data_view(cx),
             // The Browser tab takes the work area while it is the tab shown.
-            View::Session if self.browser_main && self.current().is_some() => div()
+            View::Session if self.browser.main && self.current().is_some() => div()
                 .flex_1()
                 .min_w_0()
                 .h_full()

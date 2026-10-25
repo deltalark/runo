@@ -2702,7 +2702,7 @@ impl RunoApp {
             };
             let provider = agent::provider(&session.provider);
             let active =
-                self.selected == Some(id) && self.view == View::Session && !self.browser_main;
+                self.selected == Some(id) && self.view == View::Session && !self.browser.main;
             let working = self.handles.contains_key(&Target::Session(id));
             let dot = match self.need(session) {
                 _ if working => Some(c_blue()),
@@ -2779,8 +2779,8 @@ impl RunoApp {
                     ),
             ));
         }
-        if self.browser_open {
-            let active = self.browser_main && self.view == View::Session;
+        if self.browser.open {
+            let active = self.browser.main && self.view == View::Session;
             tabs = tabs.child(tab_slot(
                 active,
                 div()
@@ -2813,8 +2813,8 @@ impl RunoApp {
                             .hover(|el| el.bg(divider()))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.stop_propagation();
-                                this.browser_open = false;
-                                this.browser_main = false;
+                                this.browser.open = false;
+                                this.browser.main = false;
                                 cx.notify();
                             }))
                             .child(icon(IconName::X, 11., c_muted())),
