@@ -1313,18 +1313,25 @@ impl RunoApp {
                 continue;
             }
             let alive = this.update(cx, |this, cx| {
-                let shown = events.iter().any(|e| this.event_shown(e));
+                // Agents' output only changes their conversation, the sidebar and the
+                // status bar. Output streaming into the open chat draws that conversation
+                // at once; the rest of the window, and anything from sessions not on
+                // screen, is drawn a few times a second rather than with every batch, so
+                // busy agents don't redraw the whole window 20 times a second. Anything
+                // else, such as a turn ending, draws the window at once.
+                let at_once = events
+                    .iter()
+                    .any(|e| this.event_shown(e) && !this.event_streamed(e));
+                let streamed = events.iter().any(|e| this.event_streamed(e));
                 for event in events {
                     this.handle_event(event, cx);
                 }
-                // Output from sessions not on screen only changes the sidebar and the
-                // status bar, so it is drawn a few times a second rather than with every
-                // batch: a busy agent in the background doesn't redraw the whole window
-                // 20 times a second.
                 let waited = unshown_since.get_or_insert(ticks);
-                if shown || ticks.wrapping_sub(*waited) >= BACKGROUND_TICKS {
+                if at_once || ticks.wrapping_sub(*waited) >= BACKGROUND_TICKS {
                     unshown_since = None;
                     cx.notify();
+                } else if streamed {
+                    this.notify_chat(cx);
                 }
             });
             if alive.is_err() {
@@ -2405,6 +2412,17 @@ impl RunoApp {
                 self.selected == Some(*id) || self.peek == Some(*id)
             }
             _ => true,
+        }
+    }
+
+    /// Whether `event` is output streaming into the open chat, or the thread open beside
+    /// Crew's chat, which only changes that conversation.
+    fn event_streamed(&self, event: &Event) -> bool {
+        match event {
+            Event::Line(Target::Session(id), _) | Event::Json(Target::Session(id), ..) => {
+                self.selected == Some(*id) || self.peek == Some(*id)
+            }
+            _ => false,
         }
     }
 
