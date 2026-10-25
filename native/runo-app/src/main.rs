@@ -114,6 +114,7 @@ mod stream;
 mod terminal;
 mod themes;
 mod thread_refs;
+mod thumb;
 mod timemachine;
 mod tour;
 mod turnend;
@@ -5206,7 +5207,7 @@ impl RunoApp {
                 div()
                     .truncate()
                     .text_color(rgb(c_secondary()))
-                    .child(text.to_string()),
+                    .child(thumb::short_paths(text).into_owned()),
             )
     }
 
@@ -5390,18 +5391,29 @@ impl RunoApp {
             let can_undo = !message.checkpoint.is_empty() && !working;
             let mut images = div().flex().flex_wrap().justify_end().gap_2();
             for (k, path) in message.images.iter().enumerate() {
+                // Sized from the picture's header so the row is the right height before
+                // the picture loads; kept inside that box whatever the picture's size.
+                let dims = thumb::dimensions(path);
+                let (w, h) = thumb::fit(dims, 220., 160.);
                 images = images.child(
                     self.viewable(
                         SharedString::from(format!("msg-img-{sid}-{index}-{k}")),
                         sid,
                         lightbox::Pick::Message(index, k),
                         img(std::path::PathBuf::from(path))
-                            .max_w(px(220.))
-                            .max_h(px(160.))
-                            .rounded_lg()
-                            .object_fit(ObjectFit::Contain),
+                            .w(px(w))
+                            .h(px(h))
+                            .object_fit(if dims.is_some() {
+                                ObjectFit::Cover
+                            } else {
+                                ObjectFit::Contain
+                            }),
                         cx,
-                    ),
+                    )
+                    .w(px(w))
+                    .h(px(h))
+                    .rounded_lg()
+                    .overflow_hidden(),
                 );
             }
             let group = SharedString::from(format!("user-msg-{sid}-{index}"));

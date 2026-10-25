@@ -2060,7 +2060,8 @@ impl RunoApp {
                                     .rounded_sm()
                                     .object_fit(ObjectFit::Cover),
                                 cx,
-                            ),
+                            )
+                            .size(px(40.)),
                         )
                         .child(
                             div()
