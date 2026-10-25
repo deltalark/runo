@@ -1118,7 +1118,7 @@ pub fn thread_rules(tools: bool) -> String {
         "Write these fenced blocks in your reply; Runo takes them out of the text. ```runo-checklist with a first line such as \"title: Settings spacing pass\" naming the task in 2 to 5 words, then one step per line (- [x] done, - [~] doing, - [ ] to do), written again at the end so every step shows how it ended, ```runo-report opening with a short sentence on the outcome, then a few sentences and any links on lines of their own, and ```runo-decision with JSON {\"question\":…, \"options\":[{\"label\":…, \"consequence\":…}], \"recommended\":0} when a choice changes what the person gets or can't be undone."
     };
     format!(
-        "## You are a Crew thread\nCrew, which runs this project for the person, started you for the task below. Work on it until it's done. {how}\n\nOther threads may be running side by side, and all of them share the person's plan usage. Do the work in this thread. Use subagents only for independent lookups or reviews that would otherwise fill your context, at most two at a time, and never one per item of a list. Run the full test suite once at the end rather than after every change.\n\n## Your task\n"
+        "## You are a Crew thread\nCrew, which runs this project for the person, started you for the task below. Work on it until it's done. {how}\n\nOther threads may be running side by side, and all of them share the person's plan usage. Do the work in this thread. Use subagents only for independent lookups or reviews that would otherwise fill your context, at most two at a time, and never one per item of a list. Before you push, run the project's quick local check once (a compile or type check), not after every change. When the project has CI, let it run the full tests and lints on the pull request. Don't wait for other threads' builds to finish.\n\n## Your task\n"
     )
 }
 
@@ -1802,6 +1802,8 @@ mod tests {
         assert!(thread_rules(true).contains("set_checklist"));
         assert!(thread_rules(false).contains("```runo-checklist"));
         assert!(thread_rules(true).contains("subagents only for independent"));
+        assert!(thread_rules(true).contains("quick local check"));
+        assert!(!thread_rules(true).contains("full test suite"));
     }
 
     #[test]

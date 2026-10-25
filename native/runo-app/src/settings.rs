@@ -189,6 +189,9 @@ pub struct AppSettings {
     pub checks_at_once: String,
     /// Run the checks after each turn at low CPU and disk priority.
     pub checks_low_priority: bool,
+    /// How much Runo checks after each turn when it picks the commands: "quick" (a
+    /// compile, type check or lint) or "full" (tests too). Projects can pick their own.
+    pub check_level: String,
     /// Settings from before 0.5.9: Crew threads that may run at once, 0 for no cap. Read
     /// once by `migrate` into `crew_threads`.
     #[serde(skip_serializing)]
@@ -312,6 +315,7 @@ impl Default for AppSettings {
             background_checks: true,
             checks_at_once: "auto".into(),
             checks_low_priority: true,
+            check_level: "quick".into(),
             crew_running: 3,
             crew_threads: "auto".into(),
             plan_hold_percent: 0,
