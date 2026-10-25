@@ -465,7 +465,7 @@ impl RunoApp {
     }
 
     /// A line about thread `id` in its project's Crew chat.
-    fn watch_news(&mut self, id: u64, what: String) {
+    pub(crate) fn watch_news(&mut self, id: u64, what: String) {
         let Some((pid, title)) = self
             .state
             .session(id)

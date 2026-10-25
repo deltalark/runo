@@ -37,8 +37,8 @@ pub(crate) fn thread_status(working: bool, s: &Session) -> &'static str {
         "needs you"
     } else if info.is_some_and(|i| i.resolved) {
         "resolved"
-    } else if info.is_some_and(|i| i.watch.is_some()) {
-        // Done with its turn; Runo watches its pull request and wakes it when needed.
+    } else if info.is_some_and(|i| i.watch.is_some() || !i.runs.is_empty()) {
+        // Done with its turn; Runo watches its pull request or CI runs and wakes it.
         "watching"
     } else {
         match s.status {
@@ -206,10 +206,19 @@ impl RunoApp {
             .rev()
             .map(|t| {
                 let working = self.handles.contains_key(&Target::Session(t.id));
+                // A stalled turn, by what it is on, without the minutes, so the board
+                // changes once.
+                let stalled = self.stall(t.id).map(|st| match st.step {
+                    Some(step) => format!(
+                        "stalled, no output on {}",
+                        step.strip_prefix("Ran ").unwrap_or(&step)
+                    ),
+                    None => "stalled, no output".to_string(),
+                });
                 crew::board_line(
                     t.id,
                     &t.title,
-                    thread_status(working, t),
+                    stalled.as_deref().unwrap_or(thread_status(working, t)),
                     t.crew.as_ref().unwrap_or(&ThreadInfo::default()),
                 )
             })
@@ -781,6 +790,10 @@ impl RunoApp {
         }
         // Watched threads read their pull request again; others look for one to watch.
         self.watch_turn_ended(id, ok && !stopped);
+        // Runs on what it pushed to the default branch, or its tag, are watched too.
+        if ok && !stopped {
+            self.run_watch_turn_ended(id);
+        }
         let Some(s) = self.state.session(id) else {
             return;
         };

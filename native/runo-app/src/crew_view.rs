@@ -476,7 +476,13 @@ impl RunoApp {
                 .map(|m| m.time.clone())
                 .unwrap_or_default(),
         };
+        // A running turn that has printed nothing for too long: "No output for 10m · …".
+        let stall = (status == "working")
+            .then(|| self.stall(id))
+            .flatten()
+            .map(|st| crate::stall::working_text(st.quiet, st.step.as_deref()));
         let tone = match status {
+            _ if stall.is_some() => c_amber(),
             "working" | "watching" => c_blue(),
             "needs you" => c_amber(),
             "failed" => c_red(),
@@ -484,7 +490,14 @@ impl RunoApp {
         };
         // A watched pull request: "Watching CI #12", "CI failed, fixing #12" and so on.
         let watch = self.watch_line(t);
-        let watch_chip = self.watch_chip(t, "side", cx);
+        // Watched runs after a push to main or a tag: "Watching main CI".
+        let runs = (status == "watching" && watch.is_none())
+            .then(|| t.crew.as_ref().and_then(|i| crate::runwatch::chip(&i.runs)))
+            .flatten()
+            .map(|(text, _)| text);
+        let watch_chip = self
+            .watch_chip(t, "side", cx)
+            .or_else(|| self.run_chip(t, "side", cx));
         let corner = match pr.filter(|_| finished) {
             Some(n) => div()
                 .flex_none()
@@ -514,6 +527,8 @@ impl RunoApp {
             title: crew::shown_title(&t.title),
             status: match (status, &watch) {
                 (_, Some((text, _, n, _))) => format!("{text} · #{n}"),
+                ("working", _) if stall.is_some() => stall.clone().unwrap_or_default(),
+                ("watching", _) if runs.is_some() => runs.clone().unwrap_or_default(),
                 ("working", _) if !when.is_empty() => format!("Working · {when}"),
                 ("resolved", _) => "Done".into(),
                 (s, _) => {
@@ -936,7 +951,14 @@ impl RunoApp {
             }
             _ => line,
         };
-        let watch = self.watch_chip(s, key, cx);
+        // A stalled turn says so instead of its current step.
+        let line = match self.stall(thread).filter(|_| status == "working") {
+            Some(st) => Some(crate::stall::working_text(st.quiet, st.step.as_deref())),
+            None => line,
+        };
+        let watch = self
+            .watch_chip(s, key, cx)
+            .or_else(|| self.run_chip(s, key, cx));
         // Crew answered the thread's last decision, and the thread hasn't reported since.
         let crew_answered = info.crew_answer.as_ref().is_some_and(|a| {
             status != "needs you" && info.reports.last().is_none_or(|r| r.at <= a.at)
