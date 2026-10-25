@@ -9874,9 +9874,17 @@ fn main() {
         let thread = (args.get(3).map(String::as_str) == Some("--thread"))
             .then(|| args.get(4).and_then(|id| id.parse().ok()))
             .flatten();
+        // The key that answers to its permission requests are signed with.
+        if let Some(i) = args.iter().position(|a| a == approvals::KEY_FILE_ARG) {
+            approvals::load_key_file(args.get(i + 1).map(String::as_str).unwrap_or(""));
+        }
         memory_mcp::serve(args.get(2).map(String::as_str).unwrap_or("."), thread);
         return;
     }
+    // Every other mode may start agents or answer them: give it this launch's approval
+    // key, and keep Runo's data folder private.
+    approvals::init_key();
+    store::tighten_data_dir();
     // `runo --agent-host runo-turn <turn folder> <agent> <args…>`: a live turn's agent,
     // detached from the window (see harness::host).
     if args.get(1).map(String::as_str) == Some("--agent-host") {

@@ -1140,6 +1140,7 @@ impl Remote {
             resume: false,
             untracked: false,
             stop_on_denial: false,
+            approval_key: String::new(),
         };
         let path = run_file_path(self.session);
         write_private(
@@ -1176,6 +1177,10 @@ struct RunFile {
     /// allow it now rather than find out when the turn ends.
     #[serde(default)]
     stop_on_denial: bool,
+    /// The app's approval key, so answers to the agent's permission requests check out
+    /// here (see `approvals`). The file is deleted as soon as it is read.
+    #[serde(default)]
+    approval_key: String,
 }
 
 /// Conversation ids and the backup choice come from the session, which `wrap` can't
@@ -1221,6 +1226,7 @@ impl Remote {
             resume: false,
             untracked: crate::settings::sync_backup_untracked(),
             stop_on_denial: crate::settings::stop_on_denial(),
+            approval_key: crate::approvals::export_key(),
         };
         let path = run_file_path(self.session);
         write_private(
@@ -1252,6 +1258,7 @@ pub fn resume_command(
         resume: true,
         untracked: crate::settings::sync_backup_untracked(),
         stop_on_denial: crate::settings::stop_on_denial(),
+        approval_key: crate::approvals::export_key(),
     };
     let path = run_file_path(remote.session);
     write_private(
@@ -2179,6 +2186,8 @@ pub fn connection_run(path: &str) -> i32 {
             return 1;
         }
     };
+    // Sign answers to the agent's permission requests as the app that started this does.
+    crate::approvals::adopt_key(&file.approval_key);
     let r = &file.remote;
     let in_git = local_git(&r.local_dir, &["rev-parse", "--git-dir"], &[]).is_ok();
     if !in_git {
@@ -3582,6 +3591,7 @@ mod tests {
             resume: false,
             untracked: false,
             stop_on_denial: false,
+            approval_key: String::new(),
         };
         let path = local.parent().unwrap().join("run.json");
         std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
@@ -3686,6 +3696,7 @@ mod tests {
             resume: true,
             untracked: false,
             stop_on_denial: false,
+            approval_key: String::new(),
         };
         let path = local.parent().unwrap().join("resume.json");
         std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
@@ -3771,6 +3782,7 @@ mod tests {
             resume: false,
             untracked: false,
             stop_on_denial: false,
+            approval_key: String::new(),
         };
         let path = root.join("run.json");
         std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
