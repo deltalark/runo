@@ -64,6 +64,7 @@ mod harness;
 mod health;
 mod history;
 mod home;
+mod idle;
 mod inbox;
 mod install;
 mod keymap;
@@ -85,6 +86,7 @@ mod persist;
 mod phone;
 mod planlimit;
 mod playbooks;
+mod procs;
 mod projects;
 mod proof;
 mod proof_ui;
@@ -117,6 +119,7 @@ mod turns;
 mod updater;
 mod usage;
 mod usage_ui;
+mod wake;
 mod working;
 mod workspace;
 
@@ -508,6 +511,8 @@ struct RunoApp {
     alerts_expanded: bool,
     /// Whether the window has focus, so the session on screen counts as seen.
     window_active: bool,
+    /// The idle loop's pacing and what it keeps between runs.
+    idle: idle::Idle,
     /// Permission requests agents are waiting on mid-turn.
     approvals: Vec<approvals::Request>,
     /// Tools the person always allowed for a session, answered without asking again.
@@ -1205,19 +1210,13 @@ impl RunoApp {
         });
         let (tx, rx) = channel::<Event>();
         let (ui_tx, ui_rx) = channel::<ship::UiJob>();
-        // Background git work hands its results back here.
+        // Background git work hands its results back here, as soon as they arrive.
+        let ui_rx = wake::Inbox::new(ui_rx);
         cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(30))
-                .await;
-            let mut jobs = Vec::new();
-            loop {
-                match ui_rx.try_recv() {
-                    Ok(job) => jobs.push(job),
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
-                }
-            }
+            ui_rx.wait().await;
+            let Some(jobs) = ui_rx.take() else {
+                return;
+            };
             if jobs.is_empty() {
                 continue;
             }
@@ -1232,91 +1231,16 @@ impl RunoApp {
             }
         })
         .detach();
-        let mut ticks = 0u32;
-        // The tick since when output from sessions not on screen has waited to be drawn.
-        let mut unshown_since: Option<u32> = None;
+        // Agents' output and other events: woken when they arrive, then a moment's wait
+        // so a busy agent's lines are handled together.
+        let rx = wake::Inbox::new(rx);
         cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(50))
-                .await;
-            ticks = ticks.wrapping_add(1);
-            let events: Vec<Event> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+            rx.wait().await;
+            cx.background_executor().timer(EVENT_BATCH).await;
+            let Some(events) = rx.take() else {
+                return;
+            };
             if events.is_empty() {
-                if unshown_since.is_some_and(|t| ticks.wrapping_sub(t) >= BACKGROUND_TICKS) {
-                    unshown_since = None;
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
-                        break;
-                    }
-                }
-                // Repaint about once a second while agents run, for their elapsed time.
-                let tick = ticks.is_multiple_of(20);
-                let repaint = caps::take_updated();
-                // Every ~2s, re-read git status for the session being watched while its
-                // agent works, so the Changes panel fills in as files are edited.
-                let rescan = ticks.is_multiple_of(40);
-                // Every ~10s when idle, so terminal git commands and outside edits show
-                // up; the pull request's checks every minute.
-                let idle_scan = ticks.is_multiple_of(200);
-                let pr_check = ticks % 1200 == 600;
-                let check = ticks % 1200 == 2;
-                // Ten seconds in, once agents are detected, then every five minutes: each agent's plan usage for the status bar.
-                if ticks % 6000 == 200 {
-                    usage::refresh(true);
-                }
-                let alive = this.update(cx, |this, cx| {
-                    if check {
-                        this.maybe_check_updates();
-                    }
-                    // Half a minute in, the build output done threads left from before;
-                    // every ~5s the open worktree's size, and once a minute another try
-                    // at done threads something was running in.
-                    if ticks == 600 {
-                        this.queue_done_build_clean();
-                    } else if ticks % 100 == 75 {
-                        this.space_tick(ticks % 1200 == 75);
-                    }
-                    // Every ~5s, look for dev servers so the header's Browser button
-                    // appears once the app is being served, and goes when it stops.
-                    if ticks % 100 == 50
-                        && this.view == View::Session
-                        && this.selected.is_some()
-                        && cx.global::<AppSettings>().browser_enabled
-                    {
-                        this.scan_ports();
-                    }
-                    let watching = this.view == View::Session
-                        && this.selected.is_some_and(|id| this.turns.contains_key(&id));
-                    let on_session = this.view == View::Session && this.selected.is_some();
-                    if pr_check && on_session {
-                        if let Some(id) = this.selected {
-                            this.load_pr_status(id);
-                        }
-                    }
-                    if tick {
-                        let before = (this.file_conflict, this.pending_file.is_some());
-                        this.watch_open_file();
-                        if before != (this.file_conflict, this.pending_file.is_some()) {
-                            cx.notify();
-                        }
-                    }
-                    if (rescan && watching) || (idle_scan && on_session) {
-                        this.refresh();
-                        cx.notify();
-                    } else if repaint
-                        || (tick
-                            && (!this.turns.is_empty()
-                                || this.info.is_some()
-                                || this.git_toast.is_some()))
-                        || (ticks.is_multiple_of(5)
-                            && this.update_runs.values().any(|r| r.failed.is_none()))
-                    {
-                        this.prune_update_runs();
-                        cx.notify();
-                    }
-                });
-                if alive.is_err() {
-                    break;
-                }
                 continue;
             }
             let alive = this.update(cx, |this, cx| {
@@ -1333,16 +1257,29 @@ impl RunoApp {
                 for event in events {
                     this.handle_event(event, cx);
                 }
-                let waited = unshown_since.get_or_insert(ticks);
-                if at_once || ticks.wrapping_sub(*waited) >= BACKGROUND_TICKS {
-                    unshown_since = None;
-                    cx.notify();
-                } else if streamed {
-                    this.notify_chat(cx);
-                }
+                this.after_events(at_once, streamed, cx);
             });
             if alive.is_err() {
                 break;
+            }
+        })
+        .detach();
+        // Elapsed times, git rescans, dev-server ports, pull request checks and the rest:
+        // about once a second while the window is on screen, every few seconds while it
+        // is hidden.
+        cx.spawn(async move |this, cx| {
+            let mut clock = idle::Clock::new();
+            loop {
+                let Ok(wait) = this.update(cx, |this, _| this.housekeeping_pace()) else {
+                    break;
+                };
+                cx.background_executor().timer(wait).await;
+                if this
+                    .update(cx, |this, cx| this.housekeeping(&mut clock, cx))
+                    .is_err()
+                {
+                    break;
+                }
             }
         })
         .detach();
@@ -1719,6 +1656,7 @@ impl RunoApp {
             alerts_hidden: Default::default(),
             alerts_expanded: false,
             window_active: window.is_window_active(),
+            idle: idle::Idle::default(),
             approvals: Vec::new(),
             always_allowed: Default::default(),
             refused: HashMap::new(),
@@ -2022,6 +1960,12 @@ impl RunoApp {
             }
         });
         app._subscriptions.push(activation_sub);
+        // Hidden, minimized or covered: periodic work that only changes the window stops
+        // until it is on screen again (see `idle`). Taken as shown until told otherwise.
+        let visibility_sub = cx.observe_window_visibility(window, |this, visibility, _, cx| {
+            this.window_shown(visibility.is_visible(), cx);
+        });
+        app._subscriptions.push(visibility_sub);
         app._subscriptions.push(home_sub);
         app._subscriptions.extend(design_subs);
         app._subscriptions.extend(assistant_subs);
@@ -2030,27 +1974,15 @@ impl RunoApp {
         cx.set_global(MainApp(cx.entity().downgrade(), window.window_handle()));
         app.init_github(window, cx);
         app.restore_layout();
-        // The Dock icon's count. A timer rather than render, since a minimised or hidden
-        // window doesn't draw; AppKit only hears about a change.
+        // The Dock icon's count. Events and approvals update it as they come; this timer
+        // catches the rest (render can't, since a minimised or hidden window doesn't
+        // draw), every second, or every five while the window is hidden. AppKit only
+        // hears about a change.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
-                .timer(Duration::from_millis(500))
+                .timer(wake::pace(Duration::from_secs(1), Duration::from_secs(5)))
                 .await;
-            let shown = this.update(cx, |this, cx| {
-                let on = cx.global::<AppSettings>().dock_badge;
-                dock::show(if on { this.attention() } else { 0 });
-            });
-            if shown.is_err() {
-                break;
-            }
-        })
-        .detach();
-        // The Browser tab's live page: pick up frames at display rate while it is open.
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(16))
-                .await;
-            if this.update(cx, |this, cx| this.pump_browser(cx)).is_err() {
+            if this.update(cx, |this, cx| this.show_dock(cx)).is_err() {
                 break;
             }
         })
@@ -2095,20 +2027,28 @@ impl RunoApp {
                 })
                 .unwrap_or(true)
         });
-        // Saves, turns waiting for a slot, crash reports and Runo updates.
+        // Saves, turns waiting for a slot, crash reports and Runo updates; every two
+        // seconds while the window is hidden.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
-                .timer(Duration::from_millis(500))
+                .timer(wake::pace(
+                    Duration::from_millis(500),
+                    Duration::from_secs(2),
+                ))
                 .await;
             if this.update(cx, |this, cx| this.health_tick(cx)).is_err() {
                 return;
             }
         })
         .detach();
-        // Agents asking for permission mid-turn are shown within half a second.
+        // Agents asking for permission mid-turn are shown within half a second, or a
+        // second while the window is hidden. With nothing running, nothing can ask.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
-                .timer(Duration::from_millis(500))
+                .timer(wake::pace(
+                    Duration::from_millis(500),
+                    Duration::from_secs(1),
+                ))
                 .await;
             if this.update(cx, |this, cx| this.poll_approvals(cx)).is_err() {
                 return;
@@ -2116,10 +2056,14 @@ impl RunoApp {
         })
         .detach();
         // Playbooks agents asked for and requests from the phone start within a couple of
-        // seconds; scheduled playbooks are checked twice a minute.
+        // seconds (five while the window is hidden); scheduled playbooks are checked about
+        // twice a minute.
         cx.spawn(async move |this, cx| loop {
-            for _ in 0..15 {
-                cx.background_executor().timer(Duration::from_secs(2)).await;
+            let started = std::time::Instant::now();
+            while started.elapsed() < Duration::from_secs(29) {
+                cx.background_executor()
+                    .timer(wake::pace(Duration::from_secs(2), Duration::from_secs(5)))
+                    .await;
                 if this
                     .update(cx, |this, cx| {
                         this.take_playbook_requests(cx);
@@ -2133,8 +2077,19 @@ impl RunoApp {
             }
             if this
                 .update(cx, |this, cx| {
+                    // Redraw only when a run started or came in, or for the times shown
+                    // on Home and Automations.
+                    let mark = |this: &Self| {
+                        let runs = this.state.automations.iter().map(|a| a.last_run);
+                        (this.state.sessions.len(), runs.sum::<u64>())
+                    };
+                    let before = mark(this);
                     this.run_due_automations(cx);
-                    cx.notify();
+                    let on_screen =
+                        wake::shown() && matches!(this.view, View::Home | View::Automations);
+                    if on_screen || mark(this) != before {
+                        cx.notify();
+                    }
                 })
                 .is_err()
             {
@@ -2285,12 +2240,15 @@ impl RunoApp {
     /// Re-read the selected session's git state (changes, files, branch, races) on a
     /// background thread; the results land a moment later.
     fn refresh(&mut self) {
-        let Some(session) = self.current() else {
+        let Some((id, dir)) = self.current().map(|s| (s.id, s.dir.clone())) else {
             self.changes.clear();
             self.files.clear();
             return;
         };
-        let id = session.id;
+        self.scan_started();
+        let Some(session) = self.current() else {
+            return;
+        };
         let racers: Vec<(u64, String)> = if session.race != 0 {
             self.state
                 .sessions
@@ -2302,7 +2260,7 @@ impl RunoApp {
             Vec::new()
         };
         let request = ship::ScanRequest {
-            dir: session.dir.clone(),
+            dir: dir.clone(),
             touched: session.touched(),
             base: session.base.clone(),
             since_base: self.diff_base,
@@ -2317,6 +2275,9 @@ impl RunoApp {
         self.bg(
             move || ship::scan(request),
             move |this, scan, _| {
+                // git's files as the scan left them: `git status` may have rewritten the
+                // index, and that isn't a change to look at again.
+                this.scan_done(id, &dir);
                 if this.refresh_seq == seq && this.selected == Some(id) {
                     this.apply_scan(id, scan, asked);
                 }
@@ -9168,6 +9129,8 @@ impl Render for RunoApp {
         });
         self.prepare_playbook_run(window, cx);
         self.prepare_playbook_editor(window, cx);
+        // The Browser tab's live page: frames at display rate only while it is on screen.
+        self.ensure_browser_pump(cx);
         self.update_chat_follow();
         // Only what this frame needs, rather than a copy of every setting each frame.
         let st = {
@@ -10025,8 +9988,10 @@ const SIDEBAR_MAX: f32 = 400.;
 const PANEL_WIDTH: f32 = 460.;
 const PANEL_MIN: f32 = 320.;
 const PANEL_MAX: f32 = 900.;
-/// Event ticks (50 ms each) that output from sessions not on screen waits to be drawn.
-const BACKGROUND_TICKS: u32 = 5;
+/// How long output from sessions not on screen may wait to be drawn.
+const BACKGROUND_WAIT: Duration = Duration::from_millis(250);
+/// How long the event loop waits after waking, so a batch of output is handled at once.
+const EVENT_BATCH: Duration = Duration::from_millis(50);
 /// Narrowest the chat gets when the right panel is dragged wider.
 const CHAT_MIN: f32 = 600.;
 

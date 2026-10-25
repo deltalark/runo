@@ -619,7 +619,9 @@ impl RunoApp {
             self.health.crash_looked = true;
             self.health.crash = crate::applog::unseen_crash(&crate::applog::logs_dir());
         }
+        // Not while the window is hidden; the check comes when it is back.
         if cx.global::<AppSettings>().check_runo_updates
+            && wake::shown()
             && self
                 .health
                 .release_checked

@@ -2061,7 +2061,8 @@ impl Render for Arcade {
         self.advance();
         self.advance_fx();
         let clocked = self.phase == Phase::Playing && self.game != Game::Merge;
-        if clocked || self.fx.busy(self.score, self.best()) {
+        // Not while Runo is in the background; the next draw, on coming back, goes on.
+        if (clocked || self.fx.busy(self.score, self.best())) && window.is_window_active() {
             window.request_animation_frame();
         }
         let field = match self.game {

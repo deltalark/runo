@@ -881,6 +881,8 @@ impl RunoApp {
             },
             move |this, status, _| {
                 this.pr_loading.remove(&id);
+                let same = this.pr_status.get(&id) == status.as_ref();
+                this.pr_checked(id, same);
                 match status {
                     Some(status) => {
                         if let Some(s) = this.state.session_mut(id) {

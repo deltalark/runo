@@ -964,14 +964,17 @@ impl DesignCanvas {
     }
 
     /// Look for screens and styles changed outside the canvas (an agent, an editor, git)
-    /// every so often, and draw them again.
+    /// every so often, and draw them again; not while Runo's window is hidden.
     fn watch(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
-                .timer(Duration::from_millis(1500))
+                .timer(crate::wake::pace(
+                    Duration::from_millis(1500),
+                    Duration::from_secs(5),
+                ))
                 .await;
             let check = |this: &mut Self, cx: &mut Context<Self>| {
-                if this.watching {
+                if this.watching && crate::wake::shown() {
                     this.check_files(cx);
                     // Saved or changed since git was last asked: ask again.
                     if this.uncommitted_seen != this.files_changed {

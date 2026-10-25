@@ -12,27 +12,36 @@ use crate::designdraw::styles;
 type Landed = (String, Shot, (u64, Vec<dom::Box>));
 
 impl DesignCanvas {
-    /// Take agents' calls every moment, whether or not the canvas is on screen: the agent
-    /// waits for each answer.
+    /// Take agents' calls whether or not the canvas is on screen: the agent waits for
+    /// each answer. Every quarter second for half a minute after a call, since one call
+    /// tends to follow another; once a second otherwise.
     pub(super) fn serve_agents(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(250))
-                .await;
-            if this
-                .update(cx, |this, cx| this.take_agent_calls(cx))
-                .is_err()
-            {
-                break;
+        cx.spawn(async move |this, cx| {
+            let mut last: Option<std::time::Instant> = None;
+            loop {
+                let busy = last.is_some_and(|at| at.elapsed() < Duration::from_secs(30));
+                let wait = if busy { 250 } else { 1000 };
+                cx.background_executor()
+                    .timer(Duration::from_millis(wait))
+                    .await;
+                match this.update(cx, |this, cx| this.take_agent_calls(cx)) {
+                    Ok(true) => last = Some(std::time::Instant::now()),
+                    Ok(false) => {}
+                    Err(_) => break,
+                }
             }
         })
         .detach();
     }
 
-    fn take_agent_calls(&mut self, cx: &mut Context<Self>) {
-        for r in agentops::take(&agentops::folder(), &self.root) {
+    /// Answer the calls waiting; whether there were any.
+    fn take_agent_calls(&mut self, cx: &mut Context<Self>) -> bool {
+        let calls = agentops::take(&agentops::folder(), &self.root);
+        let any = !calls.is_empty();
+        for r in calls {
             self.agent_call(r, cx);
         }
+        any
     }
 
     fn agent_call(&mut self, req: Request, cx: &mut Context<Self>) {
