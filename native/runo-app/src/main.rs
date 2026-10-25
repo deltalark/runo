@@ -98,6 +98,7 @@ mod radar;
 mod registry;
 mod review;
 mod reviewable;
+mod safefs;
 mod schedule;
 mod seatbelt;
 mod session_header;
@@ -113,6 +114,8 @@ mod startup;
 mod store;
 mod stream;
 mod terminal;
+#[cfg(test)]
+mod testwait;
 mod themes;
 mod thread_refs;
 mod thumb;
@@ -151,6 +154,7 @@ actions!(
     [
         NewSession,
         OpenSettings,
+        CheckForUpdates,
         StopAgent,
         TogglePanel,
         ToggleTerminal,
@@ -232,6 +236,8 @@ enum Jump {
     Session(u64),
     File(String),
     Tour,
+    /// Check GitHub for a newer Runo and show the result in Settings.
+    Updates,
     Arcade,
     /// Run a playbook in the current project.
     Playbook(u64),
@@ -350,9 +356,8 @@ struct RunoApp {
     sidebar_done_open: HashSet<u64>,
     /// Of those, projects listing every finished thread, not only the latest few.
     sidebar_done_all: HashSet<u64>,
-    /// The Browser is open as a tab beside the session tabs, and whether it is the one shown.
-    browser_open: bool,
-    browser_main: bool,
+    /// The Browser tab: whether it is open and shown, its address field, and its engine.
+    browser: browser::BrowserTab,
     /// Interactive shells, across all sessions.
     shells: Vec<pty::Shell>,
     /// The shell tab shown in the terminal panel, when one is selected.
@@ -430,17 +435,7 @@ struct RunoApp {
     diff: String,
     files: Vec<String>,
     /// The file shown in the Files tab (or the main area), and its editor.
-    open_file: Option<fileview::OpenFile>,
-    pending_file: Option<String>,
-    file_editor: Entity<gpui_kit::component::input::EditorState>,
-    file_preview: bool,
-    file_dirty: bool,
-    /// The editor's text while it has unsaved changes.
-    file_text: String,
-    /// Waiting on a Save / Discard answer before opening another file or closing.
-    file_leave: Option<fileview::Leave>,
-    /// The open file changed on disk while it had unsaved changes.
-    file_conflict: bool,
+    file: fileview::FileEditor,
     /// Unsaved edits of sessions switched away from, with their files.
     unsaved: HashMap<u64, (fileview::OpenFile, String)>,
     /// Where the main-area editor returns to.
@@ -476,20 +471,12 @@ struct RunoApp {
     prompt: Entity<TextareaState>,
     new_task: Entity<TextareaState>,
     branch: Entity<InputState>,
-    address: Entity<InputState>,
-    browser_recent: Vec<String>,
-    browser_ports: Vec<u16>,
-    browser_scanning: bool,
     /// Dev-server ports found where each session on a connection runs, or why not.
     remote_ports: HashMap<u64, Result<Vec<u16>, String>>,
     remote_scanning: std::collections::HashSet<u64>,
     /// Ports on connections forwarded to this machine: (session, port there).
     forwards: HashMap<(u64, u16), connections::Forward>,
     forwarding: Option<(u64, u16)>,
-    /// The headless Chromium behind the Browser tab, started on first use.
-    browser: Option<std::sync::Arc<browser_engine::Engine>>,
-    browser_view: browser::BrowserView,
-    browser_focus: FocusHandle,
     new_provider: usize,
     new_project: Option<u64>,
     new_isolated: bool,
@@ -588,6 +575,8 @@ struct RunoApp {
     open_steps: std::collections::HashSet<(u64, usize)>,
     /// Threads' messages to Crew shown in full, by (Crew chat, message index).
     open_wakes: std::collections::HashSet<(u64, usize)>,
+    /// Sessions whose Working line lists its helper agents.
+    open_helpers: std::collections::HashSet<u64>,
     show_sidebar: bool,
     /// When each panel last opened or closed, so it can slide instead of snapping.
     panel_anim: HashMap<&'static str, (bool, std::time::Instant)>,
@@ -1191,8 +1180,9 @@ fn elapsed(d: Duration) -> String {
     }
 }
 
-/// "38k tokens · 19% context" for an agent turn.
-fn usage_label(usage: &store::Usage) -> String {
+/// "38k tokens · 19% context" for an agent turn, against a window of `known` when the
+/// turn didn't report its own.
+fn usage_label(usage: &store::Usage, known: u64) -> String {
     let k = |n: u64| {
         if n >= 1000 {
             format!("{:.0}k", n as f64 / 1000.0)
@@ -1200,11 +1190,7 @@ fn usage_label(usage: &store::Usage) -> String {
             n.to_string()
         }
     };
-    let window = if usage.window > 0 {
-        usage.window
-    } else {
-        200_000
-    };
+    let window = usage.window_or(known);
     let pct = (usage.context() as f64 / window as f64 * 100.0).round() as u64;
     format!("{} tokens · {pct}% context", k(usage.context()))
 }
@@ -1509,6 +1495,7 @@ impl RunoApp {
             window_place: None,
             term_escape: None,
             open_steps: Default::default(),
+            open_helpers: Default::default(),
             open_wakes: Default::default(),
             show_sidebar: true,
             panel_anim: HashMap::new(),
@@ -1577,8 +1564,7 @@ impl RunoApp {
             threads_done_all: false,
             sidebar_done_open: HashSet::new(),
             sidebar_done_all: HashSet::new(),
-            browser_open: false,
-            browser_main: false,
+            browser: browser::BrowserTab::new(address, cx.focus_handle()),
             shells: Vec::new(),
             shell_tab: None,
             next_shell: 0,
@@ -1635,14 +1621,7 @@ impl RunoApp {
             selected_file: None,
             diff: String::new(),
             files: Vec::new(),
-            open_file: None,
-            pending_file: None,
-            file_editor,
-            file_preview: false,
-            file_dirty: false,
-            file_text: String::new(),
-            file_leave: None,
-            file_conflict: false,
+            file: fileview::FileEditor::new(file_editor),
             unsaved: HashMap::new(),
             editor_back: View::Session,
             new_back: View::Session,
@@ -1669,17 +1648,10 @@ impl RunoApp {
             branch: cx.new(|cx| {
                 InputState::new(window, cx).placeholder("Branch (optional, named after the task)")
             }),
-            address,
-            browser_recent: Vec::new(),
-            browser_ports: Vec::new(),
-            browser_scanning: false,
             remote_ports: HashMap::new(),
             remote_scanning: Default::default(),
             forwards: HashMap::new(),
             forwarding: None,
-            browser: None,
-            browser_view: browser::BrowserView::default(),
-            browser_focus: cx.focus_handle(),
             new_provider: agent::PROVIDERS
                 .iter()
                 .position(|p| p.id == cx.global::<AppSettings>().default_provider)
@@ -2035,7 +2007,7 @@ impl RunoApp {
         .detach();
         // Chromium would exit when its pipe closes, but stop it right away.
         cx.on_app_quit(|this, _| {
-            this.browser = None;
+            this.browser.engine = None;
             this.before_quit();
             // Events still on their way to the turn logs.
             harness::log::drain();
@@ -2409,7 +2381,7 @@ impl RunoApp {
             self.stash_open_file(old);
         }
         self.selected = Some(id);
-        self.browser_main = false;
+        self.browser.main = false;
         if !self.tabs.contains(&id) {
             self.tabs.push(id);
         }
@@ -2430,8 +2402,8 @@ impl RunoApp {
         self.view = View::Session;
         self.selected_file = None;
         self.diff.clear();
-        if self.open_file.is_some() && !self.file_dirty {
-            self.open_file = None;
+        if self.file.open.is_some() && !self.file.dirty {
+            self.file.open = None;
         }
         self.confirm_delete = None;
         self.confirm_discard = None;
@@ -2549,12 +2521,6 @@ impl RunoApp {
             Event::Err(Target::Session(id), line) => {
                 if agent::waits_for_sign_in(&line) {
                     self.sign_in_wait(id, &line);
-                }
-                // Grok names its conversation on stderr; the next turn continues it.
-                if let Some(session) = self.state.session_mut(id) {
-                    if let Some(found) = agent::stderr_conversation(&session.provider, &line) {
-                        session.agent_session = found;
-                    }
                 }
                 let log = self.stderr.entry(id).or_default();
                 log.push(line);
@@ -2907,7 +2873,16 @@ impl RunoApp {
 
     /// Show a file of the current session in the Files tab; applied on the next frame.
     fn open_preview(&mut self, path: &str) {
-        self.pending_file = Some(path.to_string());
+        self.file.pending = Some(path.to_string());
+    }
+
+    /// Check for a newer Runo and open Settings filtered to Updates, where the result shows.
+    fn show_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings();
+        self.settings_page = SettingsPage::General;
+        self.settings_search
+            .update(cx, |s, cx| s.set_value("updates", window, cx));
+        self.check_runo_now(cx);
     }
 
     pub(crate) fn open_settings(&mut self) {
@@ -3035,6 +3010,7 @@ impl RunoApp {
         match jump {
             Jump::Action => {}
             Jump::Tour => self.start_tour(),
+            Jump::Updates => self.show_update_check(window, cx),
             Jump::Arcade => self.open_arcade(window, cx),
             Jump::Playbook(id) => {
                 let here = self.current_project();
@@ -3176,6 +3152,13 @@ impl RunoApp {
                 .keywords(["welcome", "help", "guide", "onboarding"]),
         );
         command_jumps.push(Jump::Tour);
+        commands = commands.item(
+            CommandItem::new()
+                .label("Check for updates")
+                .icon(IconName::Download)
+                .keywords(["update", "upgrade", "new version", "release"]),
+        );
+        command_jumps.push(Jump::Updates);
         commands = commands.item(
             CommandItem::new()
                 .label("Open the Arcade")
@@ -3956,17 +3939,13 @@ impl RunoApp {
         let provider = agent::provider(past.provider);
         // The conversation's earlier turns, read from the CLI's transcript, so the chat
         // shows where it left off.
-        let prefix = format!("{}/", past.cwd.trim_end_matches('/'));
-        let mut earlier: Vec<Message> = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .and_then(|home| {
-                history::transcript(std::path::Path::new(&home), past.provider, &past.id)
-            })
+        let mut earlier: Vec<Message> = store::home_dir()
+            .and_then(|home| history::transcript(&home, past.provider, &past.id))
             .map(|path| history::turns(past.provider, &history::read_from(&path, 0)))
             .unwrap_or_default();
         for m in &mut earlier {
             for step in &mut m.steps {
-                step.label = step.label.replace(&prefix, "");
+                step.label = cliview::without_dir(&step.label, &past.cwd);
             }
         }
         let picked_up = format!(
@@ -5747,7 +5726,10 @@ impl RunoApp {
                                 el.child("·").child(message.meta.clone())
                             })
                             .when(!message.usage.is_empty(), |el| {
-                                el.child("·").child(usage_label(&message.usage))
+                                let known = self
+                                    .current()
+                                    .map_or(0, |s| store::known_window(&s.messages));
+                                el.child("·").child(usage_label(&message.usage, known))
                             })
                             .when(!live, |el| {
                                 let sid = self.selected.unwrap_or(0);
@@ -6077,7 +6059,11 @@ impl RunoApp {
                                     .iter()
                                     .rev()
                                     .find(|m| !m.usage.is_empty())
-                                    .map(|m| m.usage)
+                                    .map(|m| {
+                                        let mut u = m.usage;
+                                        u.window = u.window_or(store::known_window(&s.messages));
+                                        u
+                                    })
                                     .map(|u| {
                                         let cost: f64 =
                                             s.messages.iter().map(|m| m.usage.cost_cents).sum();
@@ -6090,11 +6076,7 @@ impl RunoApp {
                                     })
                             }),
                         |el, (usage, cost, reports, about)| {
-                            let window = if usage.window > 0 {
-                                usage.window
-                            } else {
-                                200_000
-                            };
+                            let window = usage.window;
                             let pct = (usage.context() as f32 / window as f32).min(1.0);
                             el.child(
                                 div()
@@ -9021,16 +9003,16 @@ impl Render for RunoApp {
         if window.focused(cx).is_none() {
             window.focus(&self.focus, cx);
         }
-        if let Some(path) = self.pending_file.take() {
+        if let Some(path) = self.file.pending.take() {
             self.open_or_ask(&path, window, cx);
         }
         self.home_focus(window, cx);
         self.restore_open_file(window, cx);
         if !st.browser_enabled {
-            self.browser_open = false;
-            self.browser_main = false;
+            self.browser.open = false;
+            self.browser.main = false;
         }
-        if self.browser_main {
+        if self.browser.main {
             self.sync_browser_address(window, cx);
         }
         // Design and Architecture follow the project in the top bar.
@@ -9181,7 +9163,7 @@ impl Render for RunoApp {
             View::Architecture => self.architecture_view(cx),
             View::Data => self.data_view(cx),
             // The Browser tab takes the work area while it is the tab shown.
-            View::Session if self.browser_main && self.current().is_some() => div()
+            View::Session if self.browser.main && self.current().is_some() => div()
                 .flex_1()
                 .min_w_0()
                 .h_full()
@@ -9428,6 +9410,9 @@ impl Render for RunoApp {
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
                 this.open_settings();
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
+                this.show_update_check(window, cx);
             }))
             .on_action(cx.listener(|this, _: &StopAgent, _, cx| {
                 this.stop();
@@ -9874,9 +9859,17 @@ fn main() {
         let thread = (args.get(3).map(String::as_str) == Some("--thread"))
             .then(|| args.get(4).and_then(|id| id.parse().ok()))
             .flatten();
+        // The key that answers to its permission requests are signed with.
+        if let Some(i) = args.iter().position(|a| a == approvals::KEY_FILE_ARG) {
+            approvals::load_key_file(args.get(i + 1).map(String::as_str).unwrap_or(""));
+        }
         memory_mcp::serve(args.get(2).map(String::as_str).unwrap_or("."), thread);
         return;
     }
+    // Every other mode may start agents or answer them: give it this launch's approval
+    // key, and keep Runo's data folder private.
+    approvals::init_key();
+    store::tighten_data_dir();
     // `runo --agent-host runo-turn <turn folder> <agent> <args…>`: a live turn's agent,
     // detached from the window (see harness::host).
     if args.get(1).map(String::as_str) == Some("--agent-host") {
@@ -9924,6 +9917,8 @@ fn main() {
     applog::init();
     detach::enable(store::data_dir());
     harness::log::enable(store::data_dir());
+    // Before settings or sessions are read, and so before either is saved again.
+    store::keep_before_version_change(&store::data_dir(), env!("CARGO_PKG_VERSION"));
     let app = application().with_assets(assets::AllAssets);
     startup::mark("gpui application");
     // Clicking the Dock icon with the window closed (macOS keeps Runo running) opens it again.
@@ -9996,6 +9991,7 @@ fn app_menus() -> Vec<Menu> {
     vec![
         Menu::new("Runo").items([
             MenuItem::action("Settings…", OpenSettings),
+            MenuItem::action("Check for Updates…", CheckForUpdates),
             MenuItem::action("Take the tour", ShowTour),
             MenuItem::separator(),
             MenuItem::action("Quit Runo", Quit),

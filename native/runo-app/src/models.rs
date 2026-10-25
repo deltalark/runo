@@ -255,7 +255,8 @@ pub(crate) fn parse_model_list(text: &str) -> Vec<ModelInfo> {
             .trim()
             .trim_end_matches(')')
             .trim();
-        let (label, desc) = if name.is_empty() {
+        // `grok models` marks its default as `* grok-4.7 (default)`, which is no name.
+        let (label, desc) = if name.is_empty() || name.eq_ignore_ascii_case("default") {
             (id.to_string(), String::new())
         } else {
             (name.to_string(), id.to_string())
@@ -388,6 +389,15 @@ mod tests {
         let ids: Vec<&str> = models.iter().map(|m| m.choice.value.as_str()).collect();
         assert_eq!(ids, ["gpt-5.5", "sonnet-5.5-thinking"]);
         assert_eq!(models[0].choice.label, "GPT-5.5");
+        // Exactly what `grok models` (xAI's Grok Build 1.0.70) prints, signed in.
+        let grok = "You are logged in with grok.com.\n\nDefault model: grok-4.7\n\nAvailable models:\n  * grok-4.7 (default)\n  - grok-4.7-build-fast\n  - grok-4.6\n  - grok-4.5\n";
+        let models = parse_model_list(grok);
+        let ids: Vec<&str> = models.iter().map(|m| m.choice.value.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"]
+        );
+        assert_eq!(models[0].choice.label, "grok-4.7");
         let help = "  --model <model>  Set the AI model (choices: \"claude-sonnet-4.5\", \"gpt-5\",\n                   \"gemini-3-pro\")\n  --other";
         let ids: Vec<String> = help_model_choices(help)
             .into_iter()

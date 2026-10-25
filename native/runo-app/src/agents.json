@@ -154,10 +154,13 @@
       "mark": "𝕏",
       "color": "#9a9aa3",
       "install": {
-        "unix": "curl -fsSL https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh | bash"
+        "unix": "curl -fsSL https://x.ai/cli/install.sh | bash"
       },
-      "resumes": "--session <",
-      "modes": ["full"]
+      "login": ["login"],
+      "resumes": true,
+      "names_conversation": true,
+      "output": [{ "format": "claude" }],
+      "models": { "args": ["models"] }
     },
     {
       "id": "pi",

@@ -61,11 +61,45 @@ impl RunoApp {
         }
         // A turn that changed only docs can't break the checks; a full test run then
         // costs minutes and gigabytes for nothing. Asked for by hand, they run anyway.
-        let docs_only = auto
-            && session.messages[turn..]
+        let changed: Vec<String> = session.messages[turn..]
+            .iter()
+            .rfind(|m| m.role == Role::Agent)
+            .map(|m| m.changed.clone())
+            .unwrap_or_default();
+        let docs_only = auto && proof::only_docs(&changed);
+        // Checks run the project's own scripts on this computer, which the agent may just
+        // have rewritten. After a turn they run on their own only when nothing says to
+        // wait (`proof::hold`); Run on the card is the person's go-ahead, and in a mode
+        // that asks before shell commands it holds until what the checks run changes.
+        let mode = session
+            .selections()
+            .get("mode")
+            .cloned()
+            .unwrap_or_default();
+        let asks_shell = agent::effective_mode(&session.provider, &mode) != "full";
+        let print =
+            (!remote).then(|| proof::fingerprint(std::path::Path::new(&session.dir), &checks));
+        let fork = session.fork;
+        let project = session.project_id;
+        let held = if auto && !remote && !docs_only {
+            let approved = self
+                .state
+                .projects
                 .iter()
-                .rfind(|m| m.role == Role::Agent)
-                .is_some_and(|m| proof::only_docs(&m.changed));
+                .find(|p| p.id == project)
+                .is_some_and(|p| Some(&p.checks_ok) == print.as_ref());
+            proof::hold(fork, &changed, asks_shell, approved)
+        } else {
+            None
+        };
+        if !auto && !fork {
+            if let (Some(print), Some(p)) = (
+                print,
+                self.state.projects.iter_mut().find(|p| p.id == project),
+            ) {
+                p.checks_ok = print;
+            }
+        }
         let Some(session) = self.state.session_mut(id) else {
             return;
         };
@@ -79,7 +113,7 @@ impl RunoApp {
         } else if docs_only {
             proof::DOCS_ONLY
         } else {
-            ""
+            held.as_deref().unwrap_or("")
         };
         if !skipped.is_empty() {
             crate::applog::info("proof", format!("session #{id}: {skipped}"));
@@ -88,6 +122,7 @@ impl RunoApp {
                 rounds,
                 last_failure,
                 skipped: skipped.into(),
+                held: held.is_some(),
                 ..Default::default()
             });
             self.save();
@@ -620,6 +655,7 @@ impl RunoApp {
                 IconName::LoaderCircle,
                 "Running the checks…".to_string(),
             ),
+            Some(v) if v.held => (c_amber(), IconName::ShieldAlert, v.skipped.clone()),
             Some(v) if !v.skipped.is_empty() => (c_muted(), IconName::Info, v.skipped.clone()),
             Some(v) if v.passed() => (
                 c_green(),
@@ -658,6 +694,7 @@ impl RunoApp {
             ),
         };
         let red = verdict.is_some_and(|v| !v.failed().is_empty());
+        let held = verdict.is_some_and(|v| v.held);
         let rounds = verdict.map(|v| v.rounds).unwrap_or(0);
         let border = if red {
             c_red()
@@ -715,7 +752,22 @@ impl RunoApp {
                         })),
                 )
             })
-            .when(has_checks && !proving, |el| {
+            .when(held && !proving && !waiting, |el| {
+                el.child(
+                    small(self, "proof-run-held", "Run", true)
+                        .child(icon(IconName::Play, 12., c_canvas()))
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(
+                                "Runs the checks now, as the project's files define them. Look at what changed first",
+                            )
+                            .build(window, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.prove_turn(id, false, cx);
+                        })),
+                )
+            })
+            .when(has_checks && !proving && !held, |el| {
                 el.child(
                     small(self, "proof-rerun", "Run again", false)
                         .child(icon(IconName::RotateCw, 12., c_secondary()))

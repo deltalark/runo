@@ -687,7 +687,7 @@ impl Sandbox {
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        let own = crate::connections::bridge_for_cove(cwd, &own, &mut env);
+        let own = crate::connections::bridge_for_cove(cwd, self.connection, &own, &mut env);
         for (k, v) in env {
             args.push("-e".into());
             args.push(format!("{k}={v}"));

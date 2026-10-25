@@ -34,6 +34,38 @@ pub(crate) struct OpenFile {
     pub modified: Option<std::time::SystemTime>,
 }
 
+/// The file shown in the Files tab (or the main area), and its editor.
+pub(crate) struct FileEditor {
+    pub open: Option<OpenFile>,
+    /// A file to open on the next frame, when a window is at hand.
+    pub pending: Option<String>,
+    pub editor: Entity<EditorState>,
+    pub preview: bool,
+    pub dirty: bool,
+    /// The editor's text while it has unsaved changes.
+    pub text: String,
+    /// Waiting on a Save / Discard answer before opening another file or closing.
+    pub leave: Option<Leave>,
+    /// The open file changed on disk while it had unsaved changes.
+    pub conflict: bool,
+}
+
+impl FileEditor {
+    /// No file open yet, with `editor` ready to show one.
+    pub fn new(editor: Entity<EditorState>) -> Self {
+        Self {
+            open: None,
+            pending: None,
+            editor,
+            preview: false,
+            dirty: false,
+            text: String::new(),
+            leave: None,
+            conflict: false,
+        }
+    }
+}
+
 /// What to do once unsaved changes are saved or thrown away.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Leave {
@@ -206,14 +238,14 @@ impl RunoApp {
             FileKind::Markdown => "markdown",
             _ => "text",
         };
-        self.file_editor.update(cx, |e, cx| {
+        self.file.editor.update(cx, |e, cx| {
             e.set_highlighter(language, cx);
             e.set_value(text.clone(), window, cx);
         });
         // New or empty files open straight into the editor.
-        self.file_preview =
+        self.file.preview =
             !text.trim().is_empty() || kind == FileKind::Image || kind == FileKind::Pdf;
-        self.file_preview &= matches!(
+        self.file.preview &= matches!(
             kind,
             FileKind::Markdown
                 | FileKind::Csv(_)
@@ -221,10 +253,10 @@ impl RunoApp {
                 | FileKind::Pdf
                 | FileKind::Mermaid
         );
-        self.file_dirty = false;
-        self.file_leave = None;
-        self.file_conflict = false;
-        self.open_file = Some(OpenFile {
+        self.file.dirty = false;
+        self.file.leave = None;
+        self.file.conflict = false;
+        self.file.open = Some(OpenFile {
             path: path.to_string(),
             modified: modified(&abs),
             abs,
@@ -239,27 +271,27 @@ impl RunoApp {
 
     /// Open `path`, or ask first when the open file has unsaved changes.
     pub(crate) fn open_or_ask(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let same = self.open_file.as_ref().is_some_and(|f| f.path == path);
-        if self.file_dirty && !same {
-            self.file_leave = Some(Leave::Open(path.to_string()));
+        let same = self.file.open.as_ref().is_some_and(|f| f.path == path);
+        if self.file.dirty && !same {
+            self.file.leave = Some(Leave::Open(path.to_string()));
             cx.notify();
             return;
         }
-        if !same || !self.file_dirty {
+        if !same || !self.file.dirty {
             self.open_file(path, window, cx);
         }
     }
 
     /// Close the open file, or ask first when it has unsaved changes.
     pub(crate) fn close_file(&mut self, wide: bool, force: bool) {
-        if self.file_dirty && !force {
-            self.file_leave = Some(Leave::Close(wide));
+        if self.file.dirty && !force {
+            self.file.leave = Some(Leave::Close(wide));
             return;
         }
-        self.open_file = None;
-        self.file_dirty = false;
-        self.file_leave = None;
-        self.file_conflict = false;
+        self.file.open = None;
+        self.file.dirty = false;
+        self.file.leave = None;
+        self.file.conflict = false;
         if wide {
             self.view = self.editor_back;
         }
@@ -267,17 +299,17 @@ impl RunoApp {
 
     /// Finish what was waiting on unsaved changes: save them first, or throw them away.
     fn leave_file(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(leave) = self.file_leave.take() else {
+        let Some(leave) = self.file.leave.take() else {
             return;
         };
         if save {
             self.save_file(cx);
-            if self.file_dirty {
+            if self.file.dirty {
                 // Saving failed or found a conflict; stay on the file.
                 return;
             }
         }
-        self.file_dirty = false;
+        self.file.dirty = false;
         match leave {
             Leave::Open(path) => self.open_file(&path, window, cx),
             Leave::Close(wide) => self.close_file(wide, true),
@@ -287,47 +319,49 @@ impl RunoApp {
     /// Notice the open file changing on disk: reload it when there are no edits, or
     /// flag the conflict when there are. Called from the background tick.
     pub(crate) fn watch_open_file(&mut self) {
-        let Some(file) = self.open_file.as_ref() else {
+        let Some(file) = self.file.open.as_ref() else {
             return;
         };
-        if self.file_conflict || !changed_on_disk(file) {
+        if self.file.conflict || !changed_on_disk(file) {
             return;
         }
-        if self.file_dirty {
-            self.file_conflict = true;
+        if self.file.dirty {
+            self.file.conflict = true;
         } else {
-            self.pending_file = Some(file.path.clone());
+            self.file.pending = Some(file.path.clone());
         }
     }
 
     /// Keep unsaved edits when switching sessions, to come back to later.
     pub(crate) fn stash_open_file(&mut self, session: u64) {
-        if let Some(file) = self.open_file.take() {
-            if self.file_dirty {
-                self.unsaved.insert(session, (file, self.file_text.clone()));
+        if let Some(file) = self.file.open.take() {
+            if self.file.dirty {
+                self.unsaved.insert(session, (file, self.file.text.clone()));
             }
         }
-        self.file_dirty = false;
-        self.file_leave = None;
-        self.file_conflict = false;
+        self.file.dirty = false;
+        self.file.leave = None;
+        self.file.conflict = false;
     }
 
     /// Bring back a session's unsaved edits; called from render.
     pub(crate) fn restore_open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.selected.filter(|_| self.open_file.is_none()) else {
+        let Some(id) = self.selected.filter(|_| self.file.open.is_none()) else {
             return;
         };
         let Some((file, text)) = self.unsaved.remove(&id) else {
             return;
         };
         self.open_file(&file.path, window, cx);
-        self.file_editor
+        self.file
+            .editor
             .update(cx, |e, cx| e.set_value(text.clone(), window, cx));
-        self.file_text = text;
-        self.file_dirty = self
-            .open_file
+        self.file.text = text;
+        self.file.dirty = self
+            .file
+            .open
             .as_ref()
-            .is_some_and(|f| f.saved != self.file_text);
+            .is_some_and(|f| f.saved != self.file.text);
         self.info = Some((
             format!("Your unsaved changes to {} are back.", file.path),
             std::time::Instant::now(),
@@ -341,18 +375,18 @@ impl RunoApp {
     /// Save the editor's text. Unless `overwrite`, a file changed on disk since it was
     /// opened is not overwritten; the conflict is shown instead.
     pub(crate) fn save_file_as(&mut self, overwrite: bool, cx: &mut Context<Self>) {
-        let Some(file) = self.open_file.as_mut() else {
+        let Some(file) = self.file.open.as_mut() else {
             return;
         };
-        if file.read_only || !self.file_dirty {
+        if file.read_only || !self.file.dirty {
             return;
         }
         if !overwrite && changed_on_disk(file) {
-            self.file_conflict = true;
+            self.file.conflict = true;
             cx.notify();
             return;
         }
-        let text = self.file_editor.read(cx).value().to_string();
+        let text = self.file.editor.read(cx).value().to_string();
         if let Some(parent) = file.abs.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -361,8 +395,8 @@ impl RunoApp {
                 file.saved = text;
                 file.size = file.saved.len() as u64;
                 file.modified = modified(&file.abs);
-                self.file_dirty = false;
-                self.file_conflict = false;
+                self.file.dirty = false;
+                self.file.conflict = false;
                 let path = file.path.clone();
                 if let Some(id) = self.selected {
                     self.state.log(id, format!("Edited {path}"));
@@ -380,18 +414,18 @@ impl RunoApp {
 
     /// Open a config file (absolute path) in the main-area editor, from Settings.
     pub(crate) fn edit_path(&mut self, path: &Path) {
-        self.pending_file = Some(path.display().to_string());
+        self.file.pending = Some(path.display().to_string());
         self.editor_back = self.view;
         self.view = View::Editor;
     }
 
     pub(crate) fn file_changed(&mut self, cx: &mut Context<Self>) {
-        if let Some(file) = &self.open_file {
-            let value = self.file_editor.read(cx).value();
-            self.file_dirty = value.as_ref() != file.saved;
+        if let Some(file) = &self.file.open {
+            let value = self.file.editor.read(cx).value();
+            self.file.dirty = value.as_ref() != file.saved;
             // Kept so a session switch can hold on to the edits.
-            if self.file_dirty {
-                self.file_text = value.to_string();
+            if self.file.dirty {
+                self.file.text = value.to_string();
             }
         }
     }
@@ -405,7 +439,8 @@ impl RunoApp {
             .unwrap_or(&file.path)
             .to_string();
         let (text, buttons): (String, Vec<(&'static str, &'static str, bool)>) = if self
-            .file_conflict
+            .file
+            .conflict
         {
             (
                 format!("{name} changed on disk while you were editing it."),
@@ -414,7 +449,7 @@ impl RunoApp {
                     ("file-reload", "Use the disk version", false),
                 ],
             )
-        } else if self.file_leave.is_some() {
+        } else if self.file.leave.is_some() {
             (
                 format!("Save your changes to {name}?"),
                 vec![
@@ -461,16 +496,16 @@ impl RunoApp {
                         match id {
                             "file-overwrite" => this.save_file_as(true, cx),
                             "file-reload" => {
-                                this.file_conflict = false;
-                                this.file_dirty = false;
-                                if let Some(path) = this.open_file.as_ref().map(|f| f.path.clone())
+                                this.file.conflict = false;
+                                this.file.dirty = false;
+                                if let Some(path) = this.file.open.as_ref().map(|f| f.path.clone())
                                 {
                                     this.open_file(&path, window, cx);
                                 }
                             }
                             "file-leave-save" => this.leave_file(true, window, cx),
                             "file-leave-discard" => this.leave_file(false, window, cx),
-                            _ => this.file_leave = None,
+                            _ => this.file.leave = None,
                         }
                         cx.notify();
                     })),
@@ -492,7 +527,7 @@ impl RunoApp {
 
     /// The open file: a header with its actions, then the viewer or editor.
     pub(crate) fn file_view(&self, wide: bool, cx: &mut Context<Self>) -> AnyElement {
-        let Some(file) = &self.open_file else {
+        let Some(file) = &self.file.open else {
             return div()
                 .flex_1()
                 .flex()
@@ -514,7 +549,7 @@ impl RunoApp {
             kind,
             FileKind::Markdown | FileKind::Csv(_) | FileKind::Mermaid
         );
-        let dirty = self.file_dirty;
+        let dirty = self.file.dirty;
         let toggle = |id: &'static str,
                       label: &'static str,
                       on: bool,
@@ -535,7 +570,7 @@ impl RunoApp {
                         .hover(|el| el.text_color(rgb(c_text())))
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.file_preview = preview;
+                    this.file.preview = preview;
                     cx.notify();
                 }))
                 .child(label)
@@ -557,12 +592,7 @@ impl RunoApp {
                     .truncate()
                     .font_family(self.mono_font.clone())
                     .text_size(px(12.5))
-                    .child(match std::env::var("HOME") {
-                        Ok(home) if !home.is_empty() && file.path.starts_with(&home) => {
-                            format!("~{}", &file.path[home.len()..])
-                        }
-                        _ => file.path.clone(),
-                    }),
+                    .child(crate::settings_ui::tilde(std::path::Path::new(&file.path))),
             )
             .when(!file.abs.exists(), |el| {
                 el.child(div().text_xs().text_color(rgb(c_muted())).child("New file"))
@@ -599,11 +629,11 @@ impl RunoApp {
                 el.child(toggle(
                     "file-preview",
                     "Preview",
-                    self.file_preview,
+                    self.file.preview,
                     true,
                     cx,
                 ))
-                .child(toggle("file-edit", "Edit", !self.file_preview, false, cx))
+                .child(toggle("file-edit", "Edit", !self.file.preview, false, cx))
             })
             .when(dirty, |el| {
                 el.child(
@@ -654,7 +684,7 @@ impl RunoApp {
                 .font_family(self.mono_font.clone())
                 .text_size(px(12.5))
                 .child(
-                    Editor::new(&self.file_editor)
+                    Editor::new(&self.file.editor)
                         .appearance(false)
                         .readonly(file.read_only)
                         .h_full(),
@@ -711,7 +741,7 @@ impl RunoApp {
                     )
                     .into_any_element()
             }
-            FileKind::Markdown if self.file_preview => div()
+            FileKind::Markdown if self.file.preview => div()
                 .id("file-md")
                 .flex_1()
                 .min_h_0()
@@ -722,13 +752,13 @@ impl RunoApp {
                 .child(
                     TextView::markdown(
                         SharedString::from(format!("md-{}", file.path)),
-                        self.file_editor.read(cx).value().to_string(),
+                        self.file.editor.read(cx).value().to_string(),
                     )
                     .selectable(true),
                 )
                 .into_any_element(),
-            FileKind::Csv(sep) if self.file_preview => {
-                let text = self.file_editor.read(cx).value().to_string();
+            FileKind::Csv(sep) if self.file.preview => {
+                let text = self.file.editor.read(cx).value().to_string();
                 let rows = parse_csv(&text, sep, 500);
                 let cols = rows.iter().map(Vec::len).max().unwrap_or(0).min(40);
                 let mut table = div().v_flex().min_w_full();
@@ -780,7 +810,7 @@ impl RunoApp {
                     )
                     .into_any_element()
             }
-            FileKind::Mermaid if self.file_preview => div()
+            FileKind::Mermaid if self.file.preview => div()
                 .id("file-mmd")
                 .flex_1()
                 .min_h_0()
@@ -808,7 +838,7 @@ impl RunoApp {
                         SharedString::from(format!("mmd-{}", file.path)),
                         format!(
                             "```mermaid\n{}\n```",
-                            self.file_editor.read(cx).value().replace("```", "'''")
+                            self.file.editor.read(cx).value().replace("```", "'''")
                         ),
                     )
                     .selectable(true),
@@ -825,7 +855,7 @@ impl RunoApp {
             .children(self.file_prompt(file, cx))
             .child(fade(
                 div().flex_1().min_h_0().v_flex().child(body),
-                SharedString::from(format!("file-{}-{}", file.path, self.file_preview)),
+                SharedString::from(format!("file-{}-{}", file.path, self.file.preview)),
                 180,
             ))
             .into_any_element()

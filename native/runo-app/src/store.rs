@@ -4,22 +4,30 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+// Saved enums take a value they don't know, as a newer Runo may have written it, as
+// their plainest variant (`serde(other)`), so going back to an older build keeps the
+// session instead of failing to read it.
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     User,
     Agent,
+    #[serde(other)]
     System,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Status {
-    #[default]
-    Idle,
     Working,
     Done,
     Failed,
     /// The person stopped the turn on purpose: not an error.
     Stopped,
+    /// Also any status saved by a newer Runo that this one doesn't know. Serde needs
+    /// the `other` variant last.
+    #[default]
+    #[serde(other)]
+    Idle,
 }
 
 impl Status {
@@ -88,7 +96,11 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
     /// In a Crew chat: a card drawn with the message, such as the threads it started.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "or_none"
+    )]
     pub crew: Option<crate::crew::Card>,
     /// User turns in a Crew chat: the thread whose message woke Crew, drawn as a chip
     /// naming the thread instead of as something the person typed.
@@ -119,6 +131,24 @@ impl Usage {
     pub fn context(&self) -> u64 {
         self.input + self.cached + self.output
     }
+
+    /// The context window to measure this against. Claude reports it only with a turn's
+    /// result, so the usage seen mid-turn has none: then the window `known` from the
+    /// session's other turns, else 200k, unless more than that is already in use, which
+    /// only a 1M window holds.
+    pub fn window_or(&self, known: u64) -> u64 {
+        match (self.window, known) {
+            (0, 0) if self.context() > 200_000 => 1_000_000,
+            (0, 0) => 200_000,
+            (0, known) => known,
+            (window, _) => window,
+        }
+    }
+}
+
+/// The largest context window any of `messages` reported, or 0.
+pub fn known_window(messages: &[Message]) -> u64 {
+    messages.iter().map(|m| m.usage.window).max().unwrap_or(0)
 }
 
 /// A multiple-choice question the agent asked (Claude's AskUserQuestion tool).
@@ -241,6 +271,15 @@ impl Session {
         self.switched_from = None;
         true
     }
+}
+
+/// An optional part of a session, or none when it can't be read (a newer Runo saved it
+/// in a shape this one doesn't know), so the rest of the session still loads.
+fn or_none<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 /// Steps as saved now, or as the plain labels sessions were saved with before.
@@ -381,10 +420,20 @@ pub struct Project {
     /// How many times in a row failing checks go back to the agent on their own; 0 asks.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub fix_rounds: u32,
+    /// What the person last let the checks run (`proof::fingerprint`), for sessions whose
+    /// mode asks before shell commands: they run on their own while it stays the same.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub checks_ok: String,
     /// How the person works here: `crew` through Crew's chat, empty directly in
     /// sessions. See `crew::is_crew`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub mode: String,
+    /// Let agent CLIs use settings committed in the repository that start programs
+    /// (Cursor and Gemini MCP servers, hooks, tool commands): Runo trusts the folder
+    /// for them and approves the servers up front. Off, Runo trusts a folder only when
+    /// it holds no such settings.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trust_agent_config: bool,
 }
 
 fn is_zero_u32(n: &u32) -> bool {
@@ -469,6 +518,10 @@ pub struct Session {
     /// so Undo can leave alone what changed after it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub snapshot: String,
+    /// The branch is a pull request from someone else's fork: its scripts are theirs, so
+    /// Runo never runs its checks on its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fork: bool,
     /// Told to the agent with the next prompt, such as that its last turn was undone.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub undo_note: String,
@@ -483,10 +536,18 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limits: Vec<String>,
     /// Proof of done for the last turn: its checks and the second opinion on it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "or_none"
+    )]
     pub proof: Option<crate::proof::Proof>,
     /// What Crew keeps for this session when it is one of Crew's threads.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "or_none"
+    )]
     pub crew: Option<crate::crew::ThreadInfo>,
 }
 
@@ -1021,15 +1082,15 @@ pub struct PlaybookRequest {
 /// Leave a request in `inbox`. Written under a temporary name and renamed, so the app
 /// never reads half a file.
 pub fn send_request(inbox: &Path, request: &PlaybookRequest) -> std::io::Result<()> {
-    std::fs::create_dir_all(inbox)?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let name = format!("{stamp}-{}", std::process::id());
-    let tmp = inbox.join(format!("{name}.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec(request)?)?;
-    std::fs::rename(tmp, inbox.join(format!("{name}.json")))
+    write_private(
+        &inbox.join(format!("{name}.json")),
+        &serde_json::to_vec(request)?,
+    )
 }
 
 /// Take every request waiting in `inbox`, oldest first, removing them.
@@ -1054,8 +1115,9 @@ pub fn take_requests(inbox: &Path) -> Vec<PlaybookRequest> {
 }
 
 /// Read a JSON file, or the default when it is missing. A file that exists but cannot be
-/// parsed is moved aside first, so the next save cannot silently overwrite the user's data.
-pub fn read_json_or_backup<T: Default + serde::de::DeserializeOwned>(path: &Path) -> T {
+/// parsed is moved aside first, so the next save cannot silently overwrite the user's data,
+/// and whatever of it can still be read is kept (see `salvage`).
+pub fn read_json_or_backup<T: Default + Serialize + serde::de::DeserializeOwned>(path: &Path) -> T {
     let Ok(text) = std::fs::read_to_string(path) else {
         return T::default();
     };
@@ -1063,56 +1125,243 @@ pub fn read_json_or_backup<T: Default + serde::de::DeserializeOwned>(path: &Path
         Ok(value) => value,
         Err(error) => {
             move_aside(path, &error.to_string());
-            T::default()
+            serde_json::from_str(&text)
+                .ok()
+                .and_then(salvage)
+                .unwrap_or_default()
         }
     }
 }
 
+/// The parts of a JSON object that can still be read as a `T`, the rest left at their
+/// defaults: one field saved in a shape this Runo doesn't know (by a newer one, or a
+/// hand edit) then costs that field, not the whole file. `None` when `value` isn't an
+/// object.
+pub fn salvage<T: Default + Serialize + serde::de::DeserializeOwned>(
+    value: serde_json::Value,
+) -> Option<T> {
+    let serde_json::Value::Object(fields) = value else {
+        return None;
+    };
+    let serde_json::Value::Object(mut kept) = serde_json::to_value(T::default()).ok()? else {
+        return None;
+    };
+    for (key, field) in fields {
+        let before = kept.insert(key.clone(), field);
+        if serde_json::from_value::<T>(serde_json::Value::Object(kept.clone())).is_err() {
+            match before {
+                Some(old) => kept.insert(key, old),
+                None => kept.remove(&key),
+            };
+        }
+    }
+    serde_json::from_value(serde_json::Value::Object(kept)).ok()
+}
+
 /// Move a file Runo can't read out of the way, keeping it next to where it was.
 pub fn move_aside(path: &Path, error: &str) {
+    set_aside(path, error, true);
+}
+
+/// Copy a file Runo could read only in part next to where it was, before it is saved over.
+pub fn keep_aside(path: &Path, error: &str) {
+    set_aside(path, error, false);
+}
+
+fn set_aside(path: &Path, error: &str, moved: bool) {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let backup = path.with_extension(format!("json.corrupt-{stamp}"));
-    let _ = std::fs::rename(path, &backup);
+    let done = if moved {
+        std::fs::rename(path, &backup).is_ok()
+    } else {
+        std::fs::copy(path, &backup).is_ok()
+    };
     crate::applog::error(
         "load",
         format!(
-            "could not read {} ({error}); moved it to {}",
+            "could not read all of {} ({error}); {} it to {}",
             path.display(),
+            match (moved, done) {
+                (true, true) => "moved",
+                (false, true) => "copied",
+                _ => "could not keep",
+            },
             backup.display()
         ),
     );
 }
 
-/// Write JSON atomically: to a temporary file first, then rename over the target.
+/// Write JSON atomically and privately (see `write_private`).
 pub fn write_json<T: Serialize>(path: &Path, value: &T) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     let written = serde_json::to_string_pretty(value)
         .map_err(|e| e.to_string())
-        .and_then(|text| {
-            let tmp = path.with_extension("json.tmp");
-            std::fs::write(&tmp, text)
-                .and_then(|_| std::fs::rename(tmp, path))
-                .map_err(|e| e.to_string())
-        });
+        .and_then(|text| write_private(path, text.as_bytes()).map_err(|e| e.to_string()));
     if let Err(e) = written {
         crate::applog::error_once("save", format!("could not save {}: {e}", path.display()));
     }
+}
+
+/// Write `data` to `path` so only the person can read it, without anyone seeing it half
+/// written: into a new temporary file created 0600 (`create_new`, so a link planted there
+/// fails rather than being followed), then renamed over the target, which replaces a link
+/// there instead of writing through it. A missing folder is made private (0700).
+pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        create_private_dir(parent)?;
+    }
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = path.with_file_name(format!(".{name}.{}-{n}.tmp", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let written = options.open(&tmp).and_then(|mut file| file.write_all(data));
+    match written.and_then(|_| std::fs::rename(&tmp, path)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// Make `dir` and any missing parents; the ones made here are private (0700).
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
+
+/// Make Runo's data folder private: 0700, and its files and request folders readable
+/// only by the person. Installs from before this kept it 0755 with 0644 files, which
+/// left settings (API keys, env lines), transcripts and approvals open to every
+/// account on the computer. On Windows the folder sits in the person's profile, which
+/// is theirs alone already.
+pub fn tighten_data_dir() {
+    let dir = data_dir();
+    let _ = create_private_dir(&dir);
+    #[cfg(unix)]
+    tighten(&dir, 1);
+}
+
+/// Folders 0700 and files 0600, `depth` levels down. Links are left alone: they may
+/// point anywhere.
+#[cfg(unix)]
+fn tighten(dir: &Path, depth: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let set = |path: &Path, mode: u32| {
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if !meta.file_type().is_symlink() && meta.permissions().mode() & 0o077 != 0 {
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+            }
+        }
+    };
+    set(dir, 0o700);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_file() {
+            set(&entry.path(), 0o600);
+        } else if kind.is_dir() && depth > 0 {
+            tighten(&entry.path(), depth - 1);
+        }
+    }
+}
+
+/// When this Runo is not the one that last ran on `root` (an update, or going back to an
+/// older build), keep a copy of the files it is about to rewrite: `state.json.prev` and
+/// `settings.json.prev`. When the last one was newer, every session file is copied too, to
+/// `backups/<version>-<time>/`, since an older build drops what it doesn't know as it saves.
+/// The version that ran is kept in `version`.
+pub fn keep_before_version_change(root: &Path, current: &str) {
+    let marker = root.join("version");
+    let last = std::fs::read_to_string(&marker).unwrap_or_default();
+    let last = last.trim();
+    if last == current {
+        return;
+    }
+    for name in ["state.json", "settings.json"] {
+        let from = root.join(name);
+        if from.is_file() {
+            let _ = std::fs::copy(&from, root.join(format!("{name}.prev")));
+        }
+    }
+    if crate::alerts::is_newer(last, current) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let backup = root.join("backups").join(format!("{last}-{stamp}"));
+        let copied = copy_saved_files(root, &backup);
+        crate::applog::warn(
+            "load",
+            format!(
+                "Runo {last} last used this data and this is {current}; copied {copied} files \
+                 to {} before saving over them",
+                backup.display()
+            ),
+        );
+    }
+    if std::fs::create_dir_all(root).is_ok() {
+        let _ = std::fs::write(&marker, current);
+    }
+}
+
+/// Copy `state.json`, `settings.json` and every `sessions/<id>/session.json` under `root`
+/// to the same places under `to`. Returns how many files were copied.
+fn copy_saved_files(root: &Path, to: &Path) -> usize {
+    let mut files = vec![PathBuf::from("state.json"), PathBuf::from("settings.json")];
+    if let Ok(entries) = std::fs::read_dir(root.join("sessions")) {
+        files.extend(entries.flatten().map(|e| {
+            Path::new("sessions")
+                .join(e.file_name())
+                .join("session.json")
+        }));
+    }
+    files
+        .into_iter()
+        .filter(|file| root.join(file).is_file())
+        .filter(|file| {
+            let target = to.join(file);
+            target
+                .parent()
+                .is_some_and(|dir| create_private_dir(dir).is_ok())
+                && std::fs::copy(root.join(file), target).is_ok()
+        })
+        .count()
+}
+
+/// The person's home folder: `$HOME`, else `%USERPROFILE%` (Windows sets only that).
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|h| !h.is_empty()))
+        .map(PathBuf::from)
 }
 
 /// Runo's data folder: `$RUNO_HOME`, else `~/.runo`.
 pub fn data_dir() -> PathBuf {
     std::env::var_os("RUNO_HOME")
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .map(|home| PathBuf::from(home).join(".runo"))
-        })
+        .or_else(|| home_dir().map(|home| home.join(".runo")))
         .unwrap_or_else(|| PathBuf::from(".runo"))
 }
 
@@ -1147,7 +1396,10 @@ impl State {
     pub fn load_from(path: &Path) -> Self {
         let root = path.parent().unwrap_or(Path::new("."));
         let mut state = match crate::persist::read(path) {
-            Ok((state, written)) => {
+            Ok((state, mut written)) => {
+                if let Some(error) = written.index_error.take() {
+                    keep_aside(path, &error);
+                }
                 crate::persist::seed(root, written);
                 state
             }
@@ -1330,6 +1582,32 @@ pub(crate) mod tests {
     use super::*;
 
     #[test]
+    fn context_is_measured_against_the_window_the_session_reported() {
+        let mid_turn = Usage {
+            input: 10,
+            cached: 290_000,
+            ..Usage::default()
+        };
+        // No window yet, but 300k in use: only a 1M window holds that, not "150%".
+        assert_eq!(mid_turn.window_or(0), 1_000_000);
+        // A window an earlier turn reported wins.
+        let mut done = Message::new(Role::Agent, "");
+        done.usage.window = 1_000_000;
+        let known = known_window(&[Message::new(Role::User, "go"), done]);
+        let small = Usage {
+            input: 50_000,
+            ..Usage::default()
+        };
+        assert_eq!(small.window_or(known), 1_000_000);
+        assert_eq!(small.window_or(0), 200_000);
+        let reported = Usage {
+            window: 272_000,
+            ..small
+        };
+        assert_eq!(reported.window_or(known), 272_000);
+    }
+
+    #[test]
     fn thread_messages_saved_as_playbooks_are_recognised() {
         let mut old = Message::new(Role::User, "Thread #41 (Refine Arcade) says: Ready.");
         old.playbook = "From Refine Arcade".into();
@@ -1420,6 +1698,30 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_old_open_data_folder_is_made_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let open = |p: &Path, m| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m));
+        let dir = temp("tighten");
+        std::fs::write(dir.join("settings.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.join("approvals")).unwrap();
+        std::fs::write(dir.join("approvals").join("1-1.json"), "{}").unwrap();
+        open(&dir, 0o755).unwrap();
+        open(&dir.join("settings.json"), 0o644).unwrap();
+        open(&dir.join("approvals"), 0o755).unwrap();
+        tighten(&dir, 1);
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("settings.json")), 0o600);
+        assert_eq!(mode(&dir.join("approvals")), 0o700);
+        assert_eq!(mode(&dir.join("approvals").join("1-1.json")), 0o600);
+        // New saves are private from the start.
+        write_json(&dir.join("state.json"), &serde_json::json!({ "a": 1 }));
+        assert_eq!(mode(&dir.join("state.json")), 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1642,6 +1944,157 @@ pub(crate) mod tests {
             notes_prompt(&notes),
             "Please address these review notes on your changes:\n\n1. `src/a.rs:12`: Name this better\n   On the line `+    let x = 1;`\n\n2. `b.css, line 3 of the old version (removed)`: Keep red here\n   On the line `−color: red;`\n"
         );
+    }
+
+    /// Sample state written to `dir` the way Runo writes it, and the first session's file.
+    fn written_sample(dir: &Path) -> (State, PathBuf) {
+        let mut state = State::sample();
+        crate::persist::write_all(dir, &mut state, &mut crate::persist::Written::default());
+        let file = crate::persist::session_dir(dir, state.sessions[0].id).join("session.json");
+        (state, file)
+    }
+
+    fn edit_json(path: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        edit(&mut value);
+        std::fs::write(path, value.to_string()).unwrap();
+    }
+
+    fn aside_copies(dir: &Path, prefix: &str) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
+            .count()
+    }
+
+    #[test]
+    fn a_session_from_a_newer_runo_still_loads() {
+        let dir = temp("newer-session");
+        let (state, file) = written_sample(&dir);
+        edit_json(&file, |v| {
+            v["status"] = "Paused".into();
+            v["something_new"] = serde_json::json!({ "a": 1 });
+            v["proof"] = serde_json::json!({ "shape": "from the future" });
+            let message = &mut v["messages"][1];
+            message["role"] = "Tool".into();
+            message["crew"] = serde_json::json!({ "Hologram": { "id": 1 } });
+            message["steps"] = serde_json::json!([
+                { "label": "Beamed up", "kind": "teleport", "state": "queued" }
+            ]);
+        });
+        let loaded = State::load_from(&dir.join("state.json"));
+        let session = loaded.session(state.sessions[0].id).expect("still listed");
+        assert!(session.status == Status::Idle);
+        assert!(session.proof.is_none());
+        let message = &session.messages[1];
+        assert_eq!(message.role, Role::System);
+        assert!(message.crew.is_none());
+        assert_eq!(message.steps[0].label, "Beamed up");
+        assert_eq!(message.steps[0].kind, crate::harness::ToolKind::Other);
+        assert_eq!(message.steps[0].state, StepState::Done);
+        assert!(file.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_session_with_a_field_it_cannot_read_keeps_the_rest() {
+        let dir = temp("salvage-session");
+        let (state, file) = written_sample(&dir);
+        let id = state.sessions[0].id;
+        edit_json(&file, |v| v["pinned"] = "very".into());
+        let loaded = State::load_from(&dir.join("state.json"));
+        let session = loaded.session(id).expect("kept in the sidebar");
+        assert_eq!(session.title, state.sessions[0].title);
+        // A session saved mid-turn also gets the "Interrupted" note on load.
+        let interrupted = usize::from(state.sessions[0].status == Status::Working);
+        assert_eq!(
+            session.messages.len(),
+            state.sessions[0].messages.len() + interrupted
+        );
+        assert!(!session.pinned);
+        assert_eq!(
+            aside_copies(file.parent().unwrap(), "session.json.corrupt-"),
+            1
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_index_read_in_part_keeps_its_projects_and_a_copy() {
+        let dir = temp("salvage-index");
+        let (state, _) = written_sample(&dir);
+        let path = dir.join("state.json");
+        edit_json(&path, |v| v["notes"] = "not a map".into());
+        let loaded = State::load_from(&path);
+        assert_eq!(loaded.projects.len(), state.projects.len());
+        assert_eq!(loaded.sessions.len(), state.sessions.len());
+        assert!(path.exists());
+        assert_eq!(aside_copies(&dir, "state.json.corrupt-"), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn salvage_keeps_what_reads() {
+        #[derive(Default, Serialize, Deserialize, PartialEq, Debug)]
+        struct Saved {
+            name: String,
+            count: u32,
+            #[serde(default)]
+            on: bool,
+        }
+        let value = serde_json::json!({ "name": "kept", "count": "many", "on": true, "new": 1 });
+        let saved: Saved = salvage(value).unwrap();
+        assert_eq!(
+            saved,
+            Saved {
+                name: "kept".into(),
+                count: 0,
+                on: true
+            }
+        );
+        assert!(salvage::<Saved>(serde_json::json!([1])).is_none());
+    }
+
+    #[test]
+    fn data_from_a_newer_runo_is_copied_before_it_is_saved_over() {
+        let dir = temp("version");
+        let (state, file) = written_sample(&dir);
+        std::fs::write(dir.join("settings.json"), "{}").unwrap();
+        std::fs::write(dir.join("version"), "9.9.9").unwrap();
+        keep_before_version_change(&dir, "0.5.9");
+        assert!(dir.join("state.json.prev").is_file());
+        assert!(dir.join("settings.json.prev").is_file());
+        let backups: Vec<PathBuf> = std::fs::read_dir(dir.join("backups"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert!(backups[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("9.9.9-"));
+        let id = state.sessions[0].id.to_string();
+        let copy = backups[0].join("sessions").join(id).join("session.json");
+        assert_eq!(
+            std::fs::read_to_string(copy).unwrap(),
+            std::fs::read_to_string(&file).unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("version")).unwrap(),
+            "0.5.9"
+        );
+        // The same version again changes nothing; an update keeps only the .prev copies.
+        std::fs::remove_file(dir.join("state.json.prev")).unwrap();
+        keep_before_version_change(&dir, "0.5.9");
+        assert!(!dir.join("state.json.prev").exists());
+        keep_before_version_change(&dir, "0.6.0");
+        assert!(dir.join("state.json.prev").is_file());
+        assert_eq!(std::fs::read_dir(dir.join("backups")).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

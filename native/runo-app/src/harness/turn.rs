@@ -167,8 +167,8 @@ mod tests {
     #[test]
     fn a_plain_turn_passes_lines_through_and_logs_them_whole() {
         let dir = root("plain");
-        // Grok prints plain text.
-        let mut turn = Turn::start_in(Some(&dir), 4, "grok", "/w", 2, "");
+        // Gemini prints plain text when its help lists no stream-json.
+        let mut turn = Turn::start_in(Some(&dir), 4, "gemini", "/w", 2, "");
         assert!(turn.plain());
         assert_eq!(turn.feed("one"), [AgentEvent::Text("one".into())]);
         assert_eq!(turn.feed("two"), [AgentEvent::Text("two".into())]);

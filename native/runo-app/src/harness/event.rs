@@ -25,6 +25,9 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         output: String,
     },
+    /// A step a subagent took, under the running call that started it (`parent`), such as
+    /// "Read src/main.rs". Only the latest is kept, to show what each helper is doing.
+    SubStep { parent: String, label: String },
     /// The run's summary line, such as "12s · 3 turns · $0.04".
     Summary(String),
     /// The run failed; the CLI's own explanation.
@@ -69,7 +72,9 @@ pub enum ToolKind {
     Plan,
     Question,
     Think,
+    /// Also any kind saved by a newer Runo that this one doesn't know.
     #[default]
+    #[serde(other)]
     Other,
 }
 
@@ -111,9 +116,12 @@ impl ToolKind {
 #[serde(rename_all = "snake_case")]
 pub enum StepState {
     Running,
-    #[default]
-    Done,
     Failed,
+    /// Also any state saved by a newer Runo that this one doesn't know. Serde needs
+    /// the `other` variant last.
+    #[default]
+    #[serde(other)]
+    Done,
 }
 
 impl StepState {
@@ -143,6 +151,9 @@ pub struct ToolStep {
     /// When the app saw the call start, to time it.
     #[serde(skip)]
     pub started: Option<Instant>,
+    /// For a subagent's call: the latest step the subagent took, while it runs.
+    #[serde(skip)]
+    pub latest: String,
 }
 
 fn is_zero(n: &u64) -> bool {

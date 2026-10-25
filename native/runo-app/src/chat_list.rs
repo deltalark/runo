@@ -297,7 +297,10 @@ impl RunoApp {
         if self.pending_start.contains_key(&id) {
             rows.push((ChatRow::Pending, 0));
         } else if working {
-            rows.push((ChatRow::Working, 0));
+            rows.push((
+                ChatRow::Working,
+                self.working_version(id, &session.messages),
+            ));
         } else if self
             .finished
             .get(&id)
@@ -469,17 +472,14 @@ impl RunoApp {
                     )
                     .into_any_element()
             }
-            ChatRow::Working => {
-                let started = self.turns.get(&id).map(|t| t.started);
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .text_size(px(13.))
-                    .child(working::running(working::doing(&session.messages), started))
-                    .child(self.arcade_chip(cx))
-                    .into_any_element()
-            }
+            ChatRow::Working => div()
+                .flex()
+                .items_start()
+                .gap_3()
+                .text_size(px(13.))
+                .child(self.working_line(id, &session.messages, cx))
+                .child(self.arcade_chip(cx))
+                .into_any_element(),
             ChatRow::Finished => div()
                 .text_size(px(13.))
                 .child(self.finished_row(id)?)

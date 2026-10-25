@@ -343,6 +343,35 @@ pub struct Voice {
     pub at: String,
     /// A review rather than a conversation comment.
     pub review: bool,
+    /// Someone the person works with (see `trusted_author`): only they wake a thread.
+    pub trusted: bool,
+}
+
+/// Whether GitHub's author association says the commenter is the repository's owner, a
+/// member of its organization or a collaborator on it.
+pub fn trusted_association(association: &str) -> bool {
+    matches!(association, "OWNER" | "MEMBER" | "COLLABORATOR")
+}
+
+/// Whether a comment by `login` (with GitHub's `association`) may steer an agent: from the
+/// repository's owner, members or collaborators, the pull request's own author (the
+/// account the person's agent pushes with), or an app installed on the repository (a
+/// `[bot]` account can only comment where it was installed). Anyone else on a public
+/// repository can comment too, and their words must not become an agent's instructions.
+pub fn trusted_author(login: &str, association: &str, pr_author: &str) -> bool {
+    trusted_association(association)
+        || (!login.is_empty() && login == pr_author)
+        || login.ends_with("[bot]")
+}
+
+/// One piece of review feedback for the agent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Feedback {
+    pub author: String,
+    /// What it is: "review (changes requested)", "comment" or "comment on `src/a.rs:3`".
+    pub kind: String,
+    pub body: String,
+    pub trusted: bool,
 }
 
 impl PrStatus {
@@ -508,8 +537,10 @@ pub fn parse_pr_status(json: &str) -> Option<PrStatus> {
         if matches!(state.as_str(), "COMMENTED" | "CHANGES_REQUESTED")
             || (state == "APPROVED" && said)
         {
+            let author = s(&r["author"]["login"]);
             status.voices.push(Voice {
-                author: s(&r["author"]["login"]),
+                trusted: trusted_author(&author, &s(&r["authorAssociation"]), &status.author),
+                author,
                 at: s(&r["submittedAt"]),
                 review: true,
             });
@@ -517,8 +548,10 @@ pub fn parse_pr_status(json: &str) -> Option<PrStatus> {
     }
     for c in v["comments"].as_array().into_iter().flatten() {
         if !s(&c["body"]).trim().is_empty() {
+            let author = s(&c["author"]["login"]);
             status.voices.push(Voice {
-                author: s(&c["author"]["login"]),
+                trusted: trusted_author(&author, &s(&c["authorAssociation"]), &status.author),
+                author,
                 at: s(&c["createdAt"]),
                 review: false,
             });
@@ -536,27 +569,42 @@ pub fn run_id(url: &str) -> Option<u64> {
         .ok()
 }
 
-/// Review feedback on a pull request, as a list for the agent: reviews and conversation
-/// comments from `gh pr view --json reviews,comments`, and line comments from
-/// `gh api repos/{owner}/{repo}/pulls/N/comments`.
-pub fn review_feedback(view: &str, line_comments: &str) -> Vec<String> {
+/// Review feedback on a pull request, for the agent: reviews and conversation comments
+/// from `gh pr view --json reviews,comments`, and line comments from
+/// `gh api repos/{owner}/{repo}/pulls/{n}/comments`, each marked trusted or not for a
+/// pull request opened by `pr_author`.
+pub fn review_feedback(view: &str, line_comments: &str, pr_author: &str) -> Vec<Feedback> {
     let mut out = Vec::new();
+    let mut add = |author: String, association: String, kind: String, body: &str| {
+        out.push(Feedback {
+            trusted: trusted_author(&author, &association, pr_author),
+            author,
+            kind,
+            body: body.trim().to_string(),
+        });
+    };
     let v: Value = serde_json::from_str(view).unwrap_or_default();
     for r in v["reviews"].as_array().into_iter().flatten() {
         let body = s(&r["body"]);
         if r["state"] != "APPROVED" && !body.trim().is_empty() {
-            out.push(format!(
-                "{} ({}): {}",
+            let state = s(&r["state"]).to_lowercase().replace('_', " ");
+            add(
                 s(&r["author"]["login"]),
-                s(&r["state"]).to_lowercase().replace('_', " "),
-                body.trim()
-            ));
+                s(&r["authorAssociation"]),
+                format!("review ({state})"),
+                &body,
+            );
         }
     }
     for c in v["comments"].as_array().into_iter().flatten() {
         let body = s(&c["body"]);
         if !body.trim().is_empty() {
-            out.push(format!("{}: {}", s(&c["author"]["login"]), body.trim()));
+            add(
+                s(&c["author"]["login"]),
+                s(&c["authorAssociation"]),
+                "comment".into(),
+                &body,
+            );
         }
     }
     for c in items(line_comments) {
@@ -569,11 +617,12 @@ pub fn review_feedback(view: &str, line_comments: &str) -> Vec<String> {
             Some(n) => format!("{}:{n}", s(&c["path"])),
             None => s(&c["path"]),
         };
-        out.push(format!(
-            "{} on `{place}`: {}",
+        add(
             s(&c["user"]["login"]),
-            body.trim()
-        ));
+            s(&c["author_association"]),
+            format!("comment on `{place}`"),
+            &body,
+        );
     }
     out
 }
@@ -1572,8 +1621,8 @@ mod tests {
               {"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/o/r/actions/runs/777/job/9"},
               {"__typename":"CheckRun","name":"lint","status":"IN_PROGRESS","conclusion":"","detailsUrl":""},
               {"__typename":"StatusContext","context":"ci/legacy","state":"ERROR","targetUrl":"https://ci.example/1"}],
-            "reviews":[{"author":{"login":"ann"},"state":"CHANGES_REQUESTED","body":"Please rename","submittedAt":"2026-10-25T10:00:00Z"},{"author":{"login":"bo"},"state":"APPROVED","body":"ok","submittedAt":"2026-10-25T10:01:00Z"},{"author":{"login":"di"},"state":"COMMENTED","body":"","submittedAt":"2026-10-25T10:02:00Z"},{"author":{"login":"ed"},"state":"APPROVED","body":"","submittedAt":"2026-10-25T10:03:00Z"}],
-            "comments":[{"author":{"login":"cy"},"body":"Also docs?","createdAt":"2026-10-25T10:04:00Z"}],
+            "reviews":[{"author":{"login":"ann"},"authorAssociation":"MEMBER","state":"CHANGES_REQUESTED","body":"Please rename","submittedAt":"2026-10-25T10:00:00Z"},{"author":{"login":"bo"},"authorAssociation":"OWNER","state":"APPROVED","body":"ok","submittedAt":"2026-10-25T10:01:00Z"},{"author":{"login":"di"},"authorAssociation":"COLLABORATOR","state":"COMMENTED","body":"","submittedAt":"2026-10-25T10:02:00Z"},{"author":{"login":"ed"},"state":"APPROVED","body":"","submittedAt":"2026-10-25T10:03:00Z"}],
+            "comments":[{"author":{"login":"cy"},"authorAssociation":"NONE","body":"Also docs?","createdAt":"2026-10-25T10:04:00Z"}],
             "headRefName":"runo/x","headRefOid":"abc123","baseRefName":"main","author":{"login":"me"},"mergeable":"CONFLICTING"}"#;
         let pr = parse_pr_status(json).unwrap();
         assert_eq!(
@@ -1594,34 +1643,42 @@ mod tests {
             ("me", "CONFLICTING")
         );
         // A line-comment review counts though its body is empty; a bare approval doesn't.
-        let voices: Vec<(&str, &str, bool)> = pr
+        // Only the repository's people are trusted; a passer-by's comment isn't.
+        let voices: Vec<(&str, &str, bool, bool)> = pr
             .voices
             .iter()
-            .map(|v| (v.author.as_str(), v.at.as_str(), v.review))
+            .map(|v| (v.author.as_str(), v.at.as_str(), v.review, v.trusted))
             .collect();
         assert_eq!(
             voices,
             [
-                ("ann", "2026-10-25T10:00:00Z", true),
-                ("bo", "2026-10-25T10:01:00Z", true),
-                ("di", "2026-10-25T10:02:00Z", true),
-                ("cy", "2026-10-25T10:04:00Z", false),
+                ("ann", "2026-10-25T10:00:00Z", true, true),
+                ("bo", "2026-10-25T10:01:00Z", true, true),
+                ("di", "2026-10-25T10:02:00Z", true, true),
+                ("cy", "2026-10-25T10:04:00Z", false, false),
             ]
         );
         assert!(parse_pr_status("no pull requests found").is_none());
         assert_eq!(run_id("https://github.com/o/r/actions/runs/42"), Some(42));
         assert_eq!(run_id("https://ci.example/1"), None);
 
-        let lines = r#"[{"path":"src/a.rs","line":3,"user":{"login":"ann"},"body":"Use a match"},{"path":"b.rs","line":null,"original_line":7,"user":{"login":"bo"},"body":" "}]"#;
-        let feedback = review_feedback(json, lines);
+        let lines = r#"[{"path":"src/a.rs","line":3,"user":{"login":"ann"},"author_association":"MEMBER","body":"Use a match"},{"path":"b.rs","line":null,"original_line":7,"user":{"login":"bo"},"body":" "},{"path":"c.rs","line":1,"user":{"login":"me"},"author_association":"NONE","body":"Note to self"}]"#;
+        let feedback: Vec<(String, String, String, bool)> = review_feedback(json, lines, "me")
+            .into_iter()
+            .map(|f| (f.author, f.kind, f.body, f.trusted))
+            .collect();
+        let f = |a: &str, k: &str, b: &str, t| (a.into(), k.into(), b.into(), t);
         assert_eq!(
             feedback,
             [
-                "ann (changes requested): Please rename",
-                "cy: Also docs?",
-                "ann on `src/a.rs:3`: Use a match",
+                f("ann", "review (changes requested)", "Please rename", true),
+                f("cy", "comment", "Also docs?", false),
+                f("ann", "comment on `src/a.rs:3`", "Use a match", true),
+                f("me", "comment on `c.rs:1`", "Note to self", true),
             ]
         );
+        assert!(trusted_author("renovate[bot]", "NONE", "me"));
+        assert!(!trusted_author("", "", ""));
     }
 
     #[test]

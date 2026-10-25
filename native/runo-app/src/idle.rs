@@ -200,9 +200,9 @@ impl RunoApp {
         }
         let second = clock.second.due(Duration::from_secs(1));
         if second {
-            let before = (self.file_conflict, self.pending_file.is_some());
+            let before = (self.file.conflict, self.file.pending.is_some());
             self.watch_open_file();
-            if before != (self.file_conflict, self.pending_file.is_some()) {
+            if before != (self.file.conflict, self.file.pending.is_some()) {
                 cx.notify();
             }
         }
@@ -349,7 +349,7 @@ impl RunoApp {
     /// Run the Browser tab's frame pump at display rate while a page is on screen, slowly
     /// while a browser runs but no page shows (for its notes), and not at all without one.
     pub(crate) fn ensure_browser_pump(&mut self, cx: &mut Context<Self>) {
-        if self.browser.is_none() {
+        if self.browser.engine.is_none() {
             self.idle.browser_pump = None;
             return;
         }
@@ -372,7 +372,7 @@ impl RunoApp {
             let Ok(keep) = this.update(cx, |this, cx| {
                 this.pump_browser(cx);
                 // A page came on screen or went: the next pump runs at the other pace.
-                let stay = this.browser.is_some() && this.browser_page_shown(cx) == fast;
+                let stay = this.browser.engine.is_some() && this.browser_page_shown(cx) == fast;
                 if !stay {
                     this.idle.browser_pump = None;
                     this.ensure_browser_pump(cx);

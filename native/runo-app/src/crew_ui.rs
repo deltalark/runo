@@ -177,10 +177,10 @@ impl RunoApp {
 
     /// Context that goes ahead of a turn's prompt, unseen in the chat: Crew's rules and
     /// what changed in its threads, or a thread's rules on its first turn.
-    pub(crate) fn crew_preface(&mut self, id: u64) -> Option<String> {
+    pub(crate) fn crew_preface(&mut self, id: u64, prompt: &str) -> Option<String> {
         let s = self.state.session(id)?;
         if s.canvas == crew::CANVAS {
-            return self.chat_preface(id);
+            return self.chat_preface(id, prompt);
         }
         if s.crew.is_none() || s.has_conversation() {
             return None;
@@ -189,7 +189,7 @@ impl RunoApp {
         Some(crew::thread_rules(tools))
     }
 
-    fn chat_preface(&mut self, id: u64) -> Option<String> {
+    fn chat_preface(&mut self, id: u64, prompt: &str) -> Option<String> {
         let s = self.state.session(id)?;
         let pid = s.project_id;
         let first = !s.has_conversation();
@@ -259,7 +259,7 @@ impl RunoApp {
         if let Some(s) = self.state.session_mut(id) {
             s.canvas_context = board.join("\n");
         }
-        (!parts.is_empty()).then(|| format!("{}\n\n## The person says", parts.join("\n\n")))
+        chat_heading(parts, prompt)
     }
 
     /// A message typed in a Crew chat: an @thread goes straight to that thread and the
@@ -589,8 +589,24 @@ impl RunoApp {
                         .session(thread)
                         .map(|t| t.title.clone())
                         .unwrap_or_default();
+                    // A message to a thread waiting on a decision answers it: Crew's own
+                    // answer, which the thread's card shows.
+                    let answered = self
+                        .state
+                        .session_mut(thread)
+                        .and_then(|s| s.crew.as_mut())
+                        .is_some_and(|info| {
+                            crew::answer_by_crew(info, &text, crate::workspace::unix_now())
+                        });
                     self.message_thread(thread, text, Vec::new(), cx);
-                    notes.push((format!("Sent a message to {title}."), thread));
+                    notes.push((
+                        if answered {
+                            format!("Answered {title}'s decision.")
+                        } else {
+                            format!("Sent a message to {title}.")
+                        },
+                        thread,
+                    ));
                 }
                 Action::ReadThread { thread } => {
                     let reply = self.state.session(thread).map(|t| {
@@ -798,6 +814,8 @@ impl RunoApp {
         if events.is_empty() {
             return;
         }
+        // Messages and decisions wake Crew once per thread, after every event is applied.
+        let mut wakes = Vec::new();
         for event in events {
             let Some(s) = self.state.session_mut(event.thread) else {
                 continue;
@@ -814,10 +832,17 @@ impl RunoApp {
             let chat = self.crew_chat(pid).map(|c| c.id);
             match (&event.kind, chat) {
                 (crew::EventKind::Message { text }, Some(chat)) => {
-                    let text = crew::wake_text(event.thread, &title, text);
-                    self.wake_crew(chat, event.thread, text, cx);
+                    let wake = crew::Wake::Message(text.clone());
+                    wakes.push((chat, event.thread, title, wake));
                 }
                 (crew::EventKind::Decision(d), Some(chat)) if changed => {
+                    // Crew sees it too and answers it if it can; the person still may.
+                    wakes.push((
+                        chat,
+                        event.thread,
+                        title.clone(),
+                        crew::Wake::Decision(d.clone()),
+                    ));
                     self.crew_note(
                         chat,
                         Role::System,
@@ -843,6 +868,9 @@ impl RunoApp {
                 }
                 _ => {}
             }
+        }
+        for (chat, thread, text) in crew::wake_prompts(wakes) {
+            self.wake_crew(chat, thread, text, cx);
         }
         self.save();
         cx.notify();
@@ -883,6 +911,16 @@ impl RunoApp {
         }
         self.save();
     }
+}
+
+/// The context ahead of Crew's prompt, ending with a heading for what the prompt says: the
+/// person's words, or a thread's under a heading of its own.
+fn chat_heading(parts: Vec<String>, prompt: &str) -> Option<String> {
+    let heading = crew::prompt_heading(prompt);
+    if parts.is_empty() {
+        return crew::parse_wake(prompt).is_some().then_some(heading);
+    }
+    Some(format!("{}\n\n{heading}", parts.join("\n\n")))
 }
 
 /// Mark what a thread's message to Crew became, given the conversation was `before`
@@ -956,6 +994,23 @@ mod tests {
         assert!(m.playbook.is_empty());
         assert_eq!(m.thread_origin(|_| false), Some(41));
         assert_eq!(chat.messages[0].from_thread, None);
+    }
+
+    #[test]
+    fn crews_prompt_heads_a_threads_words_apart_from_the_persons() {
+        let wake = crew::wake_text(3, "Docs", "Ready.");
+        let context = || vec!["## Threads\n#3 Docs: working".to_string()];
+        let person = chat_heading(context(), "Ship it").unwrap();
+        assert!(person.ends_with("\n\n## The person says"));
+        let thread = chat_heading(context(), &wake).unwrap();
+        assert!(thread.ends_with("\n\n## From thread #3 (not the person)"));
+        assert!(!thread.contains("The person says"));
+        // With nothing else to say, a thread's words still get their heading.
+        assert_eq!(
+            chat_heading(Vec::new(), &wake).as_deref(),
+            Some("## From thread #3 (not the person)")
+        );
+        assert_eq!(chat_heading(Vec::new(), "Ship it"), None);
     }
 
     #[test]

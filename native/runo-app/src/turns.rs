@@ -81,6 +81,8 @@ pub(crate) struct Starting {
     attached: Vec<String>,
     dir: String,
     thread: u64,
+    /// The person trusts the project's agent settings (`Project::trust_agent_config`).
+    trusted: bool,
 }
 
 impl RunoApp {
@@ -158,13 +160,19 @@ impl RunoApp {
             return;
         }
         // Crew's rules and what changed in its threads, or a thread's rules: unseen context.
-        let preface = self.crew_preface(id);
+        let preface = self.crew_preface(id, &prompt);
         // Notes the person shared with agents open each new conversation in the project.
         let notes = self
             .state
             .session(id)
             .filter(|s| !s.has_conversation())
             .and_then(|s| self.shared_notes(s.project_id));
+        // Settings the repository brings run only when the person trusts the project's.
+        let trusted = self
+            .state
+            .session(id)
+            .and_then(|s| self.state.projects.iter().find(|p| p.id == s.project_id))
+            .is_some_and(|p| p.trust_agent_config);
         // A playbook's own session names it on its first message, however late that starts.
         let playbook = self
             .state
@@ -198,6 +206,9 @@ impl RunoApp {
         }
         let has = session.has_conversation();
         let provider = session.provider.clone();
+        if !agent::can_resume(&provider, &session.agent_session) {
+            session.agent_session.clear();
+        }
         // Resume the CLI's own conversation when its id is known (Claude Code and Codex can
         // also pick up the newest one in the folder). Otherwise the history goes in the prompt.
         let native = has
@@ -311,6 +322,7 @@ impl RunoApp {
                 attached,
                 dir: dir.clone(),
                 thread,
+                trusted,
             },
         );
         // Counted as it starts, so turns running side by side can't pass the limit.
@@ -390,6 +402,7 @@ impl RunoApp {
             attached,
             dir,
             thread,
+            trusted,
             ..
         } = start;
         crate::connections::prepare_run(
@@ -413,6 +426,7 @@ impl RunoApp {
             memory: exe.as_deref().map(|exe| (exe, dir.as_str())),
             local: sandbox.is_none(),
             thread,
+            trusted,
         };
         let result = agent::run_agent(
             Target::Session(id),
@@ -1114,37 +1128,49 @@ impl RunoApp {
         self.start_turn(id, prompt, Vec::new(), &opts);
     }
 
-    /// Always allow these tools for this agent (Settings > agent > Allowed tools).
-    pub(crate) fn allow_always(&mut self, tools: &[String], cx: &mut Context<Self>) {
-        let Some(provider) = self.current().map(|s| s.provider.clone()) else {
-            return;
+    /// Always allow these tools for this agent in the current session's project. Returns
+    /// the ones that can't be saved (see `allow_tools_for`), to allow once instead.
+    pub(crate) fn allow_always(&mut self, tools: &[String], cx: &mut Context<Self>) -> Vec<String> {
+        let Some((provider, project)) = self.current().map(|s| (s.provider.clone(), s.project_id))
+        else {
+            return tools.to_vec();
         };
-        self.allow_tools_for(&provider, tools, cx);
+        self.allow_tools_for(&provider, project, tools, cx)
     }
 
+    /// Save rules that never ask for this agent, in `project` only. A bare `Bash` (any
+    /// command at all) is never saved: it is returned with whatever else couldn't be, for
+    /// the caller to allow once.
     pub(crate) fn allow_tools_for(
         &mut self,
         provider: &str,
-        tools: &[String],
+        project: u64,
+        rules: &[String],
         cx: &mut Context<Self>,
-    ) {
-        let provider = provider.to_string();
-        let mut st = cx.global::<AppSettings>().clone();
-        let entry = st.agents.entry(provider).or_default();
-        let mut list: Vec<String> = entry
-            .allowed_tools
-            .split(',')
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .collect();
-        for tool in tools {
-            if !list.contains(tool) {
-                list.push(tool.clone());
+    ) -> Vec<String> {
+        let (kept, refused): (Vec<&String>, Vec<&String>) = rules
+            .iter()
+            .filter(|r| !r.trim().is_empty())
+            .partition(|r| !crate::approvals::is_bare_bash(r));
+        if !kept.is_empty() {
+            let mut st = cx.global::<AppSettings>().clone();
+            let entry = st.agents.entry(provider.to_string()).or_default();
+            let saved = entry.project_tools.entry(project.to_string()).or_default();
+            let mut list: Vec<String> = saved
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            for rule in kept {
+                if !list.contains(rule) {
+                    list.push(rule.clone());
+                }
             }
+            *saved = list.join(",");
+            st.save();
+            cx.set_global(st);
         }
-        entry.allowed_tools = list.join(",");
-        st.save();
-        cx.set_global(st);
+        refused.into_iter().cloned().collect()
     }
 
     /// Attach an image from the clipboard, or pick files when the clipboard has none.
@@ -2031,13 +2057,14 @@ impl RunoApp {
                         .px_2()
                         .text_size(px(12.))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.allow_always(&always, cx);
+                            // A bare Bash isn't saved; it is allowed for this answer.
+                            let once = this.allow_always(&always, cx);
                             this.answer(
                                 format!(
                                     "You now have permission to use {}. Continue.",
                                     always.join(", ")
                                 ),
-                                Vec::new(),
+                                once,
                                 cx,
                             );
                             cx.notify();

@@ -104,9 +104,9 @@ pub const SIGN_INS: [SignIn; 11] = [
     },
     SignIn {
         provider: "grok",
-        keys: &["GROK_API_KEY", "XAI_API_KEY"],
+        keys: &["XAI_API_KEY"],
         file: None,
-        fix: "export GROK_API_KEY (from console.x.ai)",
+        fix: "run `grok login` there with xAI's Grok Build, or export XAI_API_KEY (from console.x.ai)",
     },
     SignIn {
         provider: "pi",
@@ -179,6 +179,9 @@ pub struct Connection {
     pub github: bool,
     /// Agents may run commands here themselves (Runo's `run_on` tool).
     pub agents: bool,
+    /// Groups of Runo's tools (`RELAY_GROUPS`) that agents running here may call through
+    /// the relay, beyond the ones that stay inside their session. Empty: none.
+    pub relay_tools: Vec<String>,
 }
 
 impl Default for Connection {
@@ -204,8 +207,24 @@ impl Default for Connection {
             keys: DEFAULT_KEYS.into(),
             github: false,
             agents: true,
+            relay_tools: Vec::new(),
         }
     }
+}
+
+/// A connection's SSH host, ready to pass to ssh: set, and not starting with `-`, which
+/// ssh would read as one of its options (`-oProxyCommand=…` runs a command here).
+pub(crate) fn ssh_host<'a>(host: &'a str, name: &str) -> Result<&'a str, String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err(format!("{name} has no host set."));
+    }
+    if host.starts_with('-') || host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!(
+            "{name}'s host “{host}” isn't a host name: it can't start with - or contain spaces."
+        ));
+    }
+    Ok(host)
 }
 
 impl Connection {
@@ -410,21 +429,15 @@ impl Connection {
                 Ok((c, None))
             }
             Kind::Ssh => {
-                if self.host.trim().is_empty() {
-                    return Err(format!("{} has no host set.", self.name));
-                }
+                let host = ssh_host(&self.host, &self.name)?;
                 let mut c = self.ssh_base();
                 if pty {
                     c.arg("-tt");
-                    c.args([
-                        self.host.trim(),
-                        "--",
-                        &format!("bash -lc {}", quote(script)),
-                    ]);
+                    c.args([host, "--", &format!("bash -lc {}", quote(script))]);
                     return Ok((c, None));
                 }
                 c.arg("-T");
-                c.args([self.host.trim(), "--", "bash -l -s"]);
+                c.args([host, "--", "bash -l -s"]);
                 // The script, with its environment, goes over stdin.
                 let mut body = String::new();
                 for (k, v) in env {
@@ -513,7 +526,7 @@ impl Connection {
                     .collect::<Vec<_>>()
                     .join(" ");
                 Ok((
-                    format!("{}:{dir}", self.host.trim()),
+                    format!("{}:{dir}", ssh_host(&self.host, &self.name)?),
                     vec![("GIT_SSH_COMMAND".into(), ssh)],
                 ))
             }
@@ -1140,6 +1153,7 @@ impl Remote {
             resume: false,
             untracked: false,
             stop_on_denial: false,
+            approval_key: String::new(),
         };
         let path = run_file_path(self.session);
         write_private(
@@ -1176,6 +1190,10 @@ struct RunFile {
     /// allow it now rather than find out when the turn ends.
     #[serde(default)]
     stop_on_denial: bool,
+    /// The app's approval key, so answers to the agent's permission requests check out
+    /// here (see `approvals`). The file is deleted as soon as it is read.
+    #[serde(default)]
+    approval_key: String,
 }
 
 /// Conversation ids and the backup choice come from the session, which `wrap` can't
@@ -1221,6 +1239,7 @@ impl Remote {
             resume: false,
             untracked: crate::settings::sync_backup_untracked(),
             stop_on_denial: crate::settings::stop_on_denial(),
+            approval_key: crate::approvals::export_key(),
         };
         let path = run_file_path(self.session);
         write_private(
@@ -1252,6 +1271,7 @@ pub fn resume_command(
         resume: true,
         untracked: crate::settings::sync_backup_untracked(),
         stop_on_denial: crate::settings::stop_on_denial(),
+        approval_key: crate::approvals::export_key(),
     };
     let path = run_file_path(remote.session);
     write_private(
@@ -2179,6 +2199,8 @@ pub fn connection_run(path: &str) -> i32 {
             return 1;
         }
     };
+    // Sign answers to the agent's permission requests as the app that started this does.
+    crate::approvals::adopt_key(&file.approval_key);
     let r = &file.remote;
     let in_git = local_git(&r.local_dir, &["rev-parse", "--git-dir"], &[]).is_ok();
     if !in_git {
@@ -2706,9 +2728,7 @@ impl Connection {
     /// `ssh -L` from a local port to `port` on the server, once it's up. It runs on its
     /// own connection, so closing it ends the tunnel.
     fn ssh_forward(&self, port: u16) -> Result<Forward, String> {
-        if self.host.trim().is_empty() {
-            return Err(format!("{} has no host set.", self.name));
-        }
+        let host = ssh_host(&self.host, &self.name)?;
         let local = free_port(port)?
             .local_addr()
             .map_err(|e| e.to_string())?
@@ -2722,7 +2742,7 @@ impl Connection {
             "ExitOnForwardFailure=yes",
             "-L",
             &format!("127.0.0.1:{local}:127.0.0.1:{port}"),
-            self.host.trim(),
+            host,
         ]);
         let mut child = c
             .stdin(Stdio::null())
@@ -2812,10 +2832,93 @@ pub fn mcp_reachable(sandbox: Option<&Sandbox>) -> bool {
     }
 }
 
-/// Answer one relayed request with Runo's own server, for session folder `dir`.
-fn answer_mcp(dir: &str, request: &str) -> Option<String> {
+/// Runo's tools an agent on a connection may always call through the relay: they
+/// read and write only its own session (memory, notes, progress, questions to the
+/// person, and the permission prompt that asks the person before a tool runs).
+const RELAY_SAFE: [&str; 6] = [
+    "read_memory",
+    "save_note",
+    "set_checklist",
+    "report",
+    "ask_decision",
+    crate::approvals::TOOL,
+];
+
+/// The tools that reach past the session, in groups the person can allow per
+/// connection: (key, title, what it lets the agent do).
+pub const RELAY_GROUPS: [(&str, &str, &str); 6] = [
+    ("history", "Search past sessions", "Read the transcripts of every session in Runo with search_history."),
+    ("playbooks", "Playbooks", "List and read your playbooks, and start one as its own session on this machine."),
+    ("connections", "Run on connections", "Run commands on your other connections with run_on, with the keys and GitHub login they get."),
+    ("data", "Databases", "Query the project's databases in the Data place (read-only)."),
+    ("design", "Design", "Read and edit the session's design screens."),
+    ("crew", "Message Crew", "Send messages to the project's Crew."),
+];
+
+/// The group a tool that reaches past the session belongs to.
+fn relay_group(tool: &str) -> Option<&'static str> {
+    Some(match tool {
+        "search_history" => "history",
+        "list_playbooks" | "get_playbook" | "run_playbook" => "playbooks",
+        "list_connections" | "run_on" => "connections",
+        "message_crew" => "crew",
+        _ if crate::db::agent::TOOLS.contains(&tool) => "data",
+        _ if tool.starts_with("design_") => "design",
+        _ => return None,
+    })
+}
+
+/// Whether an agent on a connection that allows `groups` may call `tool`. A tool in no
+/// group and not known to be safe is refused.
+fn relay_allows(tool: &str, groups: &[String]) -> bool {
+    RELAY_SAFE.contains(&tool) || relay_group(tool).is_some_and(|g| groups.iter().any(|a| a == g))
+}
+
+/// Answer one relayed request with Runo's own server, for session folder `dir`, with
+/// only the tools `groups` allow: the others are left out of the list and refused.
+fn answer_mcp(dir: &str, request: &str, groups: &[String]) -> Option<String> {
     let request: serde_json::Value = serde_json::from_str(request.trim()).ok()?;
-    crate::memory_mcp::handle(dir, &request).map(|r| r.to_string())
+    let method = request["method"].as_str().unwrap_or("");
+    let refuse = |what: String| {
+        crate::applog::warn("mcp", format!("refused a relayed call: {what}"));
+        Some(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request.get("id").cloned().unwrap_or_default(),
+                "error": {
+                    "code": -32601,
+                    "message": format!("{what} isn't available to agents on this connection. The person can allow it in Settings > Connections."),
+                },
+            })
+            .to_string(),
+        )
+    };
+    match method {
+        "tools/call" => {
+            let tool = request["params"]["name"].as_str().unwrap_or("");
+            if !relay_allows(tool, groups) {
+                return refuse(format!("Runo's {tool} tool"));
+            }
+        }
+        // Prompts are the person's playbooks.
+        "prompts/get" if !groups.iter().any(|g| g == "playbooks") => {
+            return refuse("Runo's playbooks".into());
+        }
+        _ => {}
+    }
+    let mut reply = crate::memory_mcp::handle(dir, &request)?;
+    match method {
+        "tools/list" => {
+            if let Some(list) = reply["result"]["tools"].as_array_mut() {
+                list.retain(|t| relay_allows(t["name"].as_str().unwrap_or(""), groups));
+            }
+        }
+        "prompts/list" if !groups.iter().any(|g| g == "playbooks") => {
+            reply["result"]["prompts"] = serde_json::json!([]);
+        }
+        _ => {}
+    }
+    Some(reply.to_string())
 }
 
 /// This program, as agent arguments name it for Runo's MCP server.
@@ -3071,7 +3174,7 @@ impl Remote {
             if crate::approvals::is_ask(request) {
                 let (r, name, request) = (self.clone(), name.to_string(), request.to_string());
                 std::thread::spawn(move || {
-                    if let Some(reply) = answer_mcp(&r.local_dir, &request) {
+                    if let Some(reply) = answer_mcp(&r.local_dir, &request, &r.conn.relay_tools) {
                         let script =
                             format!("d={}\n{}", quote(&r.mailbox()), reply_script(&name, &reply));
                         let _ = r.conn.run(&r.vm, &script, None);
@@ -3079,7 +3182,7 @@ impl Remote {
                 });
                 continue;
             }
-            if let Some(reply) = answer_mcp(&self.local_dir, request) {
+            if let Some(reply) = answer_mcp(&self.local_dir, request, &self.conn.relay_tools) {
                 script.push_str(&reply_script(name, &reply));
             }
         }
@@ -3111,31 +3214,36 @@ fn reply_script(name: &str, reply: &str) -> String {
 }
 
 /// Local Cove VMs share the session folder, so their relay's mailbox lives in it and a
-/// thread here answers it.
-fn cove_mailboxes() -> &'static Mutex<Vec<String>> {
-    static DIRS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+/// thread here answers it: (session folder, connection id).
+fn cove_mailboxes() -> &'static Mutex<Vec<(String, u64)>> {
+    static DIRS: OnceLock<Mutex<Vec<(String, u64)>>> = OnceLock::new();
     DIRS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Answer the relay in `dir`/.runo/mcp from now on; returns the relay command.
-pub fn serve_cove_mailbox(dir: &str) -> Option<Vec<String>> {
-    let base = Path::new(dir).join(".runo");
-    let mailbox = base.join("mcp");
-    std::fs::create_dir_all(mailbox.join("in")).ok()?;
-    std::fs::create_dir_all(mailbox.join("out")).ok()?;
-    std::fs::write(base.join("mcp-relay.sh"), MCP_RELAY).ok()?;
+/// Answer the relay in `dir`/.runo/mcp for connection `conn` from now on; returns the
+/// relay command. The VM can change anything in the folder, so every file Runo
+/// touches there goes through `safefs`.
+pub fn serve_cove_mailbox(dir: &str, conn: u64) -> Option<Vec<String>> {
+    let root = Path::new(dir);
+    crate::safefs::create_dirs(root, ".runo/mcp/in").ok()?;
+    crate::safefs::create_dirs(root, ".runo/mcp/out").ok()?;
+    crate::safefs::write(root, ".runo/mcp-relay.sh", MCP_RELAY.as_bytes()).ok()?;
     crate::git::exclude(dir, "/.runo/");
+    let base = root.join(".runo");
+    let mailbox = base.join("mcp");
     let mut dirs = cove_mailboxes().lock().ok()?;
-    if !dirs.iter().any(|d| d == dir) {
-        dirs.push(dir.to_string());
+    if !dirs.iter().any(|(d, _)| d == dir) {
+        dirs.push((dir.to_string(), conn));
         if dirs.len() == 1 {
             std::thread::spawn(|| loop {
                 let all = cove_mailboxes()
                     .lock()
                     .map(|d| d.clone())
                     .unwrap_or_default();
-                for dir in all {
-                    pump_folder(&dir);
+                for (dir, conn) in all {
+                    // Read each time, so a change in Settings applies to the next call.
+                    let groups = get(conn).map(|c| c.relay_tools).unwrap_or_default();
+                    pump_folder(&dir, &groups);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(300));
             });
@@ -3149,28 +3257,42 @@ pub fn serve_cove_mailbox(dir: &str) -> Option<Vec<String>> {
     ])
 }
 
-/// Answer the requests in one session folder's mailbox on this machine.
-fn pump_folder(dir: &str) {
-    let mailbox = Path::new(dir).join(".runo/mcp");
-    let _ = std::fs::write(mailbox.join("alive"), b"");
-    let Ok(entries) = std::fs::read_dir(mailbox.join("in")) else {
+/// A request's file name in the mailbox: what the relay writes, a plain name.
+fn mailbox_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// Answer the requests in one session folder's mailbox on this machine, with the tools
+/// `groups` allow.
+fn pump_folder(dir: &str, groups: &[String]) {
+    let root = Path::new(dir);
+    let _ = crate::safefs::write(root, ".runo/mcp/alive", b"");
+    let Ok(entries) = crate::safefs::list(root, ".runo/mcp/in") else {
         return;
     };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
+    for name in entries {
+        if !mailbox_name(&name) {
             continue;
         }
-        let request = std::fs::read_to_string(entry.path()).unwrap_or_default();
-        let _ = std::fs::remove_file(entry.path());
+        let file = format!(".runo/mcp/in/{name}");
+        let request = crate::safefs::read(root, &file)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        let _ = crate::safefs::remove(root, &file);
         let ask = crate::approvals::is_ask(&request);
-        let (dir, out) = (dir.to_string(), mailbox.join("out"));
+        let (dir, groups) = (dir.to_string(), groups.to_vec());
         let reply = move || {
-            if let Some(reply) = answer_mcp(&dir, &request) {
-                let tmp = out.join(format!(".{name}"));
-                if std::fs::write(&tmp, format!("{reply}\n")).is_ok() {
-                    let _ = std::fs::rename(&tmp, out.join(&name));
-                }
+            if let Some(reply) = answer_mcp(&dir, &request, &groups) {
+                let _ = crate::safefs::write(
+                    Path::new(&dir),
+                    &format!(".runo/mcp/out/{name}"),
+                    format!("{reply}\n").as_bytes(),
+                );
             }
         };
         // A permission request waits for the person without holding up the others.
@@ -3183,14 +3305,19 @@ fn pump_folder(dir: &str) {
 }
 
 /// Bridge Runo's MCP server into an agent command headed for a local Cove VM.
-pub fn bridge_for_cove(dir: &str, args: &[String], env: &mut [(String, String)]) -> Vec<String> {
+pub fn bridge_for_cove(
+    dir: &str,
+    conn: u64,
+    args: &[String],
+    env: &mut [(String, String)],
+) -> Vec<String> {
     let exe = runo_exe();
     let mentions =
         args.iter().any(|a| a.contains(&exe)) || env.iter().any(|(_, v)| v.contains(&exe));
     if exe.is_empty() || !mentions {
         return bridge_mcp(args, env, "\u{0}", &["bash".into()]);
     }
-    match serve_cove_mailbox(dir) {
+    match serve_cove_mailbox(dir, conn) {
         Some(relay) => bridge_mcp(args, env, &exe, &relay),
         None => bridge_mcp(args, env, "\u{0}", &["bash".into()]),
     }
@@ -3341,6 +3468,17 @@ pub fn cleanup_session(session: &crate::store::Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ssh_host_cant_be_an_option() {
+        assert_eq!(
+            ssh_host(" ubuntu@203.0.113.7 ", "box"),
+            Ok("ubuntu@203.0.113.7")
+        );
+        assert!(ssh_host("-oProxyCommand=touch /tmp/x", "box").is_err());
+        assert!(ssh_host("host -oX", "box").is_err());
+        assert!(ssh_host("", "box").unwrap_err().contains("no host"));
+    }
 
     fn git(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
@@ -3582,6 +3720,7 @@ mod tests {
             resume: false,
             untracked: false,
             stop_on_denial: false,
+            approval_key: String::new(),
         };
         let path = local.parent().unwrap().join("run.json");
         std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
@@ -3686,6 +3825,7 @@ mod tests {
             resume: true,
             untracked: false,
             stop_on_denial: false,
+            approval_key: String::new(),
         };
         let path = local.parent().unwrap().join("resume.json");
         std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
@@ -3771,6 +3911,7 @@ mod tests {
             resume: false,
             untracked: false,
             stop_on_denial: false,
+            approval_key: String::new(),
         };
         let path = root.join("run.json");
         std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
@@ -3960,12 +4101,74 @@ mod tests {
         assert_eq!(env, [("TOKEN".to_string(), "s3cret".to_string())]);
     }
 
+    /// Agents on a connection reach only the tools that stay in their session, plus the
+    /// groups the person allowed for it.
+    #[test]
+    fn relayed_calls_get_only_the_allowed_tools() {
+        let dir = temp("relay-allow");
+        let dir = dir.to_str().unwrap();
+        let call = |tool: &str, groups: &[String]| {
+            let request = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{tool}","arguments":{{}}}}}}"#
+            );
+            let reply: serde_json::Value =
+                serde_json::from_str(&answer_mcp(dir, &request, groups).unwrap()).unwrap();
+            reply["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("isn't available"))
+        };
+        for tool in [
+            "run_on",
+            "run_playbook",
+            "data_query",
+            "search_history",
+            "message_crew",
+            "list_connections",
+            "made_up",
+        ] {
+            assert!(call(tool, &[]), "{tool} is refused by default");
+        }
+        for tool in ["read_memory", "save_note"] {
+            assert!(!call(tool, &[]), "{tool} stays available");
+        }
+        assert!(!call("run_on", &["connections".to_string()]));
+        assert!(call("run_on", &["playbooks".to_string()]));
+
+        let list = |groups: &[String]| -> Vec<String> {
+            let reply: serde_json::Value = serde_json::from_str(
+                &answer_mcp(
+                    dir,
+                    r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+                    groups,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            reply["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let none = list(&[]);
+        assert!(none.contains(&"read_memory".to_string()));
+        assert!(!none
+            .iter()
+            .any(|t| t == "run_on" || t == "search_history" || t == "run_playbook"));
+        assert!(list(&["history".to_string()]).contains(&"search_history".to_string()));
+        assert!(mailbox_name("123-4"));
+        for bad in ["", ".held-1", "../x", "a/b", "x y"] {
+            assert!(!mailbox_name(bad), "{bad}");
+        }
+    }
+
     /// The relay script and the pump talk through a mailbox: a request the agent sends
     /// comes back answered by Runo's own server.
     #[test]
     fn the_relay_answers_through_the_mailbox() {
         let dir = temp("relay");
-        let relay = serve_cove_mailbox(dir.to_str().unwrap()).unwrap();
+        let relay = serve_cove_mailbox(dir.to_str().unwrap(), 0).unwrap();
         let mut child = Command::new(&relay[0])
             .args(&relay[1..])
             .stdin(Stdio::piped())
@@ -3987,7 +4190,7 @@ mod tests {
         assert_eq!(reply["id"], 7);
         assert_eq!(reply["result"], serde_json::json!({}));
         if let Ok(mut dirs) = cove_mailboxes().lock() {
-            dirs.retain(|d| Path::new(d) != dir);
+            dirs.retain(|(d, _)| Path::new(d) != dir);
         }
     }
 

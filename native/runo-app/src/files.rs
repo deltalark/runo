@@ -160,7 +160,7 @@ impl RunoApp {
             .text_sm()
             .text_color(rgb(c_secondary()))
             .when(
-                self.open_file.as_ref().is_some_and(|f| f.path == path),
+                self.file.open.as_ref().is_some_and(|f| f.path == path),
                 |el| el.bg(tint(c_active())).text_color(rgb(c_text())),
             )
             .hover(|el| el.bg(tint(c_subtle())))

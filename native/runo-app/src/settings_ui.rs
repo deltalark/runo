@@ -357,7 +357,7 @@ fn switch_row(title: &str, desc: &str, on: bool, set: fn(&mut AppSettings, bool)
 
 /// A path with the home folder shown as ~.
 pub(crate) fn tilde(path: &std::path::Path) -> String {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    let home = crate::store::home_dir();
     match home.and_then(|h| path.strip_prefix(h).ok().map(|p| p.display().to_string())) {
         Some(rest) => format!("~/{rest}"),
         None => path.display().to_string(),
@@ -816,7 +816,16 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             }),
             section("Behavior", "Motion, sleep and how the sidebar groups sessions.", vec![
                 switch_row("Animations", "Fade, slide and pulse effects. Turn off for instant changes.", st.animations, |s, v| s.animations = v),
-                switch_row("Keep the computer awake", "Hold off sleep while any agent is running (caffeinate on macOS, systemd-inhibit on Linux).", st.keep_awake, |s, v| s.keep_awake = v),
+                switch_row(
+                    "Keep the computer awake",
+                    if cfg!(any(target_os = "macos", target_os = "linux")) {
+                        "Hold off sleep while any agent is running (caffeinate on macOS, systemd-inhibit on Linux)."
+                    } else {
+                        "Hold off sleep while any agent is running. Not available on this system yet, so this does nothing here."
+                    },
+                    st.keep_awake,
+                    |s, v| s.keep_awake = v,
+                ),
                 switch_row("Group sidebar by status", "Show Needs you, Running, Ready to review and Done groups instead of projects.", st.group_by_status, |s, v| s.group_by_status = v),
                 switch_row("Show deleted threads", "Keep a line in Crew's chat where a thread you deleted was.", st.show_deleted_threads, |s, v| s.show_deleted_threads = v),
                 switch_row("Thread titles beside numbers", "In Crew's chat, #34 shows the thread's title next to it. The number alone still opens the thread, and shows its title on hover.", st.thread_ref_titles, |s, v| s.thread_ref_titles = v),
@@ -840,7 +849,20 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     };
                     row("Check for updates", &desc, Ctl::Button("Check now".into(), Rc::new(|this, cx| this.check_runo_now(cx))))
                 },
-                row("Logs and crash reports", &format!("Each launch writes a log, and crashes leave a report, in {}.", tilde(&crate::applog::logs_dir())), Ctl::Button("Show".into(), Rc::new(|_, cx| cx.reveal_path(&crate::applog::logs_dir())))),
+                row(
+                    "Logs and crash reports",
+                    &format!("Each launch writes a log, and crashes leave a report, in {}. Copy diagnostics copies your version, system, agent CLIs, settings without secrets and the end of the log, to paste into a bug report.", tilde(&crate::applog::logs_dir())),
+                    Ctl::Buttons(vec![
+                        ("Show".into(), Rc::new(|_: &mut RunoApp, cx: &mut Context<RunoApp>| cx.reveal_path(&crate::applog::logs_dir())) as Action),
+                        (
+                            "Copy diagnostics".into(),
+                            Rc::new(|this: &mut RunoApp, cx: &mut Context<RunoApp>| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(crate::applog::diagnostics()));
+                                this.info = Some(("Copied diagnostics. Look them over before you share them.".into(), std::time::Instant::now()));
+                            }) as Action,
+                        ),
+                    ]),
+                ),
             ]),
             section("Git", "How Runo commits for you.", vec![
                 switch_row("Credit the agent in commits", "Adds a line such as \"Made with Claude Code in Runo\" to commits made from the Changes panel.", st.attribution, |s, v| s.attribution = v),
@@ -1685,6 +1707,26 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
         rows.push(conn_text(c, "Keys passed in", "Environment variables from this machine the agent gets there, comma separated. Nothing else reaches it.", connections::DEFAULT_KEYS, c.keys.clone(), |c, v| c.keys = v));
         rows.push(conn_switch(c, "GitHub access", "Give the agent your GitHub login (from gh auth token) for its own work there, such as cloning or opening PRs. Syncing never needs it. Passed per command, never saved there.", c.github, |c, v| c.github = v));
         rows.push(conn_switch(c, "Agents may use it", "Lets agents in any session run commands here with Runo's run_on tool, for research, untrusted code or heavy jobs.", c.agents, |c, v| c.agents = v));
+        // What agents running here may reach on this machine through Runo's tools. Off
+        // by default: code in a VM or on a server shouldn't drive this machine.
+        for (key, title, desc) in connections::RELAY_GROUPS {
+            let on = c.relay_tools.iter().any(|g| g == key);
+            rows.push(row(
+                &format!("Agents here: {title}"),
+                &format!("{desc} Leave off unless you trust what runs on this connection."),
+                Ctl::Switch(
+                    on,
+                    Rc::new(move |s, v| {
+                        if let Some(c) = s.connections.iter_mut().find(|c| c.id == id) {
+                            c.relay_tools.retain(|g| g != key);
+                            if v {
+                                c.relay_tools.push(key.to_string());
+                            }
+                        }
+                    }),
+                ),
+            ));
+        }
         rows.push(row(
             "Remove",
             "Sessions that run here move back to this machine, and their copies there are deleted.",

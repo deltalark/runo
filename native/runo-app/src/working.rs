@@ -63,6 +63,168 @@ pub(crate) fn doing(messages: &[Message]) -> SharedString {
     }
 }
 
+/// A subagent the agent started this turn, for the list under the Working line.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Helper {
+    /// What it was asked to do, such as "Find the parser".
+    pub what: String,
+    pub state: StepState,
+    /// How long it has run, or ran.
+    pub took: Duration,
+    /// The latest step it took, while it runs and the stream carries its steps.
+    pub latest: String,
+}
+
+/// The subagents the agent started this turn, oldest first.
+pub(crate) fn helpers(messages: &[Message]) -> Vec<Helper> {
+    let turn = messages
+        .iter()
+        .rposition(|m| m.role == Role::User)
+        .map_or(messages, |i| &messages[i + 1..]);
+    let now = motion::frame().unwrap_or_else(Instant::now);
+    turn.iter()
+        .filter(|m| m.role == Role::Agent)
+        .flat_map(|m| &m.steps)
+        .filter(|s| s.kind == ToolKind::Subagent)
+        .map(|s| Helper {
+            what: s
+                .label
+                .strip_prefix("Ran a subagent: ")
+                .unwrap_or(&s.label)
+                .to_string(),
+            state: s.state,
+            took: match (s.state, s.started) {
+                (StepState::Running, Some(at)) => now.saturating_duration_since(at),
+                _ => Duration::from_millis(s.ms),
+            },
+            latest: if s.state == StepState::Running {
+                s.latest.clone()
+            } else {
+                String::new()
+            },
+        })
+        .collect()
+}
+
+/// "2 helper agents" while any of `helpers` run, for the Working line.
+pub(crate) fn helpers_label(helpers: &[Helper]) -> Option<String> {
+    match helpers
+        .iter()
+        .filter(|h| h.state == StepState::Running)
+        .count()
+    {
+        0 => None,
+        1 => Some("1 helper agent".into()),
+        n => Some(format!("{n} helper agents")),
+    }
+}
+
+/// One line for a helper: what it does, how it stands and for how long, and its latest step.
+pub(crate) fn helper_line(h: &Helper) -> String {
+    let state = match h.state {
+        StepState::Running => "running",
+        StepState::Done => "done",
+        StepState::Failed => "failed",
+    };
+    let mut line = format!("{} · {state}", h.what);
+    if !h.took.is_zero() {
+        line.push_str(&format!(" {}", elapsed(h.took)));
+    }
+    if !h.latest.is_empty() {
+        line.push_str(&format!(" · {}", h.latest));
+    }
+    line
+}
+
+/// The helpers, one row each, shown under the Working line when it's opened.
+fn helper_list(helpers: &[Helper]) -> Div {
+    let mut list = div()
+        .v_flex()
+        .ml(px(BOX / 2.))
+        .pl_3()
+        .border_l_1()
+        .border_color(divider());
+    for h in helpers {
+        let mark = match h.state {
+            StepState::Running => div()
+                .size(px(12.))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .child(div().size(px(6.)).rounded_full().bg(rgb(accent())))
+                .into_any_element(),
+            StepState::Done => icon(IconName::Check, 12., c_muted()).into_any_element(),
+            StepState::Failed => icon(IconName::X, 12., c_red()).into_any_element(),
+        };
+        list = list.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(px(22.))
+                .text_color(rgb(c_secondary()))
+                .child(mark)
+                .child(div().min_w_0().truncate().child(helper_line(h))),
+        );
+    }
+    list
+}
+
+impl RunoApp {
+    /// The Working line of session `id`'s chat or peek: what the agent is doing and for how
+    /// long and, while it runs subagents, how many, which a click lists.
+    pub(crate) fn working_line(
+        &self,
+        id: u64,
+        messages: &[Message],
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let started = self.turns.get(&id).map(|t| t.started);
+        let helpers = helpers(messages);
+        let label = helpers_label(&helpers);
+        let open = !helpers.is_empty() && self.open_helpers.contains(&id);
+        let line = running(doing(messages), label.clone(), started);
+        if helpers.is_empty() {
+            return div().child(line);
+        }
+        div()
+            .v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .id(SharedString::from(format!("helpers-{id}")))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.open_helpers.remove(&id) {
+                            this.open_helpers.insert(id);
+                        }
+                        cx.notify();
+                    }))
+                    .child(line)
+                    .child(icon(
+                        if open {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        },
+                        12.,
+                        c_muted(),
+                    )),
+            )
+            .when(open, |el| el.child(helper_list(&helpers)))
+    }
+
+    /// Changes when the Working line's height may have: helpers added, or the list opened.
+    pub(crate) fn working_version(&self, id: u64, messages: &[Message]) -> u64 {
+        let n = helpers(messages).len();
+        chat_list::hash((n, n > 0 && self.open_helpers.contains(&id)))
+    }
+}
+
 /// A word or two for a running tool call.
 fn tool_label(step: &ToolStep) -> SharedString {
     match step.kind {
@@ -83,7 +245,8 @@ fn tool_label(step: &ToolStep) -> SharedString {
         ToolKind::Search | ToolKind::List => "Searching".into(),
         ToolKind::WebSearch => "Searching the web".into(),
         ToolKind::Fetch => "Browsing".into(),
-        ToolKind::Subagent => "Delegating".into(),
+        // The helper agents it waits on are named beside it (see `helpers_label`).
+        ToolKind::Subagent => "Working".into(),
         ToolKind::Todo | ToolKind::Plan => "Planning".into(),
         ToolKind::Think => "Thinking".into(),
         ToolKind::Question => "Asking".into(),
@@ -135,7 +298,12 @@ impl Ring {
 
 /// The row for a turn that has run since `started`: the ring, `label` and the time so
 /// far, which, while nothing moves, redraws just as its second changes.
-pub(crate) fn running(label: impl Into<SharedString>, started: Option<Instant>) -> AnyElement {
+/// `helpers`, such as "2 helper agents", goes before the time.
+pub(crate) fn running(
+    label: impl Into<SharedString>,
+    helpers: Option<String>,
+    started: Option<Instant>,
+) -> AnyElement {
     let took = started.map(|at| {
         let took = motion::frame()
             .unwrap_or_else(Instant::now)
@@ -143,7 +311,15 @@ pub(crate) fn running(label: impl Into<SharedString>, started: Option<Instant>) 
         motion::tick_in(to_next_second(took));
         took
     });
-    indicator(label, took.map(elapsed))
+    indicator(label, detail(helpers, took.map(elapsed)))
+}
+
+/// The Working line's text after its label: "2 helper agents · 12:03".
+fn detail(helpers: Option<String>, time: Option<String>) -> Option<String> {
+    match (helpers, time) {
+        (Some(h), Some(t)) => Some(format!("{h} · {t}")),
+        (h, t) => h.or(t),
+    }
 }
 
 /// How long after `took` the time shown next changes, a little past the second so the
@@ -418,6 +594,34 @@ mod tests {
         // A reply from an earlier turn doesn't count.
         let old = agent("Done.", vec![]);
         assert_eq!(&*doing(&[old, ask]), "Thinking");
+    }
+
+    #[test]
+    fn the_working_line_counts_helper_agents() {
+        let ask = Message::new(Role::User, "Fix it");
+        let mut find = ToolStep::running("a", "Task", "Ran a subagent: Find the parser");
+        find.latest = "Read src/stream.rs".into();
+        let mut review = ToolStep::running("b", "Agent", "Ran a subagent: Review");
+        review.finish(true);
+        review.ms = 62_000;
+        let reply = agent("", vec![find, review]);
+        let all = [ask, reply];
+        assert_eq!(&*doing(&all), "Working");
+        let hs = helpers(&all);
+        assert_eq!(hs.len(), 2);
+        assert_eq!(helpers_label(&hs).as_deref(), Some("1 helper agent"));
+        assert_eq!(
+            detail(helpers_label(&hs), Some("12:03".into())).as_deref(),
+            Some("1 helper agent · 12:03")
+        );
+        assert_eq!(
+            helper_line(&hs[0]),
+            "Find the parser · running · Read src/stream.rs"
+        );
+        assert_eq!(helper_line(&hs[1]), "Review · done 1:02");
+        // Once none run, the line shows the time alone.
+        assert_eq!(helpers_label(&hs[1..]), None);
+        assert_eq!(detail(None, Some("8s".into())).as_deref(), Some("8s"));
     }
 
     #[test]
