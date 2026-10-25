@@ -42,6 +42,10 @@ pub struct AgentOptions {
     pub save_to_config: bool,
     /// Default models of single projects, by project id; they win over `model_override`.
     pub project_models: HashMap<String, String>,
+    /// Rules "Always allow" saved for single projects, by project id, comma-separated
+    /// like `allowed_tools`: they apply only there (see `approvals::always_rule`).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub project_tools: HashMap<String, String>,
 }
 
 impl AgentOptions {
@@ -55,7 +59,43 @@ impl AgentOptions {
         {
             opts.model_override = model.trim().to_string();
         }
+        if let Some(rules) = self
+            .project_tools
+            .get(&project.to_string())
+            .filter(|r| !r.trim().is_empty())
+        {
+            opts.allowed_tools = [opts.allowed_tools.trim(), rules.trim()]
+                .into_iter()
+                .filter(|r| !r.is_empty())
+                .collect::<Vec<_>>()
+                .join(",");
+        }
         opts
+    }
+
+    /// Whether these options let the agent run any shell command without asking: a
+    /// bare `Bash` in the allowed tools, as "Always allow" saved before it was narrowed.
+    pub fn allows_any_shell(&self) -> bool {
+        std::iter::once(&self.allowed_tools)
+            .chain(self.project_tools.values())
+            .flat_map(|list| list.split(','))
+            .any(crate::approvals::is_bare_bash)
+    }
+
+    /// Take every bare `Bash` out of the allowed tools.
+    pub fn drop_any_shell(&mut self) {
+        let strip = |list: &str| {
+            list.split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty() && !crate::approvals::is_bare_bash(t))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        self.allowed_tools = strip(&self.allowed_tools);
+        for list in self.project_tools.values_mut() {
+            *list = strip(list);
+        }
+        self.project_tools.retain(|_, list| !list.is_empty());
     }
 }
 
@@ -77,6 +117,9 @@ pub struct AppSettings {
     pub send_on_enter: bool,
     pub autoscroll: bool,
     pub default_mode: String,
+    /// The person was asked about a bare `Bash` an earlier "Always allow" saved, which
+    /// lets an agent run any command in every project (see `AgentOptions::allows_any_shell`).
+    pub any_shell_asked: bool,
     pub default_provider: String,
     /// Shell command run in every new worktree, e.g. `npm install`.
     pub worktree_setup: String,
@@ -248,6 +291,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             agents: HashMap::new(),
+            any_shell_asked: false,
             usage_detailed: false,
             theme: "dark".into(),
             color_theme: "runo".into(),
@@ -1428,9 +1472,29 @@ pub fn discover(project_dir: Option<&str>) -> Discovered {
 mod tests {
     use super::{
         frontmatter, mix, new_skill, parse_quick_commands, scan_hooks, scan_mcp, scan_skills,
-        AppSettings,
+        AgentOptions, AppSettings,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn always_rules_apply_to_their_project_and_a_bare_bash_can_go() {
+        let mut opts = AgentOptions {
+            allowed_tools: "Read,Bash".into(),
+            ..Default::default()
+        };
+        opts.project_tools
+            .insert("7".into(), "Bash(npm test:*)".into());
+        assert_eq!(
+            opts.for_project(7).allowed_tools,
+            "Read,Bash,Bash(npm test:*)"
+        );
+        assert_eq!(opts.for_project(8).allowed_tools, "Read,Bash");
+        assert!(opts.allows_any_shell());
+        opts.drop_any_shell();
+        assert!(!opts.allows_any_shell());
+        assert_eq!(opts.allowed_tools, "Read");
+        assert_eq!(opts.for_project(7).allowed_tools, "Read,Bash(npm test:*)");
+    }
 
     #[test]
     fn quick_commands_parse_names() {

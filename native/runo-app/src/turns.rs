@@ -1114,37 +1114,49 @@ impl RunoApp {
         self.start_turn(id, prompt, Vec::new(), &opts);
     }
 
-    /// Always allow these tools for this agent (Settings > agent > Allowed tools).
-    pub(crate) fn allow_always(&mut self, tools: &[String], cx: &mut Context<Self>) {
-        let Some(provider) = self.current().map(|s| s.provider.clone()) else {
-            return;
+    /// Always allow these tools for this agent in the current session's project. Returns
+    /// the ones that can't be saved (see `allow_tools_for`), to allow once instead.
+    pub(crate) fn allow_always(&mut self, tools: &[String], cx: &mut Context<Self>) -> Vec<String> {
+        let Some((provider, project)) = self.current().map(|s| (s.provider.clone(), s.project_id))
+        else {
+            return tools.to_vec();
         };
-        self.allow_tools_for(&provider, tools, cx);
+        self.allow_tools_for(&provider, project, tools, cx)
     }
 
+    /// Save rules that never ask for this agent, in `project` only. A bare `Bash` (any
+    /// command at all) is never saved: it is returned with whatever else couldn't be, for
+    /// the caller to allow once.
     pub(crate) fn allow_tools_for(
         &mut self,
         provider: &str,
-        tools: &[String],
+        project: u64,
+        rules: &[String],
         cx: &mut Context<Self>,
-    ) {
-        let provider = provider.to_string();
-        let mut st = cx.global::<AppSettings>().clone();
-        let entry = st.agents.entry(provider).or_default();
-        let mut list: Vec<String> = entry
-            .allowed_tools
-            .split(',')
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .collect();
-        for tool in tools {
-            if !list.contains(tool) {
-                list.push(tool.clone());
+    ) -> Vec<String> {
+        let (kept, refused): (Vec<&String>, Vec<&String>) = rules
+            .iter()
+            .filter(|r| !r.trim().is_empty())
+            .partition(|r| !crate::approvals::is_bare_bash(r));
+        if !kept.is_empty() {
+            let mut st = cx.global::<AppSettings>().clone();
+            let entry = st.agents.entry(provider.to_string()).or_default();
+            let saved = entry.project_tools.entry(project.to_string()).or_default();
+            let mut list: Vec<String> = saved
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            for rule in kept {
+                if !list.contains(rule) {
+                    list.push(rule.clone());
+                }
             }
+            *saved = list.join(",");
+            st.save();
+            cx.set_global(st);
         }
-        entry.allowed_tools = list.join(",");
-        st.save();
-        cx.set_global(st);
+        refused.into_iter().cloned().collect()
     }
 
     /// Attach an image from the clipboard, or pick files when the clipboard has none.
@@ -2031,13 +2043,14 @@ impl RunoApp {
                         .px_2()
                         .text_size(px(12.))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.allow_always(&always, cx);
+                            // A bare Bash isn't saved; it is allowed for this answer.
+                            let once = this.allow_always(&always, cx);
                             this.answer(
                                 format!(
                                     "You now have permission to use {}. Continue.",
                                     always.join(", ")
                                 ),
-                                Vec::new(),
+                                once,
                                 cx,
                             );
                             cx.notify();
