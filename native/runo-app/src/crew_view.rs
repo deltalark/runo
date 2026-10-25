@@ -11,7 +11,7 @@ pub(crate) const CREW_ICON: IconName = IconName::Workflow;
 
 pub(crate) fn status_tone(status: &str) -> u32 {
     match status {
-        "working" => c_blue(),
+        "working" | "watching" => c_blue(),
         "needs you" => c_amber(),
         "failed" => c_red(),
         "done" => c_green(),
@@ -314,7 +314,7 @@ impl RunoApp {
     }
 
     /// Crew's threads under its row in the sidebar, and only there, grouped by what they
-    /// need: the person, then working, then waiting on something else. Finished and
+    /// need: the person, then working, then watching CI, then waiting on something else. Finished and
     /// resolved ones fold into a single "N done" row until it is opened. Each thread is
     /// one line with its time; the selected one also shows its agent, branch and worktree
     /// size, and hovering one shows all its details.
@@ -324,23 +324,27 @@ impl RunoApp {
         threads: &[&Session],
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut groups: [Vec<AnyElement>; 3] = Default::default();
+        let mut groups: [Vec<AnyElement>; 4] = Default::default();
         let mut finished: Vec<(&Session, &'static str)> = Vec::new();
         for t in threads {
             let status = thread_status(self.thread_working(t.id), t);
             let group = match status {
                 "needs you" | "failed" => 0,
                 "working" => 1,
+                "watching" => 2,
                 "done" | "resolved" => {
                     finished.push((t, status));
                     continue;
                 }
-                _ => 2,
+                _ => 3,
             };
             groups[group].push(self.thread_row(t, status, cx));
         }
         let mut rows: Vec<AnyElement> = Vec::new();
-        for (label, group) in ["Needs you", "Working", "Waiting"].into_iter().zip(groups) {
+        for (label, group) in ["Needs you", "Working", "Watching CI", "Waiting"]
+            .into_iter()
+            .zip(groups)
+        {
             if !group.is_empty() {
                 rows.push(group_label(label, group.len(), rows.is_empty()));
                 rows.extend(group);
@@ -475,11 +479,14 @@ impl RunoApp {
                 .unwrap_or_default(),
         };
         let tone = match status {
-            "working" => c_blue(),
+            "working" | "watching" => c_blue(),
             "needs you" => c_amber(),
             "failed" => c_red(),
             _ => c_muted(),
         };
+        // A watched pull request: "Watching CI #12", "CI failed, fixing #12" and so on.
+        let watch = self.watch_line(t);
+        let watch_chip = self.watch_chip(t, "side", cx);
         let corner = match pr.filter(|_| finished) {
             Some(n) => div()
                 .flex_none()
@@ -497,16 +504,21 @@ impl RunoApp {
                 .text_color(rgb(tone))
                 .child(when.clone()),
         };
+        let corner = match watch_chip {
+            Some(chip) => chip,
+            None => corner.into_any_element(),
+        };
         let agent = match &model {
             Some(m) => format!("{} · {m}", provider.name),
             None => provider.name.to_string(),
         };
         let card = ThreadCard {
             title: crew::shown_title(&t.title),
-            status: match status {
-                "working" if !when.is_empty() => format!("Working · {when}"),
-                "resolved" => "Done".into(),
-                s => {
+            status: match (status, &watch) {
+                (_, Some((text, _, n, _))) => format!("{text} · #{n}"),
+                ("working", _) if !when.is_empty() => format!("Working · {when}"),
+                ("resolved", _) => "Done".into(),
+                (s, _) => {
                     let mut c = s.chars();
                     c.next()
                         .map(|f| f.to_uppercase().chain(c).collect())
@@ -909,6 +921,7 @@ impl RunoApp {
                 .unwrap_or_default()
         };
         let decision = info.decision.clone();
+        let noted = note.is_some();
         let line = note.or_else(|| match status {
             "needs you" => decision.as_ref().map(|d| crew::plain(&d.question)),
             "working" => info
@@ -918,6 +931,14 @@ impl RunoApp {
                 .map(|st| crew::plain(&st.text)),
             _ => crew::outcome(&info),
         });
+        // The PR watcher gave up: its reason is what the person needs to read.
+        let line = match &info.watch {
+            Some(w) if !noted && status == "needs you" && decision.is_none() => {
+                w.needs.clone().or(line)
+            }
+            _ => line,
+        };
+        let watch = self.watch_chip(s, key, cx);
         let selected = (self.selected == Some(thread) && self.view == View::Session)
             || self.peek == Some(thread);
         // A finished row says what changed with a chip; its outcome shows when it is open.
@@ -975,6 +996,7 @@ impl RunoApp {
                     )
                 })
                 .children(result)
+                .children(watch)
                 .when(!meta.is_empty(), |el| {
                     el.child(
                         small(meta)
@@ -1379,6 +1401,7 @@ impl RunoApp {
         let groups = [
             ("Needs you", "needs you"),
             ("Working", "working"),
+            ("Watching CI", "watching"),
             ("Done", "done"),
             ("Other", ""),
         ];

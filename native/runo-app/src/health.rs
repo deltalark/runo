@@ -301,7 +301,9 @@ impl RunoApp {
         }
     }
 
-    /// Threads Crew started that are running now, for their own cap.
+    /// Threads Crew started that are running now, for their own cap. Only live turns
+    /// count: a thread whose pull request Runo watches (`prwatch.rs`) has ended its turn
+    /// and holds no slot until a wake starts one.
     fn running_threads(&self) -> usize {
         self.handles
             .keys()

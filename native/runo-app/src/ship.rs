@@ -852,37 +852,45 @@ impl RunoApp {
         self.pr_loading.insert(id);
         self.bg(
             move || {
-                let view = |which: &str| {
-                    std::process::Command::new("gh")
-                        .args([
-                            "pr",
-                            "view",
-                            which,
-                            "--json",
-                            "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,reviews,comments,mergeStateStatus,autoMergeRequest",
-                        ])
+                // Ok(None) when the branch has no pull request; Err when gh could not say.
+                let view = |which: &str| -> Result<Option<github::PrStatus>, String> {
+                    let out = std::process::Command::new("gh")
+                        .args(["pr", "view", which, "--json", github::PR_FIELDS])
                         .current_dir(&dir)
                         .stdin(std::process::Stdio::null())
                         .output()
-                        .ok()
-                        .filter(|o| o.status.success())
-                        .and_then(|o| github::parse_pr_status(&String::from_utf8_lossy(&o.stdout)))
+                        .map_err(|e| format!("could not run gh: {e}"))?;
+                    if out.status.success() {
+                        return Ok(github::parse_pr_status(&String::from_utf8_lossy(
+                            &out.stdout,
+                        )));
+                    }
+                    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                    if err.contains("no pull requests found") {
+                        Ok(None)
+                    } else {
+                        Err(err)
+                    }
                 };
                 // A reviewed PR's branch may be checked out under another name.
-                let mut status = view(&branch).or_else(|| {
-                    (!known.is_empty()).then(|| view(&known)).flatten()
-                })?;
-                status.draft_review = std::fs::read_to_string(
-                    std::path::Path::new(&dir).join(github::REVIEW_FILE),
-                )
-                .ok()
-                .and_then(|json| github::parse_review_draft(&json));
-                Some(status)
+                let mut status = match view(&branch)? {
+                    Some(status) => status,
+                    None if !known.is_empty() => match view(&known)? {
+                        Some(status) => status,
+                        None => return Ok(None),
+                    },
+                    None => return Ok(None),
+                };
+                status.draft_review =
+                    std::fs::read_to_string(std::path::Path::new(&dir).join(github::REVIEW_FILE))
+                        .ok()
+                        .and_then(|json| github::parse_review_draft(&json));
+                Ok(Some(status))
             },
-            move |this, status, _| {
+            move |this, read: Result<Option<github::PrStatus>, String>, cx| {
                 this.pr_loading.remove(&id);
-                match status {
-                    Some(status) => {
+                match &read {
+                    Ok(Some(status)) => {
                         if let Some(s) = this.state.session_mut(id) {
                             if s.pr_url != status.url {
                                 s.pr_url = status.url.clone();
@@ -891,12 +899,15 @@ impl RunoApp {
                         if status.state == "OPEN" {
                             this.load_merge_methods(id);
                         }
-                        this.pr_status.insert(id, status);
+                        this.pr_status.insert(id, status.clone());
                     }
-                    None => {
+                    Ok(None) => {
                         this.pr_status.remove(&id);
                     }
+                    // A failed read keeps what was last known on screen.
+                    Err(_) => {}
                 }
+                this.pr_watch_read(id, read, cx);
             },
         );
     }

@@ -88,6 +88,7 @@ mod playbooks;
 mod projects;
 mod proof;
 mod proof_ui;
+mod prwatch;
 mod pty;
 mod radar;
 mod registry;
@@ -725,6 +726,8 @@ struct RunoApp {
     /// Each session's pull request, and the sessions whose PR is being looked up.
     pr_status: HashMap<u64, github::PrStatus>,
     pr_loading: std::collections::HashSet<u64>,
+    /// When each Crew thread's watched pull request is read next.
+    pr_watch: prwatch::Polls,
     /// The merge methods each project's GitHub repository allows, read once a run, and
     /// the projects being read.
     merge_methods: HashMap<u64, Vec<github::MergeMethod>>,
@@ -1827,6 +1830,7 @@ impl RunoApp {
             diff_against: "HEAD".into(),
             pr_status: HashMap::new(),
             pr_loading: Default::default(),
+            pr_watch: Default::default(),
             merge_methods: HashMap::new(),
             merge_methods_loading: Default::default(),
             pr_form: None,
@@ -2121,6 +2125,7 @@ impl RunoApp {
                         this.take_playbook_requests(cx);
                         this.take_phone_requests(cx);
                         this.crew_tick(cx);
+                        this.pr_watch_tick();
                     })
                     .is_err()
                 {

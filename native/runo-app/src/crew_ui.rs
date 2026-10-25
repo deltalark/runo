@@ -31,10 +31,15 @@ pub(crate) fn thread_status(working: bool, s: &Session) -> &'static str {
     let info = s.crew.as_ref();
     if working {
         "working"
-    } else if info.is_some_and(|i| i.decision.is_some()) {
+    } else if info.is_some_and(|i| {
+        i.decision.is_some() || i.watch.as_ref().is_some_and(|w| w.needs.is_some())
+    }) {
         "needs you"
     } else if info.is_some_and(|i| i.resolved) {
         "resolved"
+    } else if info.is_some_and(|i| i.watch.is_some()) {
+        // Done with its turn; Runo watches its pull request and wakes it when needed.
+        "watching"
     } else {
         match s.status {
             Status::Done => "done",
@@ -758,6 +763,8 @@ impl RunoApp {
                 .filter(|r| info.reports.len() > reports || r.at >= at.saturating_sub(1))
                 .map(|r| r.summary.clone());
         }
+        // Watched threads read their pull request again; others look for one to watch.
+        self.watch_turn_ended(id, ok && !stopped);
         let Some(s) = self.state.session(id) else {
             return;
         };

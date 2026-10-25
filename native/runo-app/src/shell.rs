@@ -1101,8 +1101,11 @@ pub(crate) fn need_of(
     if s.archived || running {
         return None;
     }
-    // A Crew thread asking the person to decide something waits on them.
-    if s.crew.as_ref().is_some_and(|i| i.decision.is_some()) {
+    // A Crew thread asking the person to decide something waits on them, as does one
+    // whose pull request the watcher gave up fixing.
+    if s.crew.as_ref().is_some_and(|i| {
+        i.decision.is_some() || i.watch.as_ref().is_some_and(|w| w.needs.is_some())
+    }) {
         return Some(Need::Blocked);
     }
     if let Some((index, _)) = alerts::waiting_on(s) {

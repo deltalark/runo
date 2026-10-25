@@ -321,6 +321,28 @@ pub struct PrStatus {
     pub merge_state: String,
     /// Auto-merge is turned on: GitHub merges it once its checks pass.
     pub auto_merge: bool,
+    /// The branch the pull request merges from, and its latest commit.
+    pub head_branch: String,
+    pub head: String,
+    /// The branch it merges into.
+    pub base: String,
+    /// Who opened it: the account the session's agent pushes with.
+    pub author: String,
+    /// MERGEABLE, CONFLICTING or UNKNOWN.
+    pub mergeable: String,
+    /// Each review and conversation comment with something to say, for telling new
+    /// feedback from others apart from the agent's own.
+    pub voices: Vec<Voice>,
+}
+
+/// One review or conversation comment on a pull request.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct Voice {
+    pub author: String,
+    /// When it was posted, as GitHub's ISO time, which sorts as text.
+    pub at: String,
+    /// A review rather than a conversation comment.
+    pub review: bool,
 }
 
 impl PrStatus {
@@ -417,7 +439,10 @@ pub fn default_merge_method(allowed: &[MergeMethod], remembered: &str) -> Option
         .find(|m| allowed.contains(m))
 }
 
-/// Parse `gh pr view --json number,url,title,state,isDraft,reviewDecision,statusCheckRollup,reviews,comments,mergeStateStatus,autoMergeRequest`.
+/// The fields `parse_pr_status` reads, for `gh pr view --json`.
+pub const PR_FIELDS: &str = "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,reviews,comments,mergeStateStatus,autoMergeRequest,headRefName,headRefOid,baseRefName,author,mergeable";
+
+/// Parse `gh pr view --json` with `PR_FIELDS`.
 pub fn parse_pr_status(json: &str) -> Option<PrStatus> {
     let v: Value = serde_json::from_str(json).ok()?;
     let number = v["number"].as_u64()?;
@@ -430,6 +455,11 @@ pub fn parse_pr_status(json: &str) -> Option<PrStatus> {
         review: s(&v["reviewDecision"]),
         merge_state: s(&v["mergeStateStatus"]),
         auto_merge: v["autoMergeRequest"].is_object(),
+        head_branch: s(&v["headRefName"]),
+        head: s(&v["headRefOid"]),
+        base: s(&v["baseRefName"]),
+        author: s(&v["author"]["login"]),
+        mergeable: s(&v["mergeable"]),
         ..Default::default()
     };
     for check in v["statusCheckRollup"].as_array().into_iter().flatten() {
@@ -470,6 +500,30 @@ pub fn parse_pr_status(json: &str) -> Option<PrStatus> {
         .filter(|r| r["state"] != "APPROVED" && !s(&r["body"]).trim().is_empty())
         .count()
         + v["comments"].as_array().map_or(0, Vec::len);
+    // A review that only left line comments has no body, so reviews count by their
+    // state; a bare approval or a draft not yet sent has nothing to act on.
+    for r in v["reviews"].as_array().into_iter().flatten() {
+        let state = s(&r["state"]);
+        let said = !s(&r["body"]).trim().is_empty();
+        if matches!(state.as_str(), "COMMENTED" | "CHANGES_REQUESTED")
+            || (state == "APPROVED" && said)
+        {
+            status.voices.push(Voice {
+                author: s(&r["author"]["login"]),
+                at: s(&r["submittedAt"]),
+                review: true,
+            });
+        }
+    }
+    for c in v["comments"].as_array().into_iter().flatten() {
+        if !s(&c["body"]).trim().is_empty() {
+            status.voices.push(Voice {
+                author: s(&c["author"]["login"]),
+                at: s(&c["createdAt"]),
+                review: false,
+            });
+        }
+    }
     Some(status)
 }
 
@@ -1515,8 +1569,9 @@ mod tests {
               {"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/o/r/actions/runs/777/job/9"},
               {"__typename":"CheckRun","name":"lint","status":"IN_PROGRESS","conclusion":"","detailsUrl":""},
               {"__typename":"StatusContext","context":"ci/legacy","state":"ERROR","targetUrl":"https://ci.example/1"}],
-            "reviews":[{"author":{"login":"ann"},"state":"CHANGES_REQUESTED","body":"Please rename"},{"author":{"login":"bo"},"state":"APPROVED","body":"ok"}],
-            "comments":[{"author":{"login":"cy"},"body":"Also docs?"}]}"#;
+            "reviews":[{"author":{"login":"ann"},"state":"CHANGES_REQUESTED","body":"Please rename","submittedAt":"2026-10-25T10:00:00Z"},{"author":{"login":"bo"},"state":"APPROVED","body":"ok","submittedAt":"2026-10-25T10:01:00Z"},{"author":{"login":"di"},"state":"COMMENTED","body":"","submittedAt":"2026-10-25T10:02:00Z"},{"author":{"login":"ed"},"state":"APPROVED","body":"","submittedAt":"2026-10-25T10:03:00Z"}],
+            "comments":[{"author":{"login":"cy"},"body":"Also docs?","createdAt":"2026-10-25T10:04:00Z"}],
+            "headRefName":"runo/x","headRefOid":"abc123","baseRefName":"main","author":{"login":"me"},"mergeable":"CONFLICTING"}"#;
         let pr = parse_pr_status(json).unwrap();
         assert_eq!(
             (pr.number, pr.state.as_str(), pr.draft),
@@ -1527,6 +1582,29 @@ mod tests {
         assert_eq!(pr.failed, ["test", "ci/legacy"]);
         assert_eq!(pr.failed_run, Some(777));
         assert_eq!(pr.comments, 2);
+        assert_eq!(
+            (pr.head_branch.as_str(), pr.head.as_str(), pr.base.as_str()),
+            ("runo/x", "abc123", "main")
+        );
+        assert_eq!(
+            (pr.author.as_str(), pr.mergeable.as_str()),
+            ("me", "CONFLICTING")
+        );
+        // A line-comment review counts though its body is empty; a bare approval doesn't.
+        let voices: Vec<(&str, &str, bool)> = pr
+            .voices
+            .iter()
+            .map(|v| (v.author.as_str(), v.at.as_str(), v.review))
+            .collect();
+        assert_eq!(
+            voices,
+            [
+                ("ann", "2026-10-25T10:00:00Z", true),
+                ("bo", "2026-10-25T10:01:00Z", true),
+                ("di", "2026-10-25T10:02:00Z", true),
+                ("cy", "2026-10-25T10:04:00Z", false),
+            ]
+        );
         assert!(parse_pr_status("no pull requests found").is_none());
         assert_eq!(run_id("https://github.com/o/r/actions/runs/42"), Some(42));
         assert_eq!(run_id("https://ci.example/1"), None);
