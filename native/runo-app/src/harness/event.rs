@@ -69,7 +69,9 @@ pub enum ToolKind {
     Plan,
     Question,
     Think,
+    /// Also any kind saved by a newer Runo that this one doesn't know.
     #[default]
+    #[serde(other)]
     Other,
 }
 
@@ -111,7 +113,9 @@ impl ToolKind {
 #[serde(rename_all = "snake_case")]
 pub enum StepState {
     Running,
+    /// Also any state saved by a newer Runo that this one doesn't know.
     #[default]
+    #[serde(other)]
     Done,
     Failed,
 }

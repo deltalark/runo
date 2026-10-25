@@ -9924,6 +9924,8 @@ fn main() {
     applog::init();
     detach::enable(store::data_dir());
     harness::log::enable(store::data_dir());
+    // Before settings or sessions are read, and so before either is saved again.
+    store::keep_before_version_change(&store::data_dir(), env!("CARGO_PKG_VERSION"));
     let app = application().with_assets(assets::AllAssets);
     startup::mark("gpui application");
     // Clicking the Dock icon with the window closed (macOS keeps Runo running) opens it again.
