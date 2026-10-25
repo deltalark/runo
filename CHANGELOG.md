@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Post-turn checks and Crew threads scale with the computer. Settings > Safety > Limits > Checks running at once is Auto by default: one check set per 4 cores and per 6 GB of memory, from 1 to 6, instead of one at a time. Crew threads running at once is Auto too: one per 3 cores and per 4 GB, from 2 to 8. Each shows what Auto comes to, such as "Auto (4 at a time on this Mac: 16 cores, 64 GB)", and the fixed numbers and No limit are still there. Low priority for checks is its own switch, Run checks at low priority, on by default. The old background checks switch carries over: on becomes Auto, off becomes No limit at normal priority; a Crew cap left at the old default of 3 becomes Auto.
+
 ## [0.5.8] - 2026-10-25
 
 ### Fixed

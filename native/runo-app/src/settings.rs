@@ -178,10 +178,25 @@ pub struct AppSettings {
     pub daily_token_limit_k: u32,
     /// Agents that may run at the same time on this machine; 0 for no cap.
     pub max_running: u32,
-    /// Run the checks after each turn at low priority, one set at a time across sessions.
+    /// Settings from before 0.5.9: run the checks after each turn at low priority, one
+    /// set at a time across sessions. Read once by `migrate` into the two below.
+    #[serde(skip_serializing)]
     pub background_checks: bool,
-    /// Crew threads that may run at the same time; the rest wait for a slot. 0 for no cap.
+    /// Post-turn check sets that may run at once across sessions: "auto" (from this
+    /// computer's cores and memory), a number, or "0" for no limit. Empty in settings from
+    /// before 0.5.9 until `migrate` fills it.
+    #[serde(default)]
+    pub checks_at_once: String,
+    /// Run the checks after each turn at low CPU and disk priority.
+    pub checks_low_priority: bool,
+    /// Settings from before 0.5.9: Crew threads that may run at once, 0 for no cap. Read
+    /// once by `migrate` into `crew_threads`.
+    #[serde(skip_serializing)]
     pub crew_running: u32,
+    /// Crew threads that may run at the same time, the rest waiting for a slot: "auto",
+    /// a number, or "0" for no cap. Empty before 0.5.9 until `migrate` fills it.
+    #[serde(default)]
+    pub crew_threads: String,
     /// Percent of an agent plan's usage window past which threads Crew starts and
     /// playbook runs wait; 0 for never. What you start yourself always goes.
     pub plan_hold_percent: u32,
@@ -295,7 +310,10 @@ impl Default for AppSettings {
             daily_token_limit_k: 0,
             max_running: 0,
             background_checks: true,
+            checks_at_once: "auto".into(),
+            checks_low_priority: true,
             crew_running: 3,
+            crew_threads: "auto".into(),
             plan_hold_percent: 0,
             check_runo_updates: true,
             phone_bridge: false,
@@ -345,7 +363,41 @@ impl AppSettings {
     }
 
     pub fn load() -> Self {
-        crate::store::read_json_or_backup(&settings_path())
+        let mut settings: Self = crate::store::read_json_or_backup(&settings_path());
+        settings.migrate();
+        settings
+    }
+
+    /// Fill settings added since the file was written from the ones they replace. The
+    /// background checks switch on becomes Auto at low priority, off becomes no limit at
+    /// normal priority. A Crew cap of 3, the old default, becomes Auto; any other stays.
+    pub fn migrate(&mut self) {
+        if self.checks_at_once.is_empty() {
+            self.checks_at_once = if self.background_checks { "auto" } else { "0" }.into();
+            self.checks_low_priority = self.background_checks;
+        }
+        if self.crew_threads.is_empty() {
+            self.crew_threads = match self.crew_running {
+                3 => "auto".into(),
+                n => n.to_string(),
+            };
+        }
+    }
+
+    /// Check sets that may run at once on this computer; 0 for no limit.
+    pub fn checks_limit(&self) -> usize {
+        crate::hardware::resolve(
+            &self.checks_at_once,
+            crate::hardware::checks_auto(crate::hardware::here()),
+        )
+    }
+
+    /// Crew threads that may run at once on this computer; 0 for no cap.
+    pub fn crew_limit(&self) -> usize {
+        crate::hardware::resolve(
+            &self.crew_threads,
+            crate::hardware::crew_auto(crate::hardware::here()),
+        )
     }
 
     pub fn save(&self) {
@@ -406,7 +458,7 @@ impl AppSettings {
         DAILY_TURNS.store(self.daily_turn_limit, Ordering::Relaxed);
         DAILY_TOKENS_K.store(self.daily_token_limit_k, Ordering::Relaxed);
         MAX_RUNNING.store(self.max_running, Ordering::Relaxed);
-        CREW_RUNNING.store(self.crew_running, Ordering::Relaxed);
+        CREW_RUNNING.store(self.crew_limit() as u32, Ordering::Relaxed);
         PLAN_HOLD.store(self.plan_hold_percent, Ordering::Relaxed);
         CATCH_UP.store(self.playbook_catch_up, Ordering::Relaxed);
         crate::pbrunner::sync_job(self.playbooks_while_closed);
@@ -523,7 +575,8 @@ pub fn max_running() -> usize {
     MAX_RUNNING.load(Ordering::Relaxed) as usize
 }
 
-/// Crew threads allowed to run at once; 0 for no cap.
+/// Crew threads allowed to run at once, with Auto worked out for this computer; 0 for
+/// no cap.
 pub fn crew_running() -> usize {
     CREW_RUNNING.load(Ordering::Relaxed) as usize
 }
@@ -1556,14 +1609,63 @@ mod tests {
     }
 
     #[test]
-    fn cost_controls_default_to_todays_behaviour_but_a_crew_cap_of_three() {
-        let old: AppSettings = serde_json::from_str(r#"{"max_running": 0}"#).unwrap();
-        assert_eq!(old.crew_running, 3);
+    fn cost_controls_default_to_todays_behaviour_but_crew_threads_on_auto() {
+        let mut old: AppSettings = serde_json::from_str(r#"{"max_running": 0}"#).unwrap();
+        old.migrate();
+        assert_eq!(old.crew_threads, "auto");
         assert_eq!(old.plan_hold_percent, 0);
         assert_eq!(old.max_running, 0);
         let claude: super::AgentOptions =
             serde_json::from_str(r#"{"model_override": "opus"}"#).unwrap();
         assert!(claude.subagent_model.is_empty());
+    }
+
+    #[test]
+    fn concurrency_settings_from_0_5_8_still_load_and_carry_over() {
+        let load = |json: &str| {
+            let mut s: AppSettings = serde_json::from_str(json).unwrap();
+            s.migrate();
+            s
+        };
+        // Background checks on: Auto, at low priority.
+        let on = load(r#"{"background_checks":true,"crew_running":3}"#);
+        assert_eq!(on.checks_at_once, "auto");
+        assert!(on.checks_low_priority);
+        assert_eq!(on.crew_threads, "auto");
+        // Off: no limit, normal priority.
+        let off = load(r#"{"background_checks":false,"crew_running":0}"#);
+        assert_eq!(off.checks_at_once, "0");
+        assert!(!off.checks_low_priority);
+        assert_eq!(off.checks_limit(), 0);
+        assert_eq!(off.crew_threads, "0");
+        assert_eq!(off.crew_limit(), 0);
+        // A Crew cap other than the old default stays as chosen.
+        let six = load(r#"{"crew_running":6}"#);
+        assert_eq!(six.crew_threads, "6");
+        assert_eq!(six.crew_limit(), 6);
+        // Missing altogether: the old defaults, so Auto at low priority.
+        let none = load("{}");
+        assert_eq!(
+            (none.checks_at_once.as_str(), none.checks_low_priority),
+            ("auto", true)
+        );
+        // Once saved, the new settings win and the old ones aren't written again.
+        let mut chosen = load(r#"{"background_checks":false}"#);
+        chosen.checks_at_once = "2".into();
+        chosen.checks_low_priority = true;
+        let json = serde_json::to_string(&chosen).unwrap();
+        assert!(!json.contains("background_checks") && !json.contains("crew_running"));
+        let again = load(&json);
+        assert_eq!(again.checks_at_once, "2");
+        assert!(again.checks_low_priority);
+        assert_eq!(again.checks_limit(), 2);
+        // A new install starts on Auto.
+        let fresh = AppSettings::default();
+        assert_eq!(
+            (fresh.checks_at_once.as_str(), fresh.crew_threads.as_str()),
+            ("auto", "auto")
+        );
+        assert!(fresh.checks_limit() >= 1 && fresh.crew_limit() >= 2);
     }
 
     #[test]
