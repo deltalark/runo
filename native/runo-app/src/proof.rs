@@ -44,8 +44,24 @@ impl Proof {
         !self.results.is_empty() && self.results.iter().all(|r| r.ok)
     }
 
+    /// Checks that ran and failed: what a fix turn is for.
     pub fn failed(&self) -> Vec<&CheckRun> {
-        self.results.iter().filter(|r| !r.ok).collect()
+        self.results
+            .iter()
+            .filter(|r| !r.ok && r.infra.is_empty())
+            .collect()
+    }
+
+    /// Why some checks couldn't run, such as "disk full", one reason each; empty when
+    /// every check ran.
+    pub fn couldnt_run(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for r in &self.results {
+            if !r.ok && !r.infra.is_empty() && !out.contains(&r.infra.as_str()) {
+                out.push(&r.infra);
+            }
+        }
+        out
     }
 }
 
@@ -61,6 +77,45 @@ pub struct CheckRun {
     pub tail: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub timed_out: bool,
+    /// Why the check couldn't run, such as "disk full", when the computer stopped it
+    /// rather than the code: it isn't a failure and doesn't start a fix turn.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub infra: String,
+}
+
+/// Why a check that didn't pass couldn't run, from how it ended and what it printed:
+/// a full disk, a kill by a signal (out of memory, or by hand), the time limit, or a
+/// missing tool. `None` when it ran and failed.
+pub fn infra_reason(
+    code: Option<i32>,
+    signal: Option<i32>,
+    timed_out: bool,
+    output: &str,
+) -> Option<&'static str> {
+    let has = |s: &str| output.contains(s);
+    if has("No space left on device") || has("ENOSPC") || has("os error 28") {
+        return Some("disk full");
+    }
+    if timed_out {
+        return Some("timed out");
+    }
+    // The shell reports a child killed by SIGKILL, SIGTERM or SIGINT as 128 + signal,
+    // and build tools print the signal of a compiler they lost.
+    if signal.is_some()
+        || matches!(code, Some(137 | 143 | 130))
+        || has("signal: 9, SIGKILL")
+        || has("signal: 15, SIGTERM")
+    {
+        return Some("stopped by a signal, maybe out of memory");
+    }
+    if code == Some(127)
+        || code == Some(9009)
+        || has("command not found")
+        || has("is not recognized as an internal or external command")
+    {
+        return Some("a tool is missing");
+    }
+    None
 }
 
 /// The project's checks: one command per line, blank lines and `#` comments skipped.
@@ -72,8 +127,90 @@ pub fn commands(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Checks worth suggesting for the project in `dir`, from its manifests.
+/// How much Runo checks after each turn when it picks the commands itself.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Level {
+    /// Each ecosystem's fast check: a compile, type check or lint, no tests.
+    Quick,
+    /// Tests too, plus lint and build scripts.
+    Full,
+}
+
+impl Level {
+    /// The level a setting names: "full", else Quick.
+    pub fn parse(key: &str) -> Self {
+        if key == "full" {
+            Level::Full
+        } else {
+            Level::Quick
+        }
+    }
+}
+
+/// A project's `check_level`: Runo picks the commands at the Settings level, at its own,
+/// runs the person's commands, or runs none.
+pub const LEVEL_DEFAULT: &str = "";
+pub const LEVEL_QUICK: &str = "quick";
+pub const LEVEL_FULL: &str = "full";
+pub const LEVEL_CUSTOM: &str = "custom";
+pub const LEVEL_OFF: &str = "off";
+
+/// What a project runs after each turn.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Plan {
+    Off,
+    /// The commands the person typed, as they are.
+    Custom(Vec<String>),
+    /// The commands `detect` finds in the session's folder at this level.
+    Detect(Level),
+}
+
+/// A project's level key, with a project saved before levels read as `migrate` would.
+pub fn level_key<'a>(level: Option<&'a str>, checks: &str) -> &'a str {
+    match level {
+        Some(level) => level,
+        None if commands(checks).is_empty() => LEVEL_DEFAULT,
+        None => LEVEL_CUSTOM,
+    }
+}
+
+/// What to run for a project with `level` and typed `checks`, under the Settings level.
+pub fn plan(level: Option<&str>, checks: &str, default: Level) -> Plan {
+    match level_key(level, checks) {
+        LEVEL_OFF => Plan::Off,
+        LEVEL_CUSTOM => Plan::Custom(commands(checks)),
+        LEVEL_QUICK => Plan::Detect(Level::Quick),
+        LEVEL_FULL => Plan::Detect(Level::Full),
+        _ => Plan::Detect(default),
+    }
+}
+
+/// The level for a project saved before levels, and whether its typed checks stay. Its
+/// checks are the person's own unless they are just what Runo suggests for the folder
+/// (`suggested`), which now follow the Settings level, Quick unless changed.
+pub fn migrate(checks: &str, suggested: &[String]) -> (&'static str, bool) {
+    let mut have = commands(checks);
+    if have.is_empty() {
+        return (LEVEL_DEFAULT, false);
+    }
+    let mut found = suggested.to_vec();
+    have.sort();
+    found.sort();
+    if have == found {
+        (LEVEL_DEFAULT, false)
+    } else {
+        (LEVEL_CUSTOM, true)
+    }
+}
+
+/// The full set of checks worth suggesting for the project in `dir`, from its manifests.
 pub fn detect(dir: &Path) -> Vec<String> {
+    detect_at(dir, Level::Full)
+}
+
+/// The checks for the project in `dir` at `level`, from its manifests.
+pub fn detect_at(dir: &Path, level: Level) -> Vec<String> {
+    let quick = level == Level::Quick;
     let mut out = Vec::new();
     let has = |name: &str| dir.join(name).exists();
     if has("package.json") {
@@ -100,34 +237,51 @@ pub fn detect(dir: &Path) -> Vec<String> {
             if script.contains("no test specified") {
                 continue;
             }
+            if quick && !matches!(name, "typecheck" | "lint") {
+                continue;
+            }
             out.push(if pm == "npm" && name == "test" {
                 "npm test".to_string()
             } else {
                 format!("{pm} run {name}")
             });
+            // Quick runs the type check, or the lint when there is none.
+            if quick {
+                break;
+            }
         }
     }
     if has("Cargo.toml") {
-        out.push("cargo test".into());
+        out.push(if quick { "cargo check" } else { "cargo test" }.into());
     }
     if has("go.mod") {
         out.push("go vet ./...".into());
-        out.push("go test ./...".into());
+        if !quick {
+            out.push("go test ./...".into());
+        }
     }
     if has("pyproject.toml") || has("setup.py") || has("requirements.txt") {
         let pyproject = std::fs::read_to_string(dir.join("pyproject.toml")).unwrap_or_default();
         if pyproject.contains("ruff") || has("ruff.toml") || has(".ruff.toml") {
             out.push("ruff check .".into());
         }
-        if pyproject.contains("pytest") || has("pytest.ini") || has("tests") {
+        if !quick && (pyproject.contains("pytest") || has("pytest.ini") || has("tests")) {
             out.push("pytest -q".into());
         }
     }
     if out.is_empty() && has("Makefile") {
         let make = std::fs::read_to_string(dir.join("Makefile")).unwrap_or_default();
-        for target in ["check", "lint", "test"] {
+        let targets: &[&str] = if quick {
+            &["check", "lint"]
+        } else {
+            &["check", "lint", "test"]
+        };
+        for target in targets {
             if make.lines().any(|l| l.starts_with(&format!("{target}:"))) {
                 out.push(format!("make {target}"));
+                if quick {
+                    break;
+                }
             }
         }
     }
@@ -411,6 +565,12 @@ fn run_one(
                 secs: 0,
                 tail: format!("Could not start it: {error}"),
                 timed_out: false,
+                infra: if error.kind() == std::io::ErrorKind::NotFound {
+                    "a tool is missing"
+                } else {
+                    infra_reason(None, None, false, &error.to_string()).unwrap_or_default()
+                }
+                .into(),
             }
         }
     };
@@ -453,6 +613,17 @@ fn run_one(
         None => String::new(),
     };
     let timed_out = status.is_none();
+    let ok = status.is_some_and(|s| s.success());
+    let code = status.and_then(|s| s.code());
+    #[cfg(unix)]
+    let signal = status.and_then(|s| std::os::unix::process::ExitStatusExt::signal(&s));
+    #[cfg(not(unix))]
+    let signal = None;
+    let infra = if ok {
+        ""
+    } else {
+        infra_reason(code, signal, timed_out, &text).unwrap_or_default()
+    };
     let mut tail = tail(&crate::agent::strip_ansi(&text));
     if timed_out {
         tail = format!("Stopped after {} minutes.", limit.as_secs() / 60);
@@ -463,10 +634,11 @@ fn run_one(
     }
     CheckRun {
         command: command.into(),
-        ok: status.is_some_and(|s| s.success()),
+        ok,
         secs,
         tail,
         timed_out,
+        infra: infra.into(),
     }
 }
 
@@ -490,7 +662,7 @@ pub fn tail(text: &str) -> String {
 pub fn failure_key(results: &[CheckRun]) -> String {
     results
         .iter()
-        .filter(|r| !r.ok)
+        .filter(|r| !r.ok && r.infra.is_empty())
         .map(|r| {
             let end: Vec<&str> = r
                 .tail
@@ -512,7 +684,10 @@ pub fn failure_key(results: &[CheckRun]) -> String {
 
 /// The follow-up that asks the agent to make the failing checks pass.
 pub fn fix_prompt(results: &[CheckRun]) -> String {
-    let failed: Vec<&CheckRun> = results.iter().filter(|r| !r.ok).collect();
+    let failed: Vec<&CheckRun> = results
+        .iter()
+        .filter(|r| !r.ok && r.infra.is_empty())
+        .collect();
     let mut out = format!(
         "Runo ran the project's checks after your last turn and {} failed. Fix the cause in \
          the code. Don't skip, disable or loosen tests or lint rules to make them pass. Run \
@@ -525,8 +700,7 @@ pub fn fix_prompt(results: &[CheckRun]) -> String {
         if failed.len() == 1 { "" } else { "s" }
     );
     for r in failed {
-        let why = if r.timed_out { " (timed out)" } else { "" };
-        out.push_str(&format!("\n`{}`{why}:\n```\n{}\n```\n", r.command, r.tail));
+        out.push_str(&format!("\n`{}`:\n```\n{}\n```\n", r.command, r.tail));
     }
     out
 }
@@ -540,12 +714,12 @@ pub fn tested_note(proof: &Proof) -> String {
         .results
         .iter()
         .map(|r| {
-            let verdict = if r.timed_out {
-                "timed out"
-            } else if r.ok {
-                "passed"
+            let verdict = if r.ok {
+                "passed".to_string()
+            } else if !r.infra.is_empty() {
+                format!("couldn't run: {}", r.infra)
             } else {
-                "failed"
+                "failed".to_string()
             };
             format!("`{}` {verdict} ({}s)", r.command, r.secs)
         })
@@ -722,6 +896,197 @@ mod tests {
         .unwrap();
         std::fs::remove_file(dir.join("Cargo.toml")).unwrap();
         assert!(detect(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quick_runs_each_languages_fast_check_and_full_runs_tests() {
+        let dir = temp("levels");
+        let quick = |d: &Path| detect_at(d, Level::Quick);
+        let full = |d: &Path| detect_at(d, Level::Full);
+        // JS/TS: the typecheck script, else lint, else nothing.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"typecheck":"tsc","lint":"eslint .","test":"vitest","build":"vite build"}}"#,
+        )
+        .unwrap();
+        assert_eq!(quick(&dir), vec!["npm run typecheck"]);
+        assert_eq!(
+            full(&dir),
+            vec![
+                "npm run typecheck",
+                "npm run lint",
+                "npm test",
+                "npm run build"
+            ]
+        );
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"lint":"eslint .","test":"vitest"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("yarn.lock"), "").unwrap();
+        assert_eq!(quick(&dir), vec!["yarn run lint"]);
+        std::fs::write(dir.join("package.json"), r#"{"scripts":{"test":"vitest"}}"#).unwrap();
+        assert!(quick(&dir).is_empty());
+        assert_eq!(full(&dir), vec!["yarn run test"]);
+        std::fs::remove_file(dir.join("package.json")).unwrap();
+        // Rust.
+        std::fs::write(dir.join("Cargo.toml"), "[package]").unwrap();
+        assert_eq!(quick(&dir), vec!["cargo check"]);
+        assert_eq!(full(&dir), vec!["cargo test"]);
+        std::fs::remove_file(dir.join("Cargo.toml")).unwrap();
+        // Go.
+        std::fs::write(dir.join("go.mod"), "module x").unwrap();
+        assert_eq!(quick(&dir), vec!["go vet ./..."]);
+        assert_eq!(full(&dir), vec!["go vet ./...", "go test ./..."]);
+        std::fs::remove_file(dir.join("go.mod")).unwrap();
+        // Python: ruff, no pytest.
+        std::fs::write(
+            dir.join("pyproject.toml"),
+            "[tool.ruff]\n[tool.pytest.ini_options]\n",
+        )
+        .unwrap();
+        assert_eq!(quick(&dir), vec!["ruff check ."]);
+        assert_eq!(full(&dir), vec!["ruff check .", "pytest -q"]);
+        std::fs::remove_file(dir.join("pyproject.toml")).unwrap();
+        // make: check, else lint.
+        std::fs::write(
+            dir.join("Makefile"),
+            "lint:\n\tx\ncheck:\n\ty\ntest:\n\tz\n",
+        )
+        .unwrap();
+        assert_eq!(quick(&dir), vec!["make check"]);
+        assert_eq!(full(&dir), vec!["make check", "make lint", "make test"]);
+        std::fs::write(dir.join("Makefile"), "lint:\n\tx\ntest:\n\tz\n").unwrap();
+        assert_eq!(quick(&dir), vec!["make lint"]);
+        std::fs::write(dir.join("Makefile"), "test:\n\tz\n").unwrap();
+        assert!(quick(&dir).is_empty());
+        assert_eq!(detect(&dir), full(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn projects_follow_their_level_and_keep_typed_commands() {
+        let typed = "make e2e\n";
+        assert_eq!(plan(None, "", Level::Quick), Plan::Detect(Level::Quick));
+        assert_eq!(
+            plan(None, typed, Level::Quick),
+            Plan::Custom(vec!["make e2e".into()])
+        );
+        assert_eq!(
+            plan(Some(""), typed, Level::Full),
+            Plan::Detect(Level::Full)
+        );
+        assert_eq!(
+            plan(Some("quick"), "", Level::Full),
+            Plan::Detect(Level::Quick)
+        );
+        assert_eq!(
+            plan(Some("full"), "", Level::Quick),
+            Plan::Detect(Level::Full)
+        );
+        assert_eq!(
+            plan(Some("custom"), typed, Level::Quick),
+            Plan::Custom(vec!["make e2e".into()])
+        );
+        assert_eq!(plan(Some("off"), typed, Level::Quick), Plan::Off);
+        assert_eq!(Level::parse("full"), Level::Full);
+        assert_eq!(Level::parse(""), Level::Quick);
+    }
+
+    #[test]
+    fn old_projects_move_to_quick_unless_their_commands_were_typed() {
+        let suggested = vec!["pnpm run lint".to_string(), "cargo test".to_string()];
+        // No checks: the Settings level, Quick unless changed.
+        assert_eq!(migrate("", &suggested), (LEVEL_DEFAULT, false));
+        // Just what Runo suggested, in any order: the Settings level too.
+        assert_eq!(
+            migrate("cargo test\npnpm run lint\n", &suggested),
+            (LEVEL_DEFAULT, false)
+        );
+        // Anything the person changed stays as typed.
+        assert_eq!(migrate("cargo test", &suggested), (LEVEL_CUSTOM, true));
+        assert_eq!(migrate("cargo nextest run", &[]), (LEVEL_CUSTOM, true));
+        assert_eq!(level_key(None, "cargo nextest run"), LEVEL_CUSTOM);
+        assert_eq!(level_key(None, "# none\n"), LEVEL_DEFAULT);
+    }
+
+    #[test]
+    fn the_computer_stopping_a_check_is_not_a_failure() {
+        let disk = "error: failed to write: No space left on device (os error 28)";
+        assert_eq!(
+            infra_reason(Some(101), None, false, disk),
+            Some("disk full")
+        );
+        assert_eq!(
+            infra_reason(Some(1), None, false, "npm ERR! ENOSPC"),
+            Some("disk full")
+        );
+        assert_eq!(infra_reason(None, None, true, ""), Some("timed out"));
+        assert!(infra_reason(None, Some(9), false, "")
+            .unwrap()
+            .contains("signal"));
+        assert!(infra_reason(Some(137), None, false, "")
+            .unwrap()
+            .contains("signal"));
+        let lost = "error: could not compile `x`\nCaused by: process didn't exit successfully: `rustc` (signal: 9, SIGKILL: kill)";
+        assert!(infra_reason(Some(101), None, false, lost)
+            .unwrap()
+            .contains("signal"));
+        assert_eq!(
+            infra_reason(Some(127), None, false, "sh: ruff: command not found"),
+            Some("a tool is missing")
+        );
+        // The code failing is a failure.
+        assert_eq!(
+            infra_reason(Some(101), None, false, "test x ... FAILED"),
+            None
+        );
+        assert_eq!(
+            infra_reason(Some(1), None, false, "error[E0308]: mismatched types"),
+            None
+        );
+
+        let proof = Proof {
+            results: vec![
+                CheckRun {
+                    command: "cargo check".into(),
+                    ok: false,
+                    tail: disk.into(),
+                    infra: "disk full".into(),
+                    ..Default::default()
+                },
+                CheckRun {
+                    command: "go vet ./...".into(),
+                    ok: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(!proof.passed());
+        assert!(proof.failed().is_empty());
+        assert_eq!(proof.couldnt_run(), vec!["disk full"]);
+        assert_eq!(failure_key(&proof.results), "");
+        assert!(tested_note(&proof).contains("`cargo check` couldn't run: disk full"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_tool_or_a_kill_is_reported_as_couldnt_run() {
+        let dir = temp("infra");
+        let d = dir.to_string_lossy().to_string();
+        let limit = Duration::from_secs(20);
+        let missing = run_one(&d, "no-such-tool-for-runo-checks", limit, false, &[]);
+        assert!(!missing.ok);
+        assert_eq!(missing.infra, "a tool is missing", "{missing:?}");
+        let killed = run_one(&d, "kill -9 $$", limit, false, &[]);
+        assert!(!killed.ok && killed.infra.contains("signal"), "{killed:?}");
+        let failed = run_one(&d, "exit 1", limit, false, &[]);
+        assert!(!failed.ok && failed.infra.is_empty());
+        let timed = run_one(&d, "sleep 5", Duration::from_millis(300), false, &[]);
+        assert_eq!(timed.infra, "timed out");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

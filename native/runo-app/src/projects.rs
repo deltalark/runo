@@ -82,6 +82,8 @@ pub(crate) struct ProjectForm {
     pub sync_setup: Option<String>,
     /// The checks to put in their field on the next render.
     pub sync_checks: Option<String>,
+    /// Which checks run after each turn: a `proof::LEVEL_*` key, empty for Settings'.
+    pub check_level: String,
     /// Failing checks go back to the agent on their own this many times in a row.
     pub fix_rounds: u32,
     pub error: Option<String>,
@@ -590,6 +592,7 @@ impl RunoApp {
             filled_name: String::new(),
             sync_setup: Some(String::new()),
             sync_checks: Some(String::new()),
+            check_level: String::new(),
             fix_rounds: 0,
             error: None,
             sync_path: Some(String::new()),
@@ -636,6 +639,7 @@ impl RunoApp {
             filled_name: String::new(),
             sync_setup: Some(p.setup.clone()),
             sync_checks: Some(p.checks.clone()),
+            check_level: crate::proof::level_key(p.check_level.as_deref(), &p.checks).into(),
             fix_rounds: p.fix_rounds,
             error: None,
             sync_path: None,
@@ -949,6 +953,7 @@ impl RunoApp {
         let setup = self.project_setup.read(cx).value().trim().to_string();
         let checks = self.project_checks.read(cx).value().trim().to_string();
         let fix_rounds = form.fix_rounds;
+        let check_level = form.check_level.clone();
         let crew = form.crew;
         let color = COLORS[form.color].0.to_string();
         let glyph = ICONS[form.icon].0.to_string();
@@ -961,6 +966,7 @@ impl RunoApp {
                 p.icon = glyph;
                 p.setup = setup;
                 p.checks = checks;
+                p.check_level = Some(check_level);
                 p.fix_rounds = fix_rounds;
             }
             self.set_project_mode(pid, crew);
@@ -1027,6 +1033,7 @@ impl RunoApp {
                 if let Some(p) = self.state.projects.last_mut() {
                     p.setup = setup;
                     p.checks = checks;
+                    p.check_level = Some(check_level);
                     p.fix_rounds = fix_rounds;
                     if crew {
                         p.mode = crate::crew::MODE_CREW.into();

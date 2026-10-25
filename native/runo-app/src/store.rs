@@ -374,6 +374,10 @@ pub struct Project {
     /// typecheck, build). Empty runs none.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub checks: String,
+    /// Which checks run: `proof::LEVEL_*`, where empty follows Settings. `None` only for
+    /// a project saved before levels, until `State::load` migrates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_level: Option<String>,
     /// How many times in a row failing checks go back to the agent on their own; 0 asks.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub fix_rounds: u32,
@@ -1112,6 +1116,24 @@ pub fn data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".runo"))
 }
 
+/// Give a project saved before check levels its level: checks Runo suggested follow the
+/// Settings level from now on, and commands the person typed stay as they are.
+fn migrate_check_level(project: &mut Project) {
+    if project.check_level.is_some() {
+        return;
+    }
+    let suggested = if crate::proof::commands(&project.checks).is_empty() {
+        Vec::new()
+    } else {
+        crate::proof::detect(Path::new(&project.path))
+    };
+    let (level, keep) = crate::proof::migrate(&project.checks, &suggested);
+    project.check_level = Some(level.into());
+    if !keep {
+        project.checks.clear();
+    }
+}
+
 fn state_path() -> PathBuf {
     data_dir().join("state.json")
 }
@@ -1147,6 +1169,9 @@ impl State {
                     "Interrupted: Runo closed while this run was active.",
                 ));
             }
+        }
+        for project in &mut state.projects {
+            migrate_check_level(project);
         }
         state
     }
