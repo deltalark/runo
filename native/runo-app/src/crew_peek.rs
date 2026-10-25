@@ -340,7 +340,8 @@ impl RunoApp {
                                     .rounded_md()
                                     .object_fit(ObjectFit::Cover),
                                 cx,
-                            ),
+                            )
+                            .size(px(56.)),
                         );
                     }
                     div()

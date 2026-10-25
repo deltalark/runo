@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- A picture attached to a message no longer spills over the message's text and the rows below it. Thumbnails take their size from the picture before it loads, keep its shape within 220 × 160, and very tall or very wide pictures are cropped rather than shrunk to a sliver. Steps that read an attachment show its file name instead of the `.runo/attachments/…` path.
+
 ## [0.5.8] - 2026-10-25
 
 ### Fixed
