@@ -1950,7 +1950,6 @@ impl RunoApp {
         // Coming back to the window picks up git commands run elsewhere.
         let activation_sub = cx.observe_window_activation(window, |this, window, cx| {
             this.window_active = window.is_window_active();
-            wake::set_active(this.window_active);
             if this.window_active {
                 this.refresh();
                 cx.notify();
@@ -1959,7 +1958,6 @@ impl RunoApp {
         app._subscriptions.push(activation_sub);
         // Hidden, minimized or covered: periodic work that only changes the window stops
         // until it is on screen again (see `idle`). Taken as shown until told otherwise.
-        wake::set_active(window.is_window_active());
         let visibility_sub = cx.observe_window_visibility(window, |this, visibility, _, cx| {
             this.window_shown(visibility.is_visible(), cx);
         });

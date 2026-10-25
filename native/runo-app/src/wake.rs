@@ -2,8 +2,8 @@
 //!
 //! - [`Inbox`] takes over a channel's receiving end, so the UI wakes when something
 //!   arrives instead of checking the channel on a timer.
-//! - [`shown`] and [`active`] say whether the window can be seen and has focus, so
-//!   periodic work can slow down or stop while Runo is hidden, minimized or covered.
+//! - [`shown`] says whether the window can be seen, so periodic work can slow down or
+//!   stop while Runo is hidden, minimized or covered.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -15,7 +15,6 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 static SHOWN: AtomicBool = AtomicBool::new(true);
-static ACTIVE: AtomicBool = AtomicBool::new(true);
 
 /// Whether any part of the main window is on screen: not hidden, minimized, covered or
 /// on a sleeping display.
@@ -23,17 +22,8 @@ pub fn shown() -> bool {
     SHOWN.load(Ordering::Relaxed)
 }
 
-/// Whether the main window has focus.
-pub fn active() -> bool {
-    ACTIVE.load(Ordering::Relaxed)
-}
-
 pub fn set_shown(on: bool) {
     SHOWN.store(on, Ordering::Relaxed);
-}
-
-pub fn set_active(on: bool) {
-    ACTIVE.store(on, Ordering::Relaxed);
 }
 
 /// `front` while the window is on screen, `hidden` otherwise.
