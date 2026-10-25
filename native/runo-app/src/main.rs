@@ -433,17 +433,7 @@ struct RunoApp {
     diff: String,
     files: Vec<String>,
     /// The file shown in the Files tab (or the main area), and its editor.
-    open_file: Option<fileview::OpenFile>,
-    pending_file: Option<String>,
-    file_editor: Entity<gpui_kit::component::input::EditorState>,
-    file_preview: bool,
-    file_dirty: bool,
-    /// The editor's text while it has unsaved changes.
-    file_text: String,
-    /// Waiting on a Save / Discard answer before opening another file or closing.
-    file_leave: Option<fileview::Leave>,
-    /// The open file changed on disk while it had unsaved changes.
-    file_conflict: bool,
+    file: fileview::FileEditor,
     /// Unsaved edits of sessions switched away from, with their files.
     unsaved: HashMap<u64, (fileview::OpenFile, String)>,
     /// Where the main-area editor returns to.
@@ -1641,14 +1631,7 @@ impl RunoApp {
             selected_file: None,
             diff: String::new(),
             files: Vec::new(),
-            open_file: None,
-            pending_file: None,
-            file_editor,
-            file_preview: false,
-            file_dirty: false,
-            file_text: String::new(),
-            file_leave: None,
-            file_conflict: false,
+            file: fileview::FileEditor::new(file_editor),
             unsaved: HashMap::new(),
             editor_back: View::Session,
             new_back: View::Session,
@@ -2436,8 +2419,8 @@ impl RunoApp {
         self.view = View::Session;
         self.selected_file = None;
         self.diff.clear();
-        if self.open_file.is_some() && !self.file_dirty {
-            self.open_file = None;
+        if self.file.open.is_some() && !self.file.dirty {
+            self.file.open = None;
         }
         self.confirm_delete = None;
         self.confirm_discard = None;
@@ -2913,7 +2896,7 @@ impl RunoApp {
 
     /// Show a file of the current session in the Files tab; applied on the next frame.
     fn open_preview(&mut self, path: &str) {
-        self.pending_file = Some(path.to_string());
+        self.file.pending = Some(path.to_string());
     }
 
     pub(crate) fn open_settings(&mut self) {
@@ -9023,7 +9006,7 @@ impl Render for RunoApp {
         if window.focused(cx).is_none() {
             window.focus(&self.focus, cx);
         }
-        if let Some(path) = self.pending_file.take() {
+        if let Some(path) = self.file.pending.take() {
             self.open_or_ask(&path, window, cx);
         }
         self.home_focus(window, cx);

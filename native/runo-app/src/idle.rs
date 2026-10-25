@@ -200,9 +200,9 @@ impl RunoApp {
         }
         let second = clock.second.due(Duration::from_secs(1));
         if second {
-            let before = (self.file_conflict, self.pending_file.is_some());
+            let before = (self.file.conflict, self.file.pending.is_some());
             self.watch_open_file();
-            if before != (self.file_conflict, self.pending_file.is_some()) {
+            if before != (self.file.conflict, self.file.pending.is_some()) {
                 cx.notify();
             }
         }
