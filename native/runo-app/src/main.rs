@@ -5823,7 +5823,6 @@ impl RunoApp {
                         )
                         .children(self.new_messages_pill(session, cx)),
                 )
-                .children(self.crew_route_bar(session, cx))
                 .child(self.composer(provider, working, cx))
                 .into_any_element()
         };
@@ -6424,6 +6423,7 @@ impl RunoApp {
             .pb_3()
             .v_flex()
             .gap(px(6.))
+            .children(self.crew_route_bar(session, cx))
             .children(self.composer_extras(cx))
             .child(
                 div()
