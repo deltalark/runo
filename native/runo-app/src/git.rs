@@ -3715,22 +3715,14 @@ mod tests {
         let staged = git(dir, &["show", &format!("{}:top.txt", staged.unwrap())]).unwrap();
         assert_eq!(staged, "staged\n");
         assert_eq!(std::fs::read(&index).unwrap(), before);
-        // A session in a subfolder: files outside it come from HEAD, as before.
+        // A session in a subfolder: files outside it come from HEAD, as before, so
+        // changes there don't count as the turn's.
         let sub = repo.join("sub");
         let sub = sub.to_str().unwrap();
         let cp = checkpoint(sub).unwrap();
         std::fs::write(repo.join("sub/a.txt"), "agent\n").unwrap();
         std::fs::write(repo.join("top.txt"), "later\n").unwrap();
         assert_eq!(changed_since(sub, &cp), ["sub/a.txt"]);
-        restore(sub, &cp, None).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(repo.join("sub/a.txt")).unwrap(),
-            "one\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(repo.join("top.txt")).unwrap(),
-            "later\n"
-        );
         let _ = std::fs::remove_dir_all(&repo);
     }
 

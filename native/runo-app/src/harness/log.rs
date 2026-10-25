@@ -519,6 +519,8 @@ mod tests {
             .set_len(ROTATE_AT)
             .unwrap();
         drop(TurnLog::start(Some(&dir), 7, 4, "claude", ""));
+        // Set aside on the writer thread.
+        drain();
         assert_eq!(
             std::fs::metadata(file.with_file_name("events.1.jsonl"))
                 .unwrap()
