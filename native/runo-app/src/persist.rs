@@ -55,6 +55,8 @@ fn write_text(path: &Path, text: &str) -> bool {
 pub struct Written {
     sessions: HashMap<u64, u64>,
     index: u64,
+    /// Why the index could be read only in part, when it could.
+    pub index_error: Option<String>,
 }
 
 /// The index file: everything but the sessions, plus the ids of the session files.
@@ -122,9 +124,18 @@ pub fn read(index: &Path) -> Result<(State, Written), String> {
         .and_then(|o| o.remove("session_files"))
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
-    let mut state: State = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    // An index that doesn't read as a whole keeps what does (see `store::salvage`), and
+    // says why, so the loader can keep a copy of the file before it is saved over.
+    let (mut state, index_error) = match serde_json::from_value::<State>(value.clone()) {
+        Ok(state) => (state, None),
+        Err(error) => match crate::store::salvage::<State>(value) {
+            Some(state) => (state, Some(error.to_string())),
+            None => return Err(error.to_string()),
+        },
+    };
     let mut written = Written {
         index: digest(&text),
+        index_error,
         ..Default::default()
     };
     let root = index.parent().unwrap_or(Path::new("."));
@@ -152,7 +163,17 @@ pub fn read(index: &Path) -> Result<(State, Written), String> {
                 written.sessions.insert(id, digest(&text));
                 state.sessions.push(session);
             }
-            Err(error) => crate::store::move_aside(&path, &error.to_string()),
+            Err(error) => {
+                // The file is kept beside it as it was, and what can still be read of the
+                // session stays in the sidebar instead of disappearing.
+                crate::store::move_aside(&path, &error.to_string());
+                let salvaged = serde_json::from_str(&text)
+                    .ok()
+                    .and_then(crate::store::salvage::<Session>);
+                if let Some(session) = salvaged.filter(|s| s.id == id) {
+                    state.sessions.push(session);
+                }
+            }
         }
     }
     Ok((state, written))
