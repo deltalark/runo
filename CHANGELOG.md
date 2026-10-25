@@ -4,9 +4,37 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+## [0.5.10] - 2026-10-26
+
 ### Added
 
+- Grok runs through xAI's official Grok Build CLI, which signs in with a SuperGrok or X Premium+ subscription (`grok login`) or `XAI_API_KEY`. It replaces the community grok-cli.
 - Check for Updates… in the Runo menu and Check for updates in the palette. Both check GitHub right away and open Settings on the Updates row, where the result shows.
+- Copy diagnostics in Settings, next to the logs: your version, system, agent CLIs, settings without secrets and the end of the log, to paste into a bug report.
+- Helper agents show on the Working line ("Working · 2 helper agents"), the thread card and the peek; click the line to see each one's latest step.
+- A per-project opt-in, Trust agent settings in this repository, for Cursor and Gemini MCP servers and hooks committed to the repo.
+
+### Changed
+
+- Runo's data folder `~/.runo` is private to you (0700, files 0600), existing installs are tightened on start, and saves go through a fresh private file instead of writing through links. Approval answers are signed, so only the Runo that asked can answer.
+- Post-turn checks wait for you when the turn changed a file that defines what they run, such as `package.json` or a `Makefile`, so agent-written scripts don't run on their own.
+- Approval cards and the Inbox show the whole command, and say what the one-line summaries leave out. Always allow saves a narrow rule (such as `Bash(npm test:*)`) for that project only, never a bare `Bash`, and isn't offered for chained or piped commands; an earlier allow-all-shell rule is flagged once.
+- A pull request comment wakes a watched thread only when it comes from the repository's owner, members or collaborators, the PR's author or an installed app; other comments are quoted as information, never instructions.
+- Calls from a VM or server over the relay can use only the tools that connection needs, and shared folders no longer follow symlinks.
+- Prompts, SSH hosts and playbook links that start with `-` can no longer be read as command-line options.
+- Update downloads are checked against the release's SHA256SUMS (and its signature, once a signing key is set) before Runo offers them.
+- Threads' decisions reach Crew too, a thread can send several messages to Crew in a turn, and Crew's prompt puts a thread's words under their own heading.
+- Crew's rules include guidance for fast threads.
+- The context % uses the model's real context window instead of assuming 200k.
+- Each launch's log is capped at about 30 MB.
+- Going back to an older Runo keeps your sessions and settings: values it doesn't know load as defaults, and copies are kept before a version change.
+- Releases list SHA-256 checksums for every file in SHA256SUMS. Apple signing secrets are scoped to the signing steps.
+- Builds use a pinned Rust toolchain (1.99.0), CI lints the Windows build, and dependencies are checked with cargo-deny. Updated rustls, rustls-webpki and other crates for six security advisories.
+- Internal refactors (browser locks, file editor and Browser tab state) with no change in behaviour, and new tests for the updater and cleanup.
+
+### Fixed
+
+- On Windows, features that read only `HOME` (playbook and Cove `~/` paths, save dialogs, and more) now use your profile folder. Step labels no longer show full `C:\` paths, and Keep the computer awake says it doesn't work on Windows yet.
 
 ## [0.5.9] - 2026-10-25
 
