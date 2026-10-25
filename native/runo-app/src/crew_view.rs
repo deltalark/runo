@@ -850,7 +850,8 @@ impl RunoApp {
         Some(body.into_any_element())
     }
 
-    /// Over Crew's composer: where the next message goes.
+    /// Over Crew's composer, inside its column so the two share a left edge: where the next
+    /// message goes.
     pub(crate) fn crew_route_bar(
         &self,
         session: &Session,
@@ -878,13 +879,6 @@ impl RunoApp {
         }
         Some(
             div()
-                .w_full()
-                .when_some(cx.global::<AppSettings>().content_max_width(), |el, w| {
-                    el.max_w(px(w))
-                })
-                .mx_auto()
-                .px_8()
-                .pt_2()
                 .flex()
                 .items_center()
                 .gap_2()
