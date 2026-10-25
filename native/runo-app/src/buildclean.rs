@@ -153,55 +153,14 @@ pub fn busy(activity: Activity, cwds: &[PathBuf], worktree: &Path) -> Option<Str
         .then(|| "a program is running in it".into())
 }
 
-/// Working folders from `lsof -d cwd -Fn`: its `n` lines.
-#[cfg(any(target_os = "macos", test))]
-fn parse_lsof_cwds(text: &str) -> Vec<PathBuf> {
-    text.lines()
-        .filter_map(|l| l.strip_prefix('n'))
-        .filter(|p| p.starts_with('/'))
-        .map(PathBuf::from)
-        .collect()
-}
-
-#[cfg(target_os = "macos")]
-fn raw_cwds() -> Vec<PathBuf> {
-    std::process::Command::new("lsof")
-        .args(["-nP", "-d", "cwd", "-Fn"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .map(|o| parse_lsof_cwds(&String::from_utf8_lossy(&o.stdout)))
-        .unwrap_or_default()
-}
-
-#[cfg(target_os = "linux")]
-fn raw_cwds() -> Vec<PathBuf> {
-    std::fs::read_dir("/proc")
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|e| {
-                    e.file_name()
-                        .to_string_lossy()
-                        .bytes()
-                        .all(|b| b.is_ascii_digit())
-                })
-                .filter_map(|e| std::fs::read_link(e.path().join("cwd")).ok())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Elsewhere (Windows) there is no cheap way to tell; Runo's own state and skipping
-/// files another program holds open cover it.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn raw_cwds() -> Vec<PathBuf> {
-    Vec::new()
-}
-
-/// Every process's working folder that can be read, normalized.
+/// Every process's working folder that can be read, normalized. Read from the kernel
+/// (`procs`), not with `lsof`, which takes a good part of a second.
 pub fn cwds() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = raw_cwds().iter().map(|p| norm(p)).collect();
+    let mut out: Vec<PathBuf> = crate::procs::all()
+        .into_iter()
+        .filter_map(|p| p.cwd)
+        .map(|p| norm(&p))
+        .collect();
     out.sort();
     out.dedup();
     out
@@ -300,8 +259,19 @@ fn remove_tree(dir: &Path, out: &mut Freed) {
 /// what Runo knows of; processes are looked up here). Returns how much was freed, or why
 /// it was left alone. Slow: run it off the UI thread.
 pub fn free(repo: &str, worktree: &Path, activity: Activity) -> Result<Freed, String> {
+    free_unless(repo, worktree, activity, &cwds())
+}
+
+/// `free`, with the processes' working folders (`cwds`) already read, so a pass over
+/// many worktrees reads them once.
+pub fn free_unless(
+    repo: &str,
+    worktree: &Path,
+    activity: Activity,
+    cwds: &[PathBuf],
+) -> Result<Freed, String> {
     let path = checked(repo, worktree)?;
-    if let Some(why) = busy(activity, &cwds(), &path) {
+    if let Some(why) = busy(activity, cwds, &path) {
         return Err(format!("left alone: {why}"));
     }
     let mut freed = Freed::default();
@@ -532,21 +502,12 @@ mod tests {
             .current_dir(wt.join("web"))
             .spawn()
             .unwrap();
-        // lsof and /proc both see it at once.
+        // The kernel lists it at once.
         let result = free(&repo, &wt, Activity::default());
         let _ = child.kill();
         let _ = child.wait();
         assert!(result.is_err(), "{result:?}");
         assert!(wt.join("target/debug/big").exists());
         let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn reads_lsof_cwds() {
-        let text = "p123\nfcwd\nn/Users/me/app\np456\nfcwd\nn/\n";
-        assert_eq!(
-            parse_lsof_cwds(text),
-            [PathBuf::from("/Users/me/app"), PathBuf::from("/")]
-        );
     }
 }

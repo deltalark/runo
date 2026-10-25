@@ -662,25 +662,28 @@ impl RunoApp {
         self._subscriptions.push(sub);
         self.gh.author = Some(author);
         // Soon after launch, then every few minutes, so the badge counts review requests
-        // and failed runs without visiting Reviews.
+        // and failed runs without visiting Reviews. Not while the window is hidden, and
+        // less and less often while gh can't answer (no repository, not signed in).
         cx.spawn(async move |this, cx| {
             let mut wait = 5;
+            let mut failed = 0u32;
             loop {
                 cx.background_executor()
                     .timer(Duration::from_secs(wait))
                     .await;
-                wait = REFRESH_SECS;
-                if this
-                    .update(cx, |this, cx| {
-                        if this.gh.loading == 0 {
-                            this.fetch_github(&ALL_LISTS);
-                            cx.notify();
-                        }
-                    })
-                    .is_err()
-                {
+                let Ok(blocked) = this.update(cx, |this, cx| {
+                    // How the last fetch went, before this one clears it.
+                    let blocked = this.gh.error.is_some();
+                    if this.gh.loading == 0 && wake::shown() {
+                        this.fetch_github(&ALL_LISTS);
+                        cx.notify();
+                    }
+                    blocked
+                }) else {
                     return;
-                }
+                };
+                failed = if blocked { (failed + 1).min(3) } else { 0 };
+                wait = REFRESH_SECS << failed;
             }
         })
         .detach();

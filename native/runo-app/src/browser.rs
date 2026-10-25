@@ -7,6 +7,7 @@ use browser_engine::{key_spec, modifier_bits, to_page, Engine, KeySpec};
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::net::{SocketAddr, TcpStream};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -54,8 +55,12 @@ pub(crate) fn parse_lsof(text: &str) -> Vec<u16> {
 }
 
 /// Dev-server-like ports listening on this machine: unprivileged, not ephemeral and not
-/// a well-known database or cache.
-fn listening_ports() -> Vec<u16> {
+/// a well-known database or cache. Elsewhere than Linux, only the ports of programs
+/// Runo started and of those working in `dir` (the session's folder) are looked up,
+/// with `lsof -p`, and only when there are any: a scan of every process on the Mac takes
+/// a good part of a second. Dev servers on the usual ports are found anyway
+/// (`DEV_PORTS`).
+fn listening_ports(dir: &Path) -> Vec<u16> {
     let mut ports = Vec::new();
     if cfg!(target_os = "linux") {
         for file in ["/proc/net/tcp", "/proc/net/tcp6"] {
@@ -63,13 +68,42 @@ fn listening_ports() -> Vec<u16> {
                 &std::fs::read_to_string(file).unwrap_or_default(),
             ));
         }
-    } else if let Ok(out) = std::process::Command::new("lsof")
-        .args(["-nP", "-iTCP", "-sTCP:LISTEN"])
+        return dev_ports(ports);
+    }
+    let pids = server_pids(&crate::procs::all(), std::process::id(), dir);
+    if pids.is_empty() {
+        return Vec::new();
+    }
+    let list: Vec<String> = pids.iter().map(|p| p.to_string()).collect();
+    if let Ok(out) = std::process::Command::new("lsof")
+        .args(["-nP", "-a", "-p", &list.join(","), "-iTCP", "-sTCP:LISTEN"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .output()
     {
         ports.extend(parse_lsof(&String::from_utf8_lossy(&out.stdout)));
     }
     dev_ports(ports)
+}
+
+/// The processes that may serve the session's app: those below Runo (`me`), whose own
+/// ports aren't dev servers, and those working in `dir`.
+fn server_pids(procs: &[crate::procs::Proc], me: u32, dir: &Path) -> Vec<u32> {
+    let mut pids: Vec<u32> = crate::procs::descendants(procs, me)
+        .into_iter()
+        .filter(|p| *p != me)
+        .collect();
+    if !dir.as_os_str().is_empty() && dir != Path::new("/") {
+        pids.extend(
+            procs
+                .iter()
+                .filter(|p| p.pid != me && p.cwd.as_ref().is_some_and(|c| c.starts_with(dir)))
+                .map(|p| p.pid),
+        );
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    pids
 }
 
 /// Keep the ports a dev server could be on: unprivileged, not ephemeral and not a
@@ -207,6 +241,10 @@ impl RunoApp {
         }
         self.browser_scanning = true;
         let tx = self.tx.clone();
+        let dir = self
+            .current()
+            .map(|s| std::path::PathBuf::from(&s.dir))
+            .unwrap_or_default();
         std::thread::spawn(move || {
             let mut ports: Vec<u16> = DEV_PORTS
                 .iter()
@@ -216,7 +254,7 @@ impl RunoApp {
                     TcpStream::connect_timeout(&addr, Duration::from_millis(120)).is_ok()
                 })
                 .collect();
-            for port in listening_ports() {
+            for port in listening_ports(&dir) {
                 if !ports.contains(&port) {
                     ports.push(port);
                 }
@@ -454,17 +492,25 @@ impl RunoApp {
         cx.notify();
     }
 
-    /// Called every display frame: pick up new frames, follow the panel's size and the
-    /// selected session, and free the textures of frames no longer shown.
+    /// Whether the selected session's page is on screen: the Browser tab open on it, with
+    /// the window itself on screen.
+    pub(crate) fn browser_page_shown(&self, cx: &App) -> bool {
+        self.browser_main
+            && self.view == View::Session
+            && wake::shown()
+            && self.browser_view.pages.contains(&self.browser_key())
+            && cx.global::<AppSettings>().browser_enabled
+    }
+
+    /// Called every display frame while a page is on screen (see `ensure_browser_pump`):
+    /// pick up new frames, follow the panel's size and the selected session, and free the
+    /// textures of frames no longer shown.
     pub(crate) fn pump_browser(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.browser.clone() else {
             return;
         };
         let key = self.browser_key();
-        let shown = self.browser_main && self.view == View::Session;
-        let visible = shown
-            && self.browser_view.pages.contains(&key)
-            && cx.global::<AppSettings>().browser_enabled;
+        let visible = self.browser_page_shown(cx);
         engine.show(visible.then_some(key));
         if let Some(note) = engine.take_notes().pop() {
             self.info = Some((note, std::time::Instant::now()));
@@ -1226,6 +1272,29 @@ mod tests {
     use super::*;
     // `super::*` brings in gpui's own `test` attribute; use the built-in one.
     use std::prelude::v1::test;
+
+    #[test]
+    fn ports_are_looked_up_for_runos_programs_and_the_sessions_folder() {
+        use crate::procs::Proc;
+        let at = |pid, ppid, cwd: &str| Proc {
+            pid,
+            ppid,
+            cwd: (!cwd.is_empty()).then(|| std::path::PathBuf::from(cwd)),
+        };
+        let procs = [
+            at(1, 0, "/"),
+            at(100, 1, "/Applications"),
+            at(101, 100, "/Users/me"),
+            at(102, 101, "/elsewhere"),
+            at(200, 1, "/work/app/web"),
+            at(300, 1, "/work/other"),
+            at(400, 1, ""),
+        ];
+        let dir = Path::new("/work/app");
+        assert_eq!(server_pids(&procs, 100, dir), vec![101, 102, 200]);
+        // Nothing of Runo's runs and no folder: nothing to look up, so no lsof.
+        assert!(server_pids(&procs[..1], 100, Path::new("")).is_empty());
+    }
 
     #[test]
     fn listening_ports_are_read_from_proc_and_lsof() {

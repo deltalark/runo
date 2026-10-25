@@ -151,7 +151,7 @@ impl RunoApp {
 
     /// Free the build output of the pending done sessions that nothing runs in, off the
     /// UI thread. Busy ones stay pending for the next try.
-    fn run_build_clean(&mut self) {
+    pub(crate) fn run_build_clean(&mut self) {
         if self.space.auto_running || self.space.pending.is_empty() {
             return;
         }
@@ -197,9 +197,15 @@ impl RunoApp {
         }
         self.bg(
             move || {
+                let cwds = buildclean::cwds();
                 jobs.into_iter()
                     .map(|(id, repo, dir, label)| {
-                        let result = buildclean::free(&repo, Path::new(&dir), Activity::default());
+                        let result = buildclean::free_unless(
+                            &repo,
+                            Path::new(&dir),
+                            Activity::default(),
+                            &cwds,
+                        );
                         let measured = result
                             .is_ok()
                             .then(|| buildclean::measure(&repo, Path::new(&dir)));
