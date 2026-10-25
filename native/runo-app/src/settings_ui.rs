@@ -840,7 +840,20 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     };
                     row("Check for updates", &desc, Ctl::Button("Check now".into(), Rc::new(|this, cx| this.check_runo_now(cx))))
                 },
-                row("Logs and crash reports", &format!("Each launch writes a log, and crashes leave a report, in {}.", tilde(&crate::applog::logs_dir())), Ctl::Button("Show".into(), Rc::new(|_, cx| cx.reveal_path(&crate::applog::logs_dir())))),
+                row(
+                    "Logs and crash reports",
+                    &format!("Each launch writes a log, and crashes leave a report, in {}. Copy diagnostics copies your version, system, agent CLIs, settings without secrets and the end of the log, to paste into a bug report.", tilde(&crate::applog::logs_dir())),
+                    Ctl::Buttons(vec![
+                        ("Show".into(), Rc::new(|_, cx| cx.reveal_path(&crate::applog::logs_dir())) as Action),
+                        (
+                            "Copy diagnostics".into(),
+                            Rc::new(|this: &mut RunoApp, cx: &mut Context<RunoApp>| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(crate::applog::diagnostics()));
+                                this.info = Some(("Copied diagnostics. Look them over before you share them.".into(), std::time::Instant::now()));
+                            }) as Action,
+                        ),
+                    ]),
+                ),
             ]),
             section("Git", "How Runo commits for you.", vec![
                 switch_row("Credit the agent in commits", "Adds a line such as \"Made with Claude Code in Runo\" to commits made from the Changes panel.", st.attribution, |s, v| s.attribution = v),
