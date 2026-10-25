@@ -282,10 +282,12 @@ impl RunoApp {
 
     /// Agents running on this machine or elsewhere, for the cap.
     fn running(&self) -> usize {
+        // A turn waiting on its checkpoint takes its slot already.
         self.handles
             .keys()
             .filter(|t| matches!(t, Target::Session(_)))
             .count()
+            + self.starting.len()
     }
 
     /// What counts toward the limits for the next turn of `session`.
@@ -306,9 +308,11 @@ impl RunoApp {
         self.handles
             .keys()
             .filter_map(|t| match t {
-                Target::Session(id) => self.state.session(*id),
+                Target::Session(id) => Some(id),
                 _ => None,
             })
+            .chain(self.starting.keys())
+            .filter_map(|id| self.state.session(*id))
             .filter(|s| crew_started(s))
             .count()
     }

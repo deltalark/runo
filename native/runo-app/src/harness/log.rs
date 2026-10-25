@@ -88,10 +88,9 @@ impl TurnLog {
             return TurnLog::off();
         };
         let path = path(root, session);
-        drain();
-        if std::fs::metadata(&path).is_ok_and(|m| m.len() >= ROTATE_AT) {
-            let _ = std::fs::rename(&path, path.with_file_name("events.1.jsonl"));
-        }
+        // Set aside on the writer thread, after what's already on its way, so a turn's
+        // start never waits on the disk.
+        let _ = writer().send(Job::Start(path.clone()));
         let mut log = TurnLog::new(Some(path), turn, 0, None);
         log.record(&AgentEvent::TurnStarted {
             provider: provider.to_string(),
@@ -191,14 +190,17 @@ enum Job {
     Append(PathBuf, String),
     /// A turn's log is done with: close its file.
     Close(PathBuf),
+    /// A turn starts in this log: close it, try writing it again if it failed, and set
+    /// it aside when it is big.
+    Start(PathBuf),
     /// Reply once everything sent before is written, with the files closed.
     Drain(std::sync::mpsc::Sender<()>),
 }
 
 /// The thread that writes every turn's events, so a busy agent's output never waits on the
 /// disk on the way to the screen. A running turn's file stays open between its events. A
-/// file that fails to write is left alone until the next drain, which every turn's start
-/// does, so one failure costs the rest of that turn's log as it did when writing inline.
+/// file that fails to write is left alone until its next turn starts (or the next drain),
+/// so one failure costs the rest of that turn's log as it did when writing inline.
 fn writer() -> &'static std::sync::mpsc::Sender<Job> {
     static TX: std::sync::OnceLock<std::sync::mpsc::Sender<Job>> = std::sync::OnceLock::new();
     TX.get_or_init(|| {
@@ -241,6 +243,11 @@ fn writer() -> &'static std::sync::mpsc::Sender<Job> {
                         Job::Close(path) => {
                             open.remove(&path);
                         }
+                        Job::Start(path) => {
+                            open.remove(&path);
+                            failed.remove(&path);
+                            rotate(&path);
+                        }
                         Job::Drain(done) => {
                             open.clear();
                             failed.clear();
@@ -268,17 +275,50 @@ pub fn drain() {
     }
 }
 
-/// The highest event number the log holds for `turn`.
+/// Set a big log aside as `events.1.jsonl`, so a turn never spans two files.
+fn rotate(path: &Path) {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() >= ROTATE_AT) {
+        let _ = std::fs::rename(path, path.with_file_name("events.1.jsonl"));
+    }
+}
+
+/// The highest event number the log holds for `turn`, the log's last turn when it has
+/// any events: read from the end, so a big log costs only that turn's lines.
 fn last_seq(path: &Path, turn: usize) -> Option<u64> {
+    use std::io::{Read, Seek, SeekFrom};
     drain();
-    let file = std::fs::File::open(path).ok()?;
-    std::io::BufReader::new(file)
-        .lines()
-        .map_while(Result::ok)
-        .filter_map(|line| serde_json::from_str::<Record>(&line).ok())
-        .filter(|r| r.turn == turn)
-        .map(|r| r.seq)
-        .max()
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut back = 64 * 1024u64;
+    loop {
+        let from = len.saturating_sub(back);
+        file.seek(SeekFrom::Start(from)).ok()?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).ok()?;
+        let text = String::from_utf8_lossy(&bytes);
+        let mut lines: Vec<&str> = text.lines().collect();
+        // The first line may be cut by where the read began.
+        if from > 0 && !lines.is_empty() {
+            lines.remove(0);
+        }
+        let mut best = None;
+        let mut other = false;
+        for record in lines
+            .iter()
+            .rev()
+            .filter_map(|line| serde_json::from_str::<Record>(line).ok())
+        {
+            if record.turn != turn {
+                other = true;
+                break;
+            }
+            best = best.max(Some(record.seq));
+        }
+        if other || from == 0 {
+            return best;
+        }
+        back *= 4;
+    }
 }
 
 /// Every event in a session's log, oldest first (the set-aside file, then the current
@@ -412,6 +452,28 @@ mod tests {
     }
 
     #[test]
+    fn the_last_turn_is_found_from_the_end_of_a_big_log() {
+        let dir = root("big");
+        let mut log = TurnLog::start(Some(&dir), 7, 0, "codex", "");
+        log.record(&AgentEvent::Text("x".repeat(100_000)));
+        drop(log);
+        let mut log = TurnLog::start(Some(&dir), 7, 2, "codex", "");
+        for _ in 0..40 {
+            log.record(&AgentEvent::ToolDone {
+                id: "t".into(),
+                ok: true,
+                output: "y".repeat(3_000),
+            });
+        }
+        drop(log);
+        let path = path(&dir, 7);
+        assert_eq!(last_seq(&path, 2), Some(40));
+        // A turn that wrote nothing yet has nothing to skip.
+        assert_eq!(last_seq(&path, 4), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn text_unwritten_at_a_crash_is_written_by_the_replay() {
         let dir = root("crash");
         let mut log = TurnLog::start(Some(&dir), 7, 0, "codex", "");
@@ -457,6 +519,8 @@ mod tests {
             .set_len(ROTATE_AT)
             .unwrap();
         drop(TurnLog::start(Some(&dir), 7, 4, "claude", ""));
+        // Set aside on the writer thread.
+        drain();
         assert_eq!(
             std::fs::metadata(file.with_file_name("events.1.jsonl"))
                 .unwrap()

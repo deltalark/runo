@@ -37,6 +37,13 @@ impl RunoApp {
             return;
         }
         let remote = session.connection != 0;
+        // A turn that changed only docs can't break the checks; a full test run then
+        // costs minutes and gigabytes for nothing. Asked for by hand, they run anyway.
+        let docs_only = auto
+            && session.messages[turn..]
+                .iter()
+                .rfind(|m| m.role == Role::Agent)
+                .is_some_and(|m| proof::only_docs(&m.changed));
         let Some(session) = self.state.session_mut(id) else {
             return;
         };
@@ -45,16 +52,24 @@ impl RunoApp {
             Some(p) if auto => (p.rounds, p.last_failure),
             _ => (0, String::new()),
         };
-        if remote {
+        let skipped = if remote {
+            "Checks run on this computer, and this session runs on a connection."
+        } else if docs_only {
+            proof::DOCS_ONLY
+        } else {
+            ""
+        };
+        if !skipped.is_empty() {
+            crate::applog::info("proof", format!("session #{id}: {skipped}"));
             session.proof = Some(Proof {
                 turn,
                 rounds,
                 last_failure,
-                skipped: "Checks run on this computer, and this session runs on a connection."
-                    .into(),
+                skipped: skipped.into(),
                 ..Default::default()
             });
             self.save();
+            cx.notify();
             return;
         }
         session.proof = Some(Proof {
@@ -106,7 +121,13 @@ impl RunoApp {
             ),
         );
         self.bg(
-            move || proof::run_all(&dir, &checks, proof::CHECK_LIMIT, low),
+            move || {
+                let env: Vec<(String, String)> = proof::shared_target(&dir, &checks)
+                    .map(|t| ("CARGO_TARGET_DIR".into(), t.to_string_lossy().into_owned()))
+                    .into_iter()
+                    .collect();
+                proof::run_all(&dir, &checks, proof::CHECK_LIMIT, low, &env)
+            },
             move |this, results, cx| this.proof_done(id, turn, auto, results, cx),
         );
         true
