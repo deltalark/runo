@@ -293,20 +293,26 @@ fn mcp_servers(spec: &RunSpec) -> Vec<(String, crate::mcp::McpSpec)> {
                 },
             ));
         }
+        let mut args = if spec.thread == 0 {
+            vec!["--mcp-memory".into(), dir.to_string()]
+        } else {
+            vec![
+                "--mcp-memory".into(),
+                dir.to_string(),
+                "--thread".into(),
+                spec.thread.to_string(),
+            ]
+        };
+        // So it can tell the person's answers from ones anyone else left in the folder.
+        // A connection's relay answers in Runo itself, which has the key.
+        if let Some(file) = spec.local.then(crate::approvals::key_file).flatten() {
+            args.extend([crate::approvals::KEY_FILE_ARG.into(), file]);
+        }
         out.push((
             MEMORY_SERVER.into(),
             McpSpec {
                 command: exe.to_string(),
-                args: if spec.thread == 0 {
-                    vec!["--mcp-memory".into(), dir.to_string()]
-                } else {
-                    vec![
-                        "--mcp-memory".into(),
-                        dir.to_string(),
-                        "--thread".into(),
-                        spec.thread.to_string(),
-                    ]
-                },
+                args,
                 ..Default::default()
             },
         ));

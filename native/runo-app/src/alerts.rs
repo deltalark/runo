@@ -1146,11 +1146,13 @@ impl RunoApp {
         let what = approvals::describe(&request.tool, &request.input);
         let session = self.approval_session(request);
         self.approvals.retain(|r| r.id != request.id);
-        if approvals::answer(&approvals::folder(), &request.id, &answer).is_err() {
-            self.fail(
-                "alerts",
-                "The agent stopped waiting for that answer: it timed out or its turn ended.".into(),
-            );
+        if let Err(e) = approvals::answer(&approvals::folder(), &request.id, &answer) {
+            let why = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                "The agent asked before Runo last restarted, so Runo can't sign an answer it would trust. It stops waiting on its own; ask it again in a follow-up."
+            } else {
+                "The agent stopped waiting for that answer: it timed out or its turn ended."
+            };
+            self.fail("alerts", why.into());
             cx.notify();
             return;
         }

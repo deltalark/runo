@@ -82,7 +82,6 @@ pub fn inbox(base: &Path) -> PathBuf {
 /// Leave a request for the app, under a temporary name first so it never reads half a file.
 pub fn send(base: &Path, request: &Request) -> std::io::Result<()> {
     let dir = inbox(base);
-    std::fs::create_dir_all(&dir)?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -90,9 +89,10 @@ pub fn send(base: &Path, request: &Request) -> std::io::Result<()> {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = format!("{stamp:032}-{n}");
-    let tmp = dir.join(format!("{name}.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec(request)?)?;
-    std::fs::rename(tmp, dir.join(format!("{name}.json")))
+    crate::store::write_private(
+        &dir.join(format!("{name}.json")),
+        &serde_json::to_vec(request)?,
+    )
 }
 
 /// Take every waiting request, oldest first.
@@ -750,6 +750,10 @@ fn respond(http: &Http, base: &Path, tokens: &[String]) -> Reply {
             };
             match approvals::answer(&folder, id, &answer) {
                 Ok(()) => (200, json!({ "ok": true })),
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => (
+                    409,
+                    json!({ "error": "Answer this one in Runo on the computer: it was asked by an agent another Runo started." }),
+                ),
                 Err(_) => (
                     404,
                     json!({ "error": "That request was already answered or timed out." }),

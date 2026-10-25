@@ -1021,15 +1021,15 @@ pub struct PlaybookRequest {
 /// Leave a request in `inbox`. Written under a temporary name and renamed, so the app
 /// never reads half a file.
 pub fn send_request(inbox: &Path, request: &PlaybookRequest) -> std::io::Result<()> {
-    std::fs::create_dir_all(inbox)?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let name = format!("{stamp}-{}", std::process::id());
-    let tmp = inbox.join(format!("{name}.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec(request)?)?;
-    std::fs::rename(tmp, inbox.join(format!("{name}.json")))
+    write_private(
+        &inbox.join(format!("{name}.json")),
+        &serde_json::to_vec(request)?,
+    )
 }
 
 /// Take every request waiting in `inbox`, oldest first, removing them.
@@ -1086,21 +1086,95 @@ pub fn move_aside(path: &Path, error: &str) {
     );
 }
 
-/// Write JSON atomically: to a temporary file first, then rename over the target.
+/// Write JSON atomically and privately (see `write_private`).
 pub fn write_json<T: Serialize>(path: &Path, value: &T) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     let written = serde_json::to_string_pretty(value)
         .map_err(|e| e.to_string())
-        .and_then(|text| {
-            let tmp = path.with_extension("json.tmp");
-            std::fs::write(&tmp, text)
-                .and_then(|_| std::fs::rename(tmp, path))
-                .map_err(|e| e.to_string())
-        });
+        .and_then(|text| write_private(path, text.as_bytes()).map_err(|e| e.to_string()));
     if let Err(e) = written {
         crate::applog::error_once("save", format!("could not save {}: {e}", path.display()));
+    }
+}
+
+/// Write `data` to `path` so only the person can read it, without anyone seeing it half
+/// written: into a new temporary file created 0600 (`create_new`, so a link planted there
+/// fails rather than being followed), then renamed over the target, which replaces a link
+/// there instead of writing through it. A missing folder is made private (0700).
+pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        create_private_dir(parent)?;
+    }
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = path.with_file_name(format!(".{name}.{}-{n}.tmp", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let written = options.open(&tmp).and_then(|mut file| file.write_all(data));
+    match written.and_then(|_| std::fs::rename(&tmp, path)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// Make `dir` and any missing parents; the ones made here are private (0700).
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
+
+/// Make Runo's data folder private: 0700, and its files and request folders readable
+/// only by the person. Installs from before this kept it 0755 with 0644 files, which
+/// left settings (API keys, env lines), transcripts and approvals open to every
+/// account on the computer. On Windows the folder sits in the person's profile, which
+/// is theirs alone already.
+pub fn tighten_data_dir() {
+    let dir = data_dir();
+    let _ = create_private_dir(&dir);
+    #[cfg(unix)]
+    tighten(&dir, 1);
+}
+
+/// Folders 0700 and files 0600, `depth` levels down. Links are left alone: they may
+/// point anywhere.
+#[cfg(unix)]
+fn tighten(dir: &Path, depth: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let set = |path: &Path, mode: u32| {
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if !meta.file_type().is_symlink() && meta.permissions().mode() & 0o077 != 0 {
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+            }
+        }
+    };
+    set(dir, 0o700);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_file() {
+            set(&entry.path(), 0o600);
+        } else if kind.is_dir() && depth > 0 {
+            tighten(&entry.path(), depth - 1);
+        }
     }
 }
 
@@ -1420,6 +1494,30 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_old_open_data_folder_is_made_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let open = |p: &Path, m| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m));
+        let dir = temp("tighten");
+        std::fs::write(dir.join("settings.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.join("approvals")).unwrap();
+        std::fs::write(dir.join("approvals").join("1-1.json"), "{}").unwrap();
+        open(&dir, 0o755).unwrap();
+        open(&dir.join("settings.json"), 0o644).unwrap();
+        open(&dir.join("approvals"), 0o755).unwrap();
+        tighten(&dir, 1);
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("settings.json")), 0o600);
+        assert_eq!(mode(&dir.join("approvals")), 0o700);
+        assert_eq!(mode(&dir.join("approvals").join("1-1.json")), 0o600);
+        // New saves are private from the start.
+        write_json(&dir.join("state.json"), &serde_json::json!({ "a": 1 }));
+        assert_eq!(mode(&dir.join("state.json")), 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -38,13 +38,9 @@ fn digest(text: &str) -> u64 {
     hasher.finish()
 }
 
-/// Write `text` atomically: to a temporary file first, then rename over the target.
+/// Write `text` atomically and readable only by the person (`store::write_private`).
 fn write_text(path: &Path, text: &str) -> bool {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let tmp = path.with_extension("json.tmp");
-    match std::fs::write(&tmp, text).and_then(|_| std::fs::rename(tmp, path)) {
+    match crate::store::write_private(path, text.as_bytes()) {
         Ok(()) => true,
         Err(e) => {
             // Saves are retried every half second; the same failure is written once.
