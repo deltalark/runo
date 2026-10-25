@@ -100,6 +100,10 @@ impl RunoApp {
             if info.decision.take().is_some() {
                 info.attention = None;
             }
+            // So does whatever comes after the PR watcher gave up and asked for the person.
+            if let Some(w) = info.watch.as_mut() {
+                w.needs = None;
+            }
         }
         // The worktree is still being made: the turn starts once it is ready.
         if let Some(waiting) = self.preparing.get_mut(&id) {
