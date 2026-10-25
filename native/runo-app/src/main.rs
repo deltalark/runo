@@ -9102,6 +9102,14 @@ impl RunoApp {
     }
 }
 
+/// The settings the window's frame reads.
+struct FrameSettings {
+    theme: String,
+    font: String,
+    send_on_enter: bool,
+    browser_enabled: bool,
+}
+
 impl Render for RunoApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         framestats::begin();
@@ -9124,7 +9132,16 @@ impl Render for RunoApp {
         self.prepare_playbook_run(window, cx);
         self.prepare_playbook_editor(window, cx);
         self.update_chat_follow();
-        let st = cx.global::<AppSettings>().clone();
+        // Only what this frame needs, rather than a copy of every setting each frame.
+        let st = {
+            let s = cx.global::<AppSettings>();
+            FrameSettings {
+                theme: s.theme.clone(),
+                font: s.font.clone(),
+                send_on_enter: s.send_on_enter,
+                browser_enabled: s.browser_enabled,
+            }
+        };
         // Opening or leaving Settings swaps the whole window, so it happens without motion.
         let in_settings = self.view == View::Settings;
         let settings_snap = in_settings != self.was_settings;
