@@ -588,6 +588,8 @@ struct RunoApp {
     open_steps: std::collections::HashSet<(u64, usize)>,
     /// Threads' messages to Crew shown in full, by (Crew chat, message index).
     open_wakes: std::collections::HashSet<(u64, usize)>,
+    /// Sessions whose Working line lists its helper agents.
+    open_helpers: std::collections::HashSet<u64>,
     show_sidebar: bool,
     /// When each panel last opened or closed, so it can slide instead of snapping.
     panel_anim: HashMap<&'static str, (bool, std::time::Instant)>,
@@ -1509,6 +1511,7 @@ impl RunoApp {
             window_place: None,
             term_escape: None,
             open_steps: Default::default(),
+            open_helpers: Default::default(),
             open_wakes: Default::default(),
             show_sidebar: true,
             panel_anim: HashMap::new(),

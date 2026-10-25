@@ -902,8 +902,8 @@ impl RunoApp {
             }
             match subagents {
                 0 => {}
-                1 => parts.push("1 subagent".into()),
-                n => parts.push(format!("{n} subagents")),
+                1 => parts.push("1 helper agent".into()),
+                n => parts.push(format!("{n} helper agents")),
             }
             parts.join(" · ")
         } else if s.queue.iter().any(|q| q.text == crate::planlimit::CONTINUE) {

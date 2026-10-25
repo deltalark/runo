@@ -136,7 +136,10 @@ impl RunoApp {
             )
         }));
         if working {
-            rows.push((ChatRow::Working, 0));
+            rows.push((
+                ChatRow::Working,
+                self.working_version(thread, &session.messages),
+            ));
         } else if self
             .finished
             .get(&thread)
@@ -352,15 +355,12 @@ impl RunoApp {
                         .into_any_element()
                 })
             }
-            ChatRow::Working => {
-                let started = self.turns.get(&thread).map(|t| t.started);
-                Some(
-                    div()
-                        .text_size(px(12.5))
-                        .child(working::running(working::doing(&session.messages), started))
-                        .into_any_element(),
-                )
-            }
+            ChatRow::Working => Some(
+                div()
+                    .text_size(px(12.5))
+                    .child(self.working_line(thread, &session.messages, cx))
+                    .into_any_element(),
+            ),
             ChatRow::Finished => self
                 .finished_row(thread)
                 .map(|done| div().text_size(px(12.5)).child(done).into_any_element()),
