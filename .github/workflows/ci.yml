@@ -1,8 +1,12 @@
-# Checks formatting, lints and tests on every push and pull request, on macOS and Linux.
+# Checks formatting, lints and tests on macOS and Linux, and lints the Windows
+# build, for pull requests and pushes to main.
 name: CI
 
+# Pull request branches run once, through pull_request. Pushing to them (or a
+# tag) would start a second identical run that neither run cancels.
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -60,3 +64,26 @@ jobs:
 
       - name: Test
         run: cargo test -p runo
+
+  # Windows builds were first compiled at release time, so Unix-only code broke
+  # the v0.5.7 release. This lints the app (not the tests, many of which need a
+  # Unix shell) so a Windows break shows up on the pull request.
+  windows:
+    name: windows-latest (clippy)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy -p runo -- -D warnings
