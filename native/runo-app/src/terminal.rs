@@ -247,7 +247,12 @@ impl RunoApp {
 
     /// Run a command line in a new terminal tab of session `id`, on its connection when it
     /// has one. Returns the tab's shell id.
-    pub(crate) fn spawn_line_tab(&mut self, id: u64, line: &str, title: String) -> Result<u64, String> {
+    pub(crate) fn spawn_line_tab(
+        &mut self,
+        id: u64,
+        line: &str,
+        title: String,
+    ) -> Result<u64, String> {
         let session = self.state.session(id).ok_or("The session is gone.")?;
         let dir = session.dir.clone();
         let mut command = shell_line(line);
@@ -832,9 +837,7 @@ impl RunoApp {
                 // One character per column, so links and matches map onto cells.
                 text.clear();
                 text.extend((0..cols).map(|col| match screen.cell(row, col) {
-                    Some(cell) if !cell.is_wide_continuation() => {
-                        cell.first_char().unwrap_or(' ')
-                    }
+                    Some(cell) if !cell.is_wide_continuation() => cell.first_char().unwrap_or(' '),
                     _ => ' ',
                 }));
                 let links = pty::links(&text);

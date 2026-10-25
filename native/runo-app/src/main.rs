@@ -1267,7 +1267,10 @@ impl RunoApp {
             if events.is_empty() {
                 if unshown_since.is_some_and(|t| ticks.wrapping_sub(t) >= BACKGROUND_TICKS) {
                     unshown_since = None;
-                    if this.update(cx, |this, cx| this.notify_background(cx)).is_err() {
+                    if this
+                        .update(cx, |this, cx| this.notify_background(cx))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -8746,7 +8749,11 @@ impl RunoApp {
     /// The last 300 lines of what Runo printed for session `id`, as the Markdown the
     /// Output tab shows, made again only when a line comes.
     fn output_text(&self, id: u64) -> SharedString {
-        let lines = self.terminal.get(&id).map(Vec::as_slice).unwrap_or_default();
+        let lines = self
+            .terminal
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         let key = (id, lines.len(), chat_list::hash(lines.last()));
         let mut kept = self.output_md.borrow_mut();
         if let Some((_, text)) = kept.as_ref().filter(|(k, _)| *k == key) {

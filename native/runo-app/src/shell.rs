@@ -853,39 +853,40 @@ pub(crate) fn hover_wash(
     let drawn_in = view.clone();
     el.on_hover(move |_, window, cx| redraw_view(view.get(), window, cx))
         .child(
-        canvas(
-            move |_, window, _| drawn_in.set(Some(window.current_view())),
-            move |b, _, window, _| {
-                let over = b.contains(&window.mouse_position());
-                let now = std::time::Instant::now();
-                let since = HOVERS.with_borrow_mut(|h| {
-                    // First seen: already settled, so nothing fades on arrival.
-                    let seen = h
-                        .entry(id.clone())
-                        .or_insert((over, now - Duration::from_secs(1)));
-                    if seen.0 != over {
-                        *seen = (over, now);
+            canvas(
+                move |_, window, _| drawn_in.set(Some(window.current_view())),
+                move |b, _, window, _| {
+                    let over = b.contains(&window.mouse_position());
+                    let now = std::time::Instant::now();
+                    let since = HOVERS.with_borrow_mut(|h| {
+                        // First seen: already settled, so nothing fades on arrival.
+                        let seen = h
+                            .entry(id.clone())
+                            .or_insert((over, now - Duration::from_secs(1)));
+                        if seen.0 != over {
+                            *seen = (over, now);
+                        }
+                        seen.1.elapsed().as_secs_f32() * 1000.
+                    });
+                    let t = if anim_on() {
+                        (since / HOVER_MS).min(1.)
+                    } else {
+                        1.
+                    };
+                    if t < 1. {
+                        window.request_animation_frame();
                     }
-                    seen.1.elapsed().as_secs_f32() * 1000.
-                });
-                let t = if anim_on() {
-                    (since / HOVER_MS).min(1.)
-                } else {
-                    1.
-                };
-                if t < 1. {
-                    window.request_animation_frame();
-                }
-                let t = 1. - (1. - t).powi(3);
-                let strength = if over { t } else { 1. - t };
-                if strength > 0. && color.a > 0. {
-                    window.paint_quad(fill(b, color.opacity(strength)).corner_radii(px(radius)));
-                }
-            },
+                    let t = 1. - (1. - t).powi(3);
+                    let strength = if over { t } else { 1. - t };
+                    if strength > 0. && color.a > 0. {
+                        window
+                            .paint_quad(fill(b, color.opacity(strength)).corner_radii(px(radius)));
+                    }
+                },
+            )
+            .absolute()
+            .inset_0(),
         )
-        .absolute()
-        .inset_0(),
-    )
 }
 
 thread_local! {

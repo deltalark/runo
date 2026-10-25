@@ -199,13 +199,13 @@ impl Panes {
         let panes = Part::ALL
             .into_iter()
             .map(|part| {
-            cx.new(|cx| Pane {
-                app: app.downgrade(),
-                part,
-                _app_changed: cx.observe(&app, |_, _, cx| cx.notify()),
+                cx.new(|cx| Pane {
+                    app: app.downgrade(),
+                    part,
+                    _app_changed: cx.observe(&app, |_, _, cx| cx.notify()),
+                })
             })
-        })
-        .collect();
+            .collect();
         Panes {
             ticker: cx.new(|_| Ticker),
             panes,

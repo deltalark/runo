@@ -26,7 +26,10 @@ pub(crate) enum DiffItem {
         row: usize,
     },
     /// The session's note `note` under the line it is about.
-    Note { file: usize, note: usize },
+    Note {
+        file: usize,
+        note: usize,
+    },
     /// The box a note is being written in, under its line.
     Writing,
 }
@@ -126,7 +129,10 @@ impl RunoApp {
 
     /// The rows of the files shown, one after another.
     fn diff_items(&self, files: &[(String, Rc<Vec<git::DiffRow>>)]) -> Vec<DiffItem> {
-        let notes = self.current().map(|s| s.notes.as_slice()).unwrap_or_default();
+        let notes = self
+            .current()
+            .map(|s| s.notes.as_slice())
+            .unwrap_or_default();
         let mut items = Vec::new();
         let st = self.diff_rows.borrow();
         for (file, (path, rows)) in files.iter().enumerate() {
@@ -313,18 +319,16 @@ impl RunoApp {
                     return div().into_any_element();
                 };
                 if row.kind == LineKind::Hunk {
-                    return pad(
-                        div()
-                            .id(("dl", ix))
-                            .mt_1()
-                            .px_3()
-                            .py(px(3.))
-                            .text_color(rgb(c_blue()))
-                            .bg(tint(c_selected()))
-                            .whitespace_nowrap()
-                            .child(row.text.clone())
-                            .into_any_element(),
-                    );
+                    return pad(div()
+                        .id(("dl", ix))
+                        .mt_1()
+                        .px_3()
+                        .py(px(3.))
+                        .text_color(rgb(c_blue()))
+                        .bg(tint(c_selected()))
+                        .whitespace_nowrap()
+                        .child(row.text.clone())
+                        .into_any_element());
                 }
                 let mark = mark(row.kind);
                 let (bg, color) = match row.kind {

@@ -247,7 +247,12 @@ async fn streaming(this: &WeakEntity<RunoApp>, cx: &mut Ctx, ids: Vec<u64>) -> b
 /// Run `git` with `args` in `dir`, for the bench's repository.
 fn git_in(dir: &std::path::Path, args: &[&str]) {
     let _ = std::process::Command::new("git")
-        .args(["-c", "user.name=Bench", "-c", "user.email=bench@example.com"])
+        .args([
+            "-c",
+            "user.name=Bench",
+            "-c",
+            "user.email=bench@example.com",
+        ])
         .args(args)
         .current_dir(dir)
         .output();
