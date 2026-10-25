@@ -154,6 +154,7 @@ actions!(
     [
         NewSession,
         OpenSettings,
+        CheckForUpdates,
         StopAgent,
         TogglePanel,
         ToggleTerminal,
@@ -235,6 +236,8 @@ enum Jump {
     Session(u64),
     File(String),
     Tour,
+    /// Check GitHub for a newer Runo and show the result in Settings.
+    Updates,
     Arcade,
     /// Run a playbook in the current project.
     Playbook(u64),
@@ -2873,6 +2876,15 @@ impl RunoApp {
         self.file.pending = Some(path.to_string());
     }
 
+    /// Check for a newer Runo and open Settings filtered to Updates, where the result shows.
+    fn show_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings();
+        self.settings_page = SettingsPage::General;
+        self.settings_search
+            .update(cx, |s, cx| s.set_value("updates", window, cx));
+        self.check_runo_now(cx);
+    }
+
     pub(crate) fn open_settings(&mut self) {
         self.view = View::Settings;
         signin::refresh(false);
@@ -2998,6 +3010,7 @@ impl RunoApp {
         match jump {
             Jump::Action => {}
             Jump::Tour => self.start_tour(),
+            Jump::Updates => self.show_update_check(window, cx),
             Jump::Arcade => self.open_arcade(window, cx),
             Jump::Playbook(id) => {
                 let here = self.current_project();
@@ -3139,6 +3152,13 @@ impl RunoApp {
                 .keywords(["welcome", "help", "guide", "onboarding"]),
         );
         command_jumps.push(Jump::Tour);
+        commands = commands.item(
+            CommandItem::new()
+                .label("Check for updates")
+                .icon(IconName::Download)
+                .keywords(["update", "upgrade", "new version", "release"]),
+        );
+        command_jumps.push(Jump::Updates);
         commands = commands.item(
             CommandItem::new()
                 .label("Open the Arcade")
@@ -9391,6 +9411,9 @@ impl Render for RunoApp {
                 this.open_settings();
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
+                this.show_update_check(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &StopAgent, _, cx| {
                 this.stop();
                 cx.notify();
@@ -9968,6 +9991,7 @@ fn app_menus() -> Vec<Menu> {
     vec![
         Menu::new("Runo").items([
             MenuItem::action("Settings…", OpenSettings),
+            MenuItem::action("Check for Updates…", CheckForUpdates),
             MenuItem::action("Take the tour", ShowTour),
             MenuItem::separator(),
             MenuItem::action("Quit Runo", Quit),
