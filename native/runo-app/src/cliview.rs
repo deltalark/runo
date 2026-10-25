@@ -48,6 +48,18 @@ pub(crate) struct CliRun {
     opened: SystemTime,
 }
 
+/// A step label with the working folder taken out of the paths in it, so "Read
+/// /code/app/src/main.rs" reads "Read src/main.rs". Windows paths use either separator.
+pub(crate) fn without_dir(label: &str, dir: &str) -> String {
+    let dir = dir.trim_end_matches(['/', '\\']);
+    if dir.is_empty() {
+        return label.to_string();
+    }
+    label
+        .replace(&format!("{dir}/"), "")
+        .replace(&format!("{dir}\\"), "")
+}
+
 fn home() -> PathBuf {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -419,11 +431,10 @@ impl RunoApp {
         let time = chrono::Local::now().format("%-I:%M %p").to_string();
         let mut divider = Message::now(Role::System, format!("Worked in {name}'s CLI"));
         divider.meta = divider_meta(&run.provider, Some(prompts));
-        let prefix = format!("{}/", dir.trim_end_matches('/'));
         for m in &mut turns {
             m.time = time.clone();
             for step in &mut m.steps {
-                step.label = step.label.replace(&prefix, "");
+                step.label = without_dir(&step.label, &dir);
             }
         }
         if let Some(s) = self.state.session_mut(id) {
@@ -705,6 +716,28 @@ impl RunoApp {
 mod tests {
     use super::*;
     use std::prelude::v1::test;
+
+    #[test]
+    fn step_labels_lose_the_working_folder_on_any_system() {
+        assert_eq!(
+            without_dir("Read /code/app/src/main.rs", "/code/app/"),
+            "Read src/main.rs"
+        );
+        assert_eq!(
+            without_dir(r"Read C:\code\app\src\main.rs", r"C:\code\app"),
+            r"Read src\main.rs"
+        );
+        assert_eq!(
+            without_dir("Read C:/code/app/src/main.rs", r"C:/code/app"),
+            "Read src/main.rs"
+        );
+        // A folder that only starts the same is left alone, and no folder changes nothing.
+        assert_eq!(
+            without_dir("Read /code/app2/x.rs", "/code/app"),
+            "Read /code/app2/x.rs"
+        );
+        assert_eq!(without_dir("Ran a/b", ""), "Ran a/b");
+    }
 
     #[test]
     fn dividers_round_trip() {

@@ -470,10 +470,12 @@ impl RunoApp {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "image.png".into());
-        let dir = std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join("Downloads"))
+        let home = crate::store::home_dir();
+        let dir = home
+            .as_ref()
+            .map(|h| h.join("Downloads"))
             .filter(|d| d.is_dir())
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .or(home)
             .unwrap_or_else(std::env::temp_dir);
         let rx = cx.prompt_for_new_path(&dir, Some(&name));
         cx.spawn(async move |this, cx| {

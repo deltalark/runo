@@ -357,7 +357,7 @@ fn switch_row(title: &str, desc: &str, on: bool, set: fn(&mut AppSettings, bool)
 
 /// A path with the home folder shown as ~.
 pub(crate) fn tilde(path: &std::path::Path) -> String {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    let home = crate::store::home_dir();
     match home.and_then(|h| path.strip_prefix(h).ok().map(|p| p.display().to_string())) {
         Some(rest) => format!("~/{rest}"),
         None => path.display().to_string(),
@@ -816,7 +816,16 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             }),
             section("Behavior", "Motion, sleep and how the sidebar groups sessions.", vec![
                 switch_row("Animations", "Fade, slide and pulse effects. Turn off for instant changes.", st.animations, |s, v| s.animations = v),
-                switch_row("Keep the computer awake", "Hold off sleep while any agent is running (caffeinate on macOS, systemd-inhibit on Linux).", st.keep_awake, |s, v| s.keep_awake = v),
+                switch_row(
+                    "Keep the computer awake",
+                    if cfg!(any(target_os = "macos", target_os = "linux")) {
+                        "Hold off sleep while any agent is running (caffeinate on macOS, systemd-inhibit on Linux)."
+                    } else {
+                        "Hold off sleep while any agent is running. Not available on this system yet, so this does nothing here."
+                    },
+                    st.keep_awake,
+                    |s, v| s.keep_awake = v,
+                ),
                 switch_row("Group sidebar by status", "Show Needs you, Running, Ready to review and Done groups instead of projects.", st.group_by_status, |s, v| s.group_by_status = v),
                 switch_row("Show deleted threads", "Keep a line in Crew's chat where a thread you deleted was.", st.show_deleted_threads, |s, v| s.show_deleted_threads = v),
                 switch_row("Thread titles beside numbers", "In Crew's chat, #34 shows the thread's title next to it. The number alone still opens the thread, and shows its title on hover.", st.thread_ref_titles, |s, v| s.thread_ref_titles = v),

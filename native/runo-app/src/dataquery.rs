@@ -587,9 +587,7 @@ impl RunoApp {
         hidden: HashSet<String>,
         cx: &mut Context<Self>,
     ) {
-        let dir = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
+        let dir = crate::store::home_dir().unwrap_or_else(std::env::temp_dir);
         let rx = cx.prompt_for_new_path(&dir, Some(&format!("{name}.csv")));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = rx.await {
