@@ -81,6 +81,8 @@ pub(crate) struct Starting {
     attached: Vec<String>,
     dir: String,
     thread: u64,
+    /// The person trusts the project's agent settings (`Project::trust_agent_config`).
+    trusted: bool,
 }
 
 impl RunoApp {
@@ -165,6 +167,12 @@ impl RunoApp {
             .session(id)
             .filter(|s| !s.has_conversation())
             .and_then(|s| self.shared_notes(s.project_id));
+        // Settings the repository brings run only when the person trusts the project's.
+        let trusted = self
+            .state
+            .session(id)
+            .and_then(|s| self.state.projects.iter().find(|p| p.id == s.project_id))
+            .is_some_and(|p| p.trust_agent_config);
         // A playbook's own session names it on its first message, however late that starts.
         let playbook = self
             .state
@@ -311,6 +319,7 @@ impl RunoApp {
                 attached,
                 dir: dir.clone(),
                 thread,
+                trusted,
             },
         );
         // Counted as it starts, so turns running side by side can't pass the limit.
@@ -390,6 +399,7 @@ impl RunoApp {
             attached,
             dir,
             thread,
+            trusted,
             ..
         } = start;
         crate::connections::prepare_run(
@@ -413,6 +423,7 @@ impl RunoApp {
             memory: exe.as_deref().map(|exe| (exe, dir.as_str())),
             local: sandbox.is_none(),
             thread,
+            trusted,
         };
         let result = agent::run_agent(
             Target::Session(id),

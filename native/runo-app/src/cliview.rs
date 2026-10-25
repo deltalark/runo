@@ -220,6 +220,8 @@ impl RunoApp {
             memory: exe.as_deref().map(|exe| (exe, dir.as_str())),
             local: sandbox.is_none(),
             thread: 0,
+            // An interactive CLI asks the person to trust the folder itself.
+            trusted: false,
         };
         let mut program = pty::Program {
             bin: if opts.binary.trim().is_empty() {

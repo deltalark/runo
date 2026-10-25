@@ -189,6 +189,10 @@ pub struct RunSpec<'a> {
     /// The session's id when it is a Crew thread, whose memory server adds the tools
     /// threads report through; 0 otherwise.
     pub thread: u64,
+    /// Runo may trust the folder for CLIs that ask (Cursor, Gemini) and approve its MCP
+    /// servers up front: the person trusts the project's agent settings, or the folder
+    /// holds none that start programs (see `folder_trusted`).
+    pub trusted: bool,
 }
 
 /// A random version-4 UUID, for naming a Claude Code conversation up front.
@@ -463,7 +467,11 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
         }
         "cursor" => {
             args.extend([s("-p"), s("--output-format"), s("stream-json")]);
-            args.extend(cursor_trust());
+            // Without trust, Cursor stops at its trust prompt rather than load settings
+            // the repository brought.
+            if spec.trusted {
+                args.extend(cursor_trust());
+            }
             if spec.resume && !spec.session_id.is_empty() {
                 args.extend([s("--resume"), spec.session_id.to_string()]);
             }
@@ -474,8 +482,9 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             } else {
                 args.push(s("--force"));
             }
-            // Servers from the project file wait for approval unless approved up front.
-            if knows("--approve-mcps") && !file_servers(spec).is_empty() {
+            // Servers from the project file wait for approval unless approved up front,
+            // which happens only when they are all Runo's or the person trusts the repo.
+            if spec.trusted && knows("--approve-mcps") && !file_servers(spec).is_empty() {
                 args.push(s("--approve-mcps"));
             }
             if !model.is_empty() {
@@ -789,6 +798,39 @@ fn conversation_args(spec: &RunSpec) -> Vec<String> {
     }
 }
 
+/// Why Runo won't trust `dir` for `spec`'s CLI, when the person hasn't trusted the
+/// project's agent settings and the folder has settings that start programs (from the
+/// repository, a pull request, or a VM sharing the folder). None when it may. What an
+/// earlier run added to the folder's settings is taken out first, so only the folder's
+/// own are judged.
+pub fn untrusted_config(spec: &RunSpec, dir: &str) -> Option<String> {
+    if spec.trusted || crate::mcp::project_file(spec.provider).is_none() {
+        return None;
+    }
+    crate::mcp::clean_project(std::path::Path::new(dir));
+    let found = crate::mcp::foreign_config(
+        std::path::Path::new(dir),
+        spec.provider,
+        &file_servers(spec),
+    )?;
+    let name = provider(spec.provider).name;
+    crate::applog::warn_once(
+        "agent",
+        format!("not trusting {dir} for {name}: {found} starts programs Runo didn't add"),
+    );
+    Some(format!(
+        "Runo didn't trust this folder for {name}, because {found} can start programs. \
+         If this project's agent settings are yours, turn on \"Trust agent settings in this \
+         repository\" in the project's settings."
+    ))
+}
+
+/// Whether `spec` may trust `dir`: the person trusts the project, or nothing in the
+/// folder starts programs Runo didn't add.
+pub fn folder_trusted(spec: &RunSpec, dir: &str) -> bool {
+    untrusted_config(spec, dir).is_none()
+}
+
 /// Cursor's headless runs stop at a workspace trust prompt in a folder it hasn't seen,
 /// such as a new worktree, unless the CLI is told to trust it.
 pub(crate) fn cursor_trust() -> Vec<String> {
@@ -982,6 +1024,7 @@ mod interactive_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         };
         let claude = interactive_args(&spec("claude", true, ""));
         assert!(!claude
@@ -1651,7 +1694,7 @@ pub fn turn_command(spec: &RunSpec) -> Command {
 /// What the folder needs before a turn: Gemini's trust, so it holds to the session's
 /// mode, and MCP servers for CLIs that read them from a project file.
 pub fn prepare_folder(spec: &RunSpec, dir: &str, sandboxed: bool) {
-    if spec.provider == "gemini" && spec.local && !sandboxed {
+    if spec.provider == "gemini" && spec.local && !sandboxed && spec.trusted {
         crate::gemini::trust(dir, &spec.opts.env);
     }
     if crate::mcp::project_file(spec.provider).is_some() {
@@ -1852,6 +1895,15 @@ pub fn run_agent(
     sandbox: Option<&crate::connections::Sandbox>,
     tx: Sender<Event>,
 ) -> Result<Handle, String> {
+    let foreign = untrusted_config(spec, dir);
+    if let Some(why) = &foreign {
+        // Shown with the error when the CLI then stops at its trust prompt.
+        let _ = tx.send(Event::Err(target, why.clone()));
+    }
+    let spec = &RunSpec {
+        trusted: foreign.is_none(),
+        ..*spec
+    };
     let bin = program(spec);
     let mut command = turn_command(spec);
     let acp = match (target, crate::detach::root(), sandbox) {
@@ -1860,7 +1912,7 @@ pub fn run_agent(
     };
     if acp.is_some() {
         // The servers go in the session instead; nothing is merged into project files.
-        if spec.provider == "gemini" {
+        if spec.provider == "gemini" && spec.trusted {
             crate::gemini::trust(dir, &spec.opts.env);
         }
         crate::mcp::clean_project(std::path::Path::new(dir));
@@ -2177,6 +2229,7 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         })
     }
 
@@ -2196,6 +2249,7 @@ mod arg_tests {
                 memory: None,
                 local: true,
                 thread: 0,
+                trusted: false,
             };
             turn_command(&spec)
                 .get_envs()
@@ -2232,6 +2286,7 @@ mod arg_tests {
                 memory: None,
                 local: true,
                 thread: 0,
+                trusted: false,
             })
         };
         assert!(run("0199-id").ends_with(&["resume".into(), "0199-id".into(), "hi".into()]));
@@ -2254,6 +2309,7 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         };
         let id = "0b7c6a52-3f7e-4f3a-9d61-2a1c9b3e8f10";
         let first = provider_args(&spec(false, id));
@@ -2289,6 +2345,7 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         };
         let exec = turn_command(&spec);
         // Without an app server in the installed Codex's help, `exec` runs as before.
@@ -2364,6 +2421,7 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         };
         let json_mode = turn_command(&spec);
         // A Pi whose help doesn't list `--mode` runs each prompt in print mode.
@@ -2502,6 +2560,7 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         };
         run_agent(Target::Session(5), &spec, dir.to_str().unwrap(), None, tx).unwrap();
         let (mut out, mut err) = (vec![], vec![]);
@@ -2547,6 +2606,7 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         };
         let error = run_agent(Target::Session(1), &spec, "/", None, tx)
             .err()
@@ -2781,6 +2841,7 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         };
         let has = |p, resume, pair: [&str; 2]| {
             provider_args(&spec(p, resume))
@@ -2814,6 +2875,7 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: true,
         })
     }
 
@@ -2897,6 +2959,7 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         });
         assert!(opencode.windows(2).any(|w| w == ["--agent", "plan"]));
         assert!(!opencode.contains(&"build".to_string()));
@@ -2942,6 +3005,7 @@ mod arg_tests {
             memory: Some(("/bin/runo", "/work/app")),
             local: true,
             thread: 0,
+            trusted: false,
         };
         let claude = provider_args(&spec("claude"));
         let config = claude[claude.iter().position(|a| a == "--mcp-config").unwrap() + 1].clone();
@@ -2989,6 +3053,54 @@ mod arg_tests {
             file_servers(&remote).is_empty(),
             "no local programs elsewhere"
         );
+    }
+
+    #[test]
+    fn untrusted_folders_get_no_cursor_trust_or_mcp_approval() {
+        crate::caps::set(
+            "cursor",
+            crate::caps::Caps {
+                help: "--trust  Trust the workspace\n--approve-mcps  Approve all MCP servers"
+                    .into(),
+                ..Default::default()
+            },
+        );
+        let sel = sel(&[("mode", "full")]);
+        let o = AgentOptions::default();
+        let spec = |trusted| RunSpec {
+            provider: "cursor",
+            prompt: "hi",
+            resume: false,
+            sel: &sel,
+            opts: &o,
+            in_git: true,
+            session_id: "",
+            images: &[],
+            memory: Some(("/bin/runo", "/tmp/x")),
+            local: true,
+            thread: 0,
+            trusted,
+        };
+        let trusted = provider_args(&spec(true));
+        assert!(trusted.contains(&"--trust".to_string()));
+        assert!(trusted.contains(&"--approve-mcps".to_string()));
+        let untrusted = provider_args(&spec(false));
+        assert!(!untrusted.contains(&"--trust".to_string()));
+        assert!(!untrusted.contains(&"--approve-mcps".to_string()));
+
+        // A folder with a planted server isn't trusted unless the person said so.
+        let dir = std::env::temp_dir().join(format!("runo-untrusted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".cursor")).unwrap();
+        let folder = dir.to_string_lossy().into_owned();
+        assert!(folder_trusted(&spec(false), &folder));
+        std::fs::write(dir.join(".cursor/hooks.json"), "{}").unwrap();
+        assert!(!folder_trusted(&spec(false), &folder));
+        assert!(
+            untrusted_config(&spec(false), &folder).is_some_and(|why| why.contains("hooks.json"))
+        );
+        assert!(folder_trusted(&spec(true), &folder));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -3097,6 +3209,7 @@ mod arg_tests {
             memory: None,
             local: true,
             thread: 0,
+            trusted: false,
         };
         assert_eq!(
             interactive_args(&spec(true, "")),

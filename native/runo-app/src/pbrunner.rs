@@ -157,6 +157,8 @@ pub fn command(
     prompt: &str,
     conversation: &str,
     in_git: bool,
+    dir: &str,
+    trust_repo: bool,
 ) -> Result<std::process::Command, String> {
     let mode = unattended_mode(auto);
     if let Some(error) = agent::mode_error(&auto.provider, mode) {
@@ -181,6 +183,11 @@ pub fn command(
         memory: None,
         local: true,
         thread: 0,
+        trusted: trust_repo,
+    };
+    let spec = agent::RunSpec {
+        trusted: agent::folder_trusted(&spec, dir),
+        ..spec
     };
     Ok(agent::turn_command(&spec))
 }
@@ -355,7 +362,15 @@ fn run_one(auto: &Automation, project: &Project, settings: &AppSettings) -> Head
         String::new()
     };
     let opts = settings.agent(&auto.provider).for_project(project.id);
-    let mut command = match command(auto, &opts, &prompt, &conversation, git::is_repo(&run.dir)) {
+    let mut command = match command(
+        auto,
+        &opts,
+        &prompt,
+        &conversation,
+        git::is_repo(&run.dir),
+        &run.dir,
+        project.trust_agent_config,
+    ) {
         Ok(command) => command,
         Err(error) => {
             run.status = "failed".into();
@@ -363,23 +378,26 @@ fn run_one(auto: &Automation, project: &Project, settings: &AppSettings) -> Head
             return run;
         }
     };
-    agent::prepare_folder(
-        &agent::RunSpec {
-            provider: &auto.provider,
-            prompt: &prompt,
-            resume: false,
-            sel: &Default::default(),
-            opts: &opts,
-            in_git: true,
-            session_id: "",
-            images: &[],
-            memory: None,
-            local: true,
-            thread: 0,
-        },
-        &run.dir,
-        false,
-    );
+    let sel = Default::default();
+    let spec = agent::RunSpec {
+        provider: &auto.provider,
+        prompt: &prompt,
+        resume: false,
+        sel: &sel,
+        opts: &opts,
+        in_git: true,
+        session_id: "",
+        images: &[],
+        memory: None,
+        local: true,
+        thread: 0,
+        trusted: project.trust_agent_config,
+    };
+    let spec = agent::RunSpec {
+        trusted: agent::folder_trusted(&spec, &run.dir),
+        ..spec
+    };
+    agent::prepare_folder(&spec, &run.dir, false);
     command
         .current_dir(&run.dir)
         .stdin(std::process::Stdio::null())
@@ -598,7 +616,16 @@ mod tests {
             ..Default::default()
         };
         // Allowed to run commands, Claude Code runs everything else it isn't denied.
-        let all = command(&playbook("claude", &[]), &opts, "Fix it", "abc", true).unwrap();
+        let all = command(
+            &playbook("claude", &[]),
+            &opts,
+            "Fix it",
+            "abc",
+            true,
+            "",
+            false,
+        )
+        .unwrap();
         let line = args(&all);
         assert!(
             line.contains("--permission-mode bypassPermissions"),
@@ -615,6 +642,8 @@ mod tests {
                 "Fix",
                 "",
                 true,
+                "",
+                false,
             )
             .unwrap(),
         );
@@ -623,7 +652,18 @@ mod tests {
             edit.contains("--disallowed-tools Bash,WebFetch,WebSearch"),
             "{edit}"
         );
-        let read = args(&command(&playbook("claude", &["read"]), &opts, "Look", "", true).unwrap());
+        let read = args(
+            &command(
+                &playbook("claude", &["read"]),
+                &opts,
+                "Look",
+                "",
+                true,
+                "",
+                false,
+            )
+            .unwrap(),
+        );
         assert!(read.contains("--permission-mode plan"), "{read}");
 
         let codex_opts = AgentOptions {
@@ -637,6 +677,8 @@ mod tests {
             "Fix it",
             "",
             true,
+            "",
+            false,
         )
         .unwrap();
         assert_eq!(codex.get_program(), "/opt/codex");
@@ -663,6 +705,8 @@ mod tests {
                     "Go",
                     "",
                     true,
+                    "",
+                    false,
                 )
                 .unwrap(),
             )
@@ -671,10 +715,30 @@ mod tests {
         assert!(edit("gemini").contains("--approval-mode auto_edit"));
         assert!(edit("copilot").contains("--allow-all-tools"));
         assert!(!edit("opencode").contains("--agent plan"));
-        let read = args(&command(&playbook("opencode", &["read"]), &opts, "Go", "", true).unwrap());
+        let read = args(
+            &command(
+                &playbook("opencode", &["read"]),
+                &opts,
+                "Go",
+                "",
+                true,
+                "",
+                false,
+            )
+            .unwrap(),
+        );
         assert!(read.contains("--agent plan"));
         // Amp has no read-only mode, so a read-only playbook doesn't run on it.
-        assert!(command(&playbook("amp", &["read"]), &opts, "Go", "", true).is_err());
+        assert!(command(
+            &playbook("amp", &["read"]),
+            &opts,
+            "Go",
+            "",
+            true,
+            "",
+            false
+        )
+        .is_err());
     }
 
     #[test]
