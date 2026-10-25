@@ -3956,17 +3956,13 @@ impl RunoApp {
         let provider = agent::provider(past.provider);
         // The conversation's earlier turns, read from the CLI's transcript, so the chat
         // shows where it left off.
-        let prefix = format!("{}/", past.cwd.trim_end_matches('/'));
-        let mut earlier: Vec<Message> = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .and_then(|home| {
-                history::transcript(std::path::Path::new(&home), past.provider, &past.id)
-            })
+        let mut earlier: Vec<Message> = store::home_dir()
+            .and_then(|home| history::transcript(&home, past.provider, &past.id))
             .map(|path| history::turns(past.provider, &history::read_from(&path, 0)))
             .unwrap_or_default();
         for m in &mut earlier {
             for step in &mut m.steps {
-                step.label = step.label.replace(&prefix, "");
+                step.label = cliview::without_dir(&step.label, &past.cwd);
             }
         }
         let picked_up = format!(

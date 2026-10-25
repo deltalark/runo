@@ -48,8 +48,8 @@ fn ssh_common(conn: &Connection) -> Vec<String> {
 }
 
 fn expand_home(path: &str) -> String {
-    match (path.strip_prefix("~/"), std::env::var("HOME")) {
-        (Some(rest), Ok(home)) => format!("{home}/{rest}"),
+    match (path.strip_prefix("~/"), crate::store::home_dir()) {
+        (Some(rest), Some(home)) => home.join(rest).to_string_lossy().into_owned(),
         _ => path.to_string(),
     }
 }

@@ -557,12 +557,7 @@ impl RunoApp {
                     .truncate()
                     .font_family(self.mono_font.clone())
                     .text_size(px(12.5))
-                    .child(match std::env::var("HOME") {
-                        Ok(home) if !home.is_empty() && file.path.starts_with(&home) => {
-                            format!("~{}", &file.path[home.len()..])
-                        }
-                        _ => file.path.clone(),
-                    }),
+                    .child(crate::settings_ui::tilde(std::path::Path::new(&file.path))),
             )
             .when(!file.abs.exists(), |el| {
                 el.child(div().text_xs().text_color(rgb(c_muted())).child("New file"))

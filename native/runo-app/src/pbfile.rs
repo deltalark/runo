@@ -320,8 +320,8 @@ pub fn fetch(source: &str) -> Result<Fetched, String> {
 
 fn expand_home(source: &str) -> PathBuf {
     match source.strip_prefix("~/") {
-        Some(rest) => std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join(rest))
+        Some(rest) => crate::store::home_dir()
+            .map(|h| h.join(rest))
             .unwrap_or_else(|| PathBuf::from(source)),
         None => PathBuf::from(source),
     }

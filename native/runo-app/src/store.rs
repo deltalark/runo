@@ -1104,15 +1104,19 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) {
     }
 }
 
+/// The person's home folder: `$HOME`, else `%USERPROFILE%` (Windows sets only that).
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|h| !h.is_empty()))
+        .map(PathBuf::from)
+}
+
 /// Runo's data folder: `$RUNO_HOME`, else `~/.runo`.
 pub fn data_dir() -> PathBuf {
     std::env::var_os("RUNO_HOME")
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .map(|home| PathBuf::from(home).join(".runo"))
-        })
+        .or_else(|| home_dir().map(|home| home.join(".runo")))
         .unwrap_or_else(|| PathBuf::from(".runo"))
 }
 
