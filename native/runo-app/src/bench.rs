@@ -5,8 +5,12 @@
 //! - `idle`: nothing happens, no agent runs;
 //! - `scroll`: the chat scrolls up and down, a step every frame;
 //! - `type`: a character goes into the composer every 70 ms, as fast typing does;
+//! - `working`: a turn runs in the open chat with nothing coming in, so only the working
+//!   indicator moves (its frames' gaps are the line's `motion gap`);
+//! - `working+type`: typing as in `type` while that turn runs;
 //! - `stream`: three agents stream replies, the open chat's and two in the background,
-//!   through the same path a real agent's output takes.
+//!   through the same path a real agent's output takes, with the working indicator
+//!   showing in the open chat.
 //!
 //! Each scene is one line in the stats file (see `framestats::scene`).
 
@@ -188,32 +192,49 @@ impl RunoApp {
                 }
             }
 
-            bench_scene(Some("type"));
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.jump_to_bottom();
-                let focus = this.prompt.read(cx).focus_handle(cx);
-                window.focus(&focus, cx);
-            });
-            let began = std::time::Instant::now();
-            let mut n = 0usize;
-            while began.elapsed() < SCENE {
-                wait(Duration::from_millis(70)).await;
-                let ch = if n % 7 == 6 { " " } else { "a" };
-                n += 1;
-                if this
-                    .update_in(cx, |this, window, cx| {
-                        this.prompt.update(cx, |p, cx| {
-                            p.replace_text_in_range(None, ch, window, cx);
-                        });
-                    })
-                    .is_err()
-                {
-                    return;
+            // Typing; then a turn running in the open chat with nothing coming in yet, so
+            // only the working indicator moves; then typing while it does.
+            for scene in ["type", "working", "working+type"] {
+                if scene == "working" {
+                    let _ = this.update(cx, |this, cx| {
+                        this.bench_turn(ids[0], &dir);
+                        this.handles.insert(Target::Session(ids[0]), Handle::none());
+                        cx.notify();
+                    });
+                    // Let the row come in before measuring.
+                    wait(Duration::from_millis(500)).await;
                 }
+                bench_scene(Some(scene));
+                if scene == "working" {
+                    wait(SCENE).await;
+                    continue;
+                }
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.jump_to_bottom();
+                    let focus = this.prompt.read(cx).focus_handle(cx);
+                    window.focus(&focus, cx);
+                });
+                let began = std::time::Instant::now();
+                let mut n = 0usize;
+                while began.elapsed() < SCENE {
+                    wait(Duration::from_millis(70)).await;
+                    let ch = if n % 7 == 6 { " " } else { "a" };
+                    n += 1;
+                    if this
+                        .update_in(cx, |this, window, cx| {
+                            this.prompt.update(cx, |p, cx| {
+                                p.replace_text_in_range(None, ch, window, cx);
+                            });
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.prompt.update(cx, |p, cx| p.set_value("", window, cx));
+                });
             }
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.prompt.update(cx, |p, cx| p.set_value("", window, cx));
-            });
 
             bench_scene(Some("stream"));
             let Ok(tx) = this.update(cx, |this, cx| {

@@ -1576,6 +1576,11 @@ impl Handle {
         Self(None, false, Some(group))
     }
 
+    /// A turn with no process behind it, which `bench` plays.
+    pub(crate) fn none() -> Self {
+        Self(None, false, None)
+    }
+
     pub fn kill(&self) {
         if let Some(group) = self.2 {
             crate::detach::stop(group);

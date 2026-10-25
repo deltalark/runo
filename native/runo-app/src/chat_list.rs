@@ -470,17 +470,13 @@ impl RunoApp {
                     .into_any_element()
             }
             ChatRow::Working => {
-                let since = self
-                    .turns
-                    .get(&id)
-                    .map(|t| &t.started)
-                    .map(|start| elapsed(start.elapsed()));
+                let started = self.turns.get(&id).map(|t| t.started);
                 div()
                     .flex()
                     .items_center()
                     .gap_3()
                     .text_size(px(13.))
-                    .child(working::indicator(working::doing(&session.messages), since))
+                    .child(working::running(working::doing(&session.messages), started))
                     .child(self.arcade_chip(cx))
                     .into_any_element()
             }

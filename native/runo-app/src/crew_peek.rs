@@ -352,15 +352,11 @@ impl RunoApp {
                 })
             }
             ChatRow::Working => {
-                let since = self
-                    .turns
-                    .get(&thread)
-                    .map(|t| &t.started)
-                    .map(|t| elapsed(t.elapsed()));
+                let started = self.turns.get(&thread).map(|t| t.started);
                 Some(
                     div()
                         .text_size(px(12.5))
-                        .child(working::indicator(working::doing(&session.messages), since))
+                        .child(working::running(working::doing(&session.messages), started))
                         .into_any_element(),
                 )
             }
