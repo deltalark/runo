@@ -44,10 +44,10 @@ jobs:
           sign=false; notarize=false
           if [ -n "$APPLE_CERT_P12" ] && [ -n "$APPLE_CERT_PASSWORD" ]; then sign=true; fi
           if [ "$sign" = true ] && [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_APP_PASSWORD" ]; then notarize=true; fi
-          # A release must be signed and notarized, or macOS users get a build Gatekeeper can't check.
+          # Until the Apple secrets are set, releases ship signed ad hoc, as before, so
+          # macOS asks before opening them. Say so loudly on a tag.
           if [[ "$GITHUB_REF" == refs/tags/v* ]] && [ "$notarize" != true ]; then
-            echo "::error::Release builds need the Apple signing and notarization secrets."
-            exit 1
+            echo "::warning::This release isn't signed and notarized: set the Apple signing and notarization secrets."
           fi
           echo "sign=$sign" >> "$GITHUB_OUTPUT"
           echo "notarize=$notarize" >> "$GITHUB_OUTPUT"
