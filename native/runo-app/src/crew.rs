@@ -1215,6 +1215,8 @@ Limits: at most {MAX_NEW_THREADS} new threads and one message per thread per rep
 
 Cost: every thread is a full agent session that reads the code afresh, and the person's plan has a usage window shared by all of them. Split work into threads by independent area, not by item: one thread for related fixes beats one per fix. When the work has an order (the riskiest first), start those threads first and the rest once they report. Only a few threads run at once; the others wait for a slot and start on their own, so don't start a thread again because it is waiting.
 
+Speed: give each thread one focused goal, with what done looks like; a thread with three unrelated goals takes as long as all three in a row. Say in the brief to skip local benchmarks, screenshots and app launches unless the task needs them, and to leave tests and lints to CI. For a big review, start several narrow reviewers, each on one area and asked for its top issues only, rather than one that reads everything. Fit model and effort to the task: a smaller model and low effort for mechanical work such as releases, merges, renames, docs or copy, and the default for design, debugging or risky changes.
+
 Each message may open with a Threads section: what changed in this project's threads since your last turn. Threads report through their own tools; use those reports to answer the person, with links.
 "##
     )
@@ -1999,6 +2001,8 @@ mod tests {
         assert!(rules.contains("Claude Code's models: opus, sonnet."));
         assert!(rules.contains("codex (Codex)"));
         assert!(rules.contains(&format!("at most {MAX_NEW_THREADS} new threads")));
+        assert!(rules.contains("one focused goal"));
+        assert!(rules.contains("top issues only"));
         // The example in the rules is itself a valid block.
         let example = rules.split("```runo-actions\n").nth(1).unwrap();
         let example = example.split("\n```").next().unwrap();
