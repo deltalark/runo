@@ -179,7 +179,7 @@ impl RunoApp {
         }
         if cli {
             if let Some(panes) = &self.panes {
-                cx.notify(panes.ticker.entity_id());
+                App::notify(cx, panes.ticker.entity_id());
             }
         }
     }
