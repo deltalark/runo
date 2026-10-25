@@ -4,6 +4,12 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-10-25
+
+### Fixed
+
+- Runo builds for Windows again. 0.5.7 shipped without a Windows download because the frame-time stats used a Unix-only call; on Windows their CPU figure now reads 0%.
+
 ## [0.5.7] - 2026-10-25
 
 ### Added
