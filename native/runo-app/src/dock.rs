@@ -1,5 +1,6 @@
-//! The count on Runo's Dock icon, the red bubble other apps show. It is the same number
-//! as the corner mark's badge (`RunoApp::attention`), so the two always agree.
+//! The count on Runo's Dock icon, the red bubble other apps show: everything that needs
+//! the person (`RunoApp::attention`). The corner mark counts only the assistant's own
+//! unread answers.
 
 use std::sync::Mutex;
 
