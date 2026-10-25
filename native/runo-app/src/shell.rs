@@ -849,9 +849,12 @@ pub(crate) fn hover_wash(
 ) -> Stateful<Div> {
     let id: ElementId = id.into();
     let color = Hsla::from(color);
-    el.on_hover(|_, window, _| window.refresh()).child(
+    let view = std::rc::Rc::new(Cell::new(None));
+    let drawn_in = view.clone();
+    el.on_hover(move |_, window, cx| redraw_view(view.get(), window, cx))
+        .child(
         canvas(
-            |_, _, _| (),
+            move |_, window, _| drawn_in.set(Some(window.current_view())),
             move |b, _, window, _| {
                 let over = b.contains(&window.mouse_position());
                 let now = std::time::Instant::now();
@@ -898,12 +901,32 @@ const REVEAL_MS: u64 = 140;
 /// have them pop. Keep `on_hover` free on the row for it.
 pub(crate) fn reveal_group(el: Stateful<Div>, id: impl Into<ElementId>) -> Stateful<Div> {
     let id = id.into();
-    el.on_hover(move |hovered, window, _| {
+    let view = std::rc::Rc::new(Cell::new(None));
+    let drawn_in = view.clone();
+    el.on_hover(move |hovered, window, cx| {
         GROUPS.with_borrow_mut(|g| {
             g.insert(id.clone(), (*hovered, std::time::Instant::now()));
         });
-        window.refresh();
+        redraw_view(view.get(), window, cx);
     })
+    .child(
+        canvas(
+            move |_, window, _| drawn_in.set(Some(window.current_view())),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_0(),
+    )
+}
+
+/// Draw `view` again, the view a hovered element was drawn in, rather than the whole
+/// window: the window's parts are cached views (see `panes`), and only the hovered one
+/// changed. Before the element is first drawn, the window.
+fn redraw_view(view: Option<EntityId>, window: &mut Window, cx: &mut App) {
+    match view {
+        Some(view) => cx.notify(view),
+        None => window.refresh(),
+    }
 }
 
 /// An action that shows while its row is hovered (with `group_hover`, which still decides

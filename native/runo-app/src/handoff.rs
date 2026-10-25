@@ -770,9 +770,10 @@ impl RunoApp {
                     .rounded_full()
                     .bg(rgb(c_blue()))
                     .shadow_md()
-                    .with_animation(
+                    .looping(
                         ("switch-pulse", i as usize),
                         Animation::new(Duration::from_millis(1500)).repeat(),
+                        0.,
                         move |el, d| {
                             let t = (d + i as f32 / 3.).fract();
                             let fade = (t * std::f32::consts::PI).sin();

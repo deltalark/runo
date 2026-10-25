@@ -106,16 +106,16 @@ impl RunoApp {
     /// A project's sessions as the sidebar lists them: live ones matching the filter,
     /// pinned first.
     pub(crate) fn project_sessions(&self, project: &Project, filter: &str) -> Vec<&Session> {
+        // A project whose name matches shows all its sessions.
+        let all = filter.is_empty() || project.name.to_lowercase().contains(filter);
         let mut sessions: Vec<&Session> = self
             .state
             .sessions
             .iter()
             .filter(|s| s.project_id == project.id && !s.archived && s.canvas.is_empty())
             .filter(|s| {
-                filter.is_empty()
-                    || s.title.to_lowercase().contains(filter)
+                all || s.title.to_lowercase().contains(filter)
                     || s.branch.to_lowercase().contains(filter)
-                    || project.name.to_lowercase().contains(filter)
             })
             .collect();
         sessions.sort_by_key(|s| !s.pinned);

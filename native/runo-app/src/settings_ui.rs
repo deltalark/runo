@@ -2581,7 +2581,7 @@ impl RunoApp {
                                     .size(px(6.))
                                     .rounded_full()
                                     .bg(rgb(c_blue()))
-                                    .with_animation(
+                                    .animated(
                                         "key-rec",
                                         Animation::new(std::time::Duration::from_millis(1000))
                                             .repeat()

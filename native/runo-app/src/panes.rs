@@ -23,6 +23,22 @@ pub(crate) enum Part {
     Chat,
     /// The conversation of the chat floating over a canvas.
     CanvasChat,
+    /// The terminal panel under the side panel: drawn over the side panel's foot rather
+    /// than inside it, so a shell's output draws only the terminal.
+    Terminal,
+}
+
+impl Part {
+    const ALL: [Part; 8] = [
+        Part::TopBar,
+        Part::Rail,
+        Part::Sidebar,
+        Part::Right,
+        Part::Status,
+        Part::Chat,
+        Part::CanvasChat,
+        Part::Terminal,
+    ];
 }
 
 pub(crate) struct Pane {
@@ -31,41 +47,135 @@ pub(crate) struct Pane {
     _app_changed: Subscription,
 }
 
-thread_local! {
-    /// How many times each part was drawn, for `bench`.
-    static DRAWN: std::cell::RefCell<[u32; 7]> = const { std::cell::RefCell::new([0; 7]) };
+/// How often a part was drawn, and how long building, laying out and prepainting it took
+/// in all and at most, for `bench`.
+#[derive(Clone, Copy, Default)]
+struct Drawn {
+    count: u32,
+    total: Duration,
+    max: Duration,
 }
 
-/// How many times each part was drawn since the last call, by name.
+thread_local! {
+    static DRAWN: std::cell::RefCell<[Drawn; 8]> = std::cell::RefCell::new([Drawn::default(); 8]);
+}
+
+/// How many times each part was drawn since the last call, by name, with the time it took
+/// when frame stats are on: "Right 3 (12.0 ms, max 5.1)".
 pub(crate) fn take_drawn() -> String {
     let drawn = DRAWN.with(|d| std::mem::take(&mut *d.borrow_mut()));
-    [
-        Part::TopBar,
-        Part::Rail,
-        Part::Sidebar,
-        Part::Right,
-        Part::Status,
-        Part::Chat,
-        Part::CanvasChat,
-    ]
-    .iter()
-    .zip(drawn)
-    .map(|(part, n)| format!("{part:?} {n}"))
-    .collect::<Vec<_>>()
-    .join(", ")
+    let ms = |d: Duration| d.as_secs_f64() * 1000.;
+    Part::ALL
+        .iter()
+        .zip(drawn)
+        .map(|(part, d)| {
+            if d.total.is_zero() {
+                format!("{part:?} {}", d.count)
+            } else {
+                format!(
+                    "{part:?} {} ({:.1} ms, max {:.1})",
+                    d.count,
+                    ms(d.total),
+                    ms(d.max)
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let part = self.part;
-        DRAWN.with(|d| d.borrow_mut()[part as usize] += 1);
+        let began = std::time::Instant::now();
+        DRAWN.with(|d| d.borrow_mut()[part as usize].count += 1);
         let view = cx.entity_id();
         let Some(app) = self.app.upgrade() else {
             return div().into_any_element();
         };
-        motion::within(view, || {
+        let el = motion::within(view, || {
             app.update(cx, |app, cx| app.draw_part(part, window, cx))
-        })
+        });
+        if framestats::on() {
+            Timed {
+                part,
+                began,
+                child: el,
+            }
+            .into_any_element()
+        } else {
+            el
+        }
+    }
+}
+
+/// A pane's content, timed from its render to the end of its prepaint: a cached view lays
+/// its content out between the two, so this is the pane's whole cost but its paint.
+struct Timed {
+    part: Part,
+    began: std::time::Instant,
+    child: AnyElement,
+}
+
+impl IntoElement for Timed {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for Timed {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.prepaint(window, cx);
+        let took = self.began.elapsed();
+        DRAWN.with(|d| {
+            let d = &mut d.borrow_mut()[self.part as usize];
+            d.total += took;
+            d.max = d.max.max(took);
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
     }
 }
 
@@ -86,17 +196,9 @@ pub(crate) struct Panes {
 impl Panes {
     fn new(cx: &mut Context<RunoApp>) -> Panes {
         let app = cx.entity();
-        let panes = [
-            Part::TopBar,
-            Part::Rail,
-            Part::Sidebar,
-            Part::Right,
-            Part::Status,
-            Part::Chat,
-            Part::CanvasChat,
-        ]
-        .into_iter()
-        .map(|part| {
+        let panes = Part::ALL
+            .into_iter()
+            .map(|part| {
             cx.new(|cx| Pane {
                 app: app.downgrade(),
                 part,
@@ -143,13 +245,43 @@ impl RunoApp {
         }
     }
 
-    /// Draw the conversations again, the open chat's, the one over a canvas and the
-    /// thread beside Crew's chat, and nothing else of the window.
-    pub(crate) fn notify_chat(&self, cx: &mut Context<Self>) {
+    /// Draw `parts` again, and nothing else of the window but its frame.
+    pub(crate) fn notify_parts(&self, parts: &[Part], cx: &mut App) {
         if let Some(panes) = &self.panes {
-            for part in [Part::Chat, Part::CanvasChat, Part::Right] {
-                App::notify(cx, panes.get(part).entity_id());
+            for &part in parts {
+                cx.notify(panes.get(part).entity_id());
             }
+        }
+    }
+
+    /// Draw the conversations again, the open chat's and the one over a canvas, and with
+    /// `peek` the side panel too, where the thread beside Crew's chat is, and nothing else
+    /// of the window.
+    pub(crate) fn notify_chat(&self, peek: bool, cx: &mut App) {
+        self.notify_parts(&[Part::Chat, Part::CanvasChat], cx);
+        if peek {
+            self.notify_parts(&[Part::Right], cx);
+        }
+    }
+
+    /// Whether output from session `id` shows in the side panel: it is the thread open
+    /// beside Crew's chat.
+    pub(crate) fn peeked(&self, id: u64) -> bool {
+        self.peek == Some(id) && self.show_panel && self.right_tab == RightTab::Threads
+    }
+
+    /// Draw again what output from agents whose chat isn't open changes: the sidebar, the
+    /// top bar, the rail and the status bar. With Crew's chat open its thread cards and
+    /// Threads panel follow the threads too, so those draw as well. Away from a session,
+    /// the page shows sessions in its own ways (Home, a canvas), so the window draws.
+    pub(crate) fn notify_background(&self, cx: &mut Context<Self>) {
+        if self.view != View::Session || self.tour.is_some() {
+            cx.notify();
+            return;
+        }
+        self.notify_parts(&[Part::TopBar, Part::Rail, Part::Sidebar, Part::Status], cx);
+        if self.current().is_some_and(|s| s.canvas == crew::CANVAS) {
+            self.notify_parts(&[Part::Chat, Part::Right], cx);
         }
     }
 
@@ -159,8 +291,9 @@ impl RunoApp {
             Part::TopBar => self.top_bar(cx).into_any_element(),
             Part::Rail => self.mode_rail(cx),
             Part::Sidebar => self.sidebar(cx).into_any_element(),
-            Part::Right => self.right_pane(window, cx).into_any_element(),
+            Part::Right => self.right_pane(cx).into_any_element(),
             Part::Status => self.status_bar(cx),
+            Part::Terminal => self.terminal_panel(window, cx).into_any_element(),
             Part::Chat | Part::CanvasChat => {
                 let compact = part == Part::CanvasChat;
                 let id = self.chat_shown[compact as usize].get();
