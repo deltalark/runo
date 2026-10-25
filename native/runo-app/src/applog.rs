@@ -379,6 +379,8 @@ fn shift_parts(path: &Path, parts: usize) {
 }
 
 /// Where stderr's lines end up, so a fresh file can take over when the log is full.
+/// Windows only ever points stderr at the file.
+#[cfg_attr(windows, allow(dead_code))]
 enum Sink {
     /// Stderr is the file itself.
     Stderr,
