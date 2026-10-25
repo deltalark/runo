@@ -38,26 +38,25 @@ fn holds(
 }
 
 /// Whether the CLI keeps its own conversation that a follow-up can resume. Others get
-/// the recent conversation written into each follow-up prompt instead. Grok does once
-/// its help lists `--session`; older releases start fresh every turn.
+/// the recent conversation written into each follow-up prompt instead.
 pub fn resumes(provider: &str) -> bool {
     holds(provider, |s| &s.resumes)
 }
 
-/// The conversation id a CLI names on stderr: Grok's headless runs start with
-/// `Session: <id>` there (dimmed), the id `-s` takes to continue it.
-pub fn stderr_conversation(provider: &str, line: &str) -> Option<String> {
-    if provider != "grok" {
-        return None;
-    }
-    let plain = strip_ansi(line);
-    let id = plain.trim().strip_prefix("Session: ")?.trim();
-    (!id.is_empty()
-        && id.len() <= 64
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-    .then(|| id.to_string())
+/// Whether the CLI can resume the conversation Runo kept for a session. Grok (xAI's
+/// Grok Build) resumes only by session UUID; a session from the community Grok CLI Runo
+/// ran before keeps a shorter id, so it starts a new conversation with the history in
+/// the prompt instead.
+pub fn can_resume(provider: &str, conversation: &str) -> bool {
+    provider != "grok" || conversation.is_empty() || is_uuid(conversation)
+}
+
+fn is_uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.char_indices().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        })
 }
 
 /// `text` without terminal colour codes (`ESC [ ... letter`).
@@ -240,9 +239,9 @@ pub fn output(provider: &str) -> Output {
     }
 }
 
-/// Runo's permission levels a CLI can hold to, given its `--help`. Grok runs every tool
-/// without asking; Amp has no read-only mode; Cursor's print mode either only proposes
-/// changes or, with `--force`, also runs commands, so it has no edit-only level.
+/// Runo's permission levels a CLI can hold to, given its `--help`. Amp has no read-only
+/// mode; Cursor's print mode either only proposes changes or, with `--force`, also runs
+/// commands, so it has no edit-only level.
 pub fn modes(provider: &str) -> Vec<&'static str> {
     match crate::registry::spec(provider) {
         Some(spec) => spec.modes.iter().map(String::as_str).collect(),
@@ -251,8 +250,8 @@ pub fn modes(provider: &str) -> Vec<&'static str> {
 }
 
 /// The level a CLI really runs at for the session's mode, for agents that have no exact
-/// match: one without Auto edit (Grok, whose tools always run, and Cursor, whose edits
-/// come with commands) runs at Full access.
+/// match: one without Auto edit (Cursor, whose edits come with commands) runs at Full
+/// access.
 pub fn effective_mode<'a>(provider: &str, mode: &'a str) -> &'a str {
     match mode {
         "" | "edit" if !modes(provider).contains(&"edit") => "full",
@@ -601,12 +600,49 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             args.extend(split_args(&opts.extra_args));
             args.push(with_images(spec));
         }
+        // xAI's Grok Build speaks Claude Code's stream-json and permission modes. A
+        // headless run can't ask, so a tool call its mode doesn't allow is refused.
         "grok" => {
-            if spec.resume && !spec.session_id.is_empty() {
-                args.extend([s("-s"), spec.session_id.to_string()]);
+            let permission = match mode.as_str() {
+                "plan" => "plan",
+                "full" => "bypassPermissions",
+                _ => "acceptEdits",
+            };
+            args.extend([s("--output-format"), s("streaming-messages-json")]);
+            if knows("--include-partial-messages") {
+                args.push(s("--include-partial-messages"));
             }
+            args.extend([s("--permission-mode"), s(permission)]);
             if !model.is_empty() {
                 args.extend([s("-m"), model]);
+            }
+            if !effort.is_empty() {
+                args.extend([s("--reasoning-effort"), effort]);
+            }
+            if !opts.append_prompt.trim().is_empty() {
+                args.extend([s("--rules"), opts.append_prompt.clone()]);
+            }
+            // It takes Claude Code's `Bash(git *)` style rules.
+            for rule in list(&opts.allowed_tools) {
+                args.extend([s("--allow"), rule]);
+            }
+            for rule in list(&opts.disallowed_tools) {
+                args.extend([s("--deny"), rule]);
+            }
+            let id = spec.session_id;
+            match (spec.resume, id.is_empty()) {
+                // A resumed session keeps the folders it was created with.
+                (true, false) if is_uuid(id) => args.extend([s("-r"), id.to_string()]),
+                (true, true) => args.push(s("-c")),
+                _ => {
+                    // `-s` takes only a UUID, for a new session.
+                    if is_uuid(id) {
+                        args.extend([s("-s"), id.to_string()]);
+                    }
+                    for dir in list(&opts.add_dirs) {
+                        args.extend([s("--add-dir"), dir]);
+                    }
+                }
             }
             args.extend(split_args(&opts.extra_args));
             args.extend([s("-p"), with_images(spec)]);
@@ -886,9 +922,19 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
         }
         "grok" => {
             let mut args = with_model(Vec::new(), "-m");
+            match spec.sel.get("mode").map(String::as_str) {
+                Some("plan") => args.extend([s("--permission-mode"), s("plan")]),
+                Some("full") => args.extend([s("--permission-mode"), s("bypassPermissions")]),
+                Some("edit") => args.extend([s("--permission-mode"), s("acceptEdits")]),
+                _ => {}
+            }
+            let resume = resume && is_uuid(&id);
             if resume {
+                args.extend([s("-r"), id]);
+            } else if is_uuid(&id) {
                 args.extend([s("-s"), id]);
-            } else if !spec.prompt.is_empty() {
+            }
+            if !resume && !spec.prompt.is_empty() {
                 // The interactive CLI takes its opening message as its argument.
                 args.push(spec.prompt.to_string());
             }
@@ -1318,6 +1364,17 @@ pub fn recap_command(
             }
             command.arg(prompt);
         }
+        "grok" if is_uuid(conversation) => {
+            command.args([
+                "--permission-mode",
+                "plan",
+                "-r",
+                conversation,
+                "--fork-session",
+                "-p",
+                prompt,
+            ]);
+        }
         "qwen" if !conversation.is_empty() => {
             command.args([
                 "--approval-mode",
@@ -1417,7 +1474,7 @@ pub fn sign_in_help(provider: &str) -> String {
         "cursor" => "Open a terminal and run `cursor-agent login`, or set CURSOR_API_KEY under Settings > Cursor > Environment.",
         "droid" => "Open a terminal and run `droid` to sign in, or set FACTORY_API_KEY under Settings > Droid > Environment.",
         "opencode" => "Open a terminal and run `opencode auth login`.",
-        "grok" => "Set GROK_API_KEY under Settings > Grok > Environment.",
+        "grok" => "Open a terminal and run `grok login` to sign in with your SuperGrok or X Premium+ subscription, or set XAI_API_KEY under Settings > Grok > Environment.",
         _ => "Sign in to it in a terminal, then try again.",
     };
     format!("{name} isn't signed in. {how}")
@@ -1425,7 +1482,7 @@ pub fn sign_in_help(provider: &str) -> String {
 
 /// Whether the CLI reports what a turn cost, which spending limits count.
 pub fn reports_cost(provider: &str) -> bool {
-    matches!(provider, "claude" | "opencode" | "pi")
+    matches!(provider, "claude" | "opencode" | "grok" | "pi")
 }
 
 /// Whether Runo reads the tokens a turn used from the CLI's output, which the token limit
@@ -1554,6 +1611,10 @@ pub fn ask_command_on(provider: &str, configured_bin: &str, prompt: &str, model:
         "claude" => {
             command.args(["-p", "--permission-mode", "plan"]);
             command.args(&model_args).args(["--", prompt]);
+        }
+        "grok" => {
+            command.args(["--permission-mode", "plan"]);
+            command.args(&model_args).args(["-p", prompt]);
         }
         _ => {
             command.args(&model_args).args(["-p", prompt]);
@@ -2390,7 +2451,6 @@ mod arg_tests {
 
     #[test]
     fn modes_come_from_the_manifest() {
-        assert_eq!(effective_mode("grok", "edit"), "full");
         assert_eq!(effective_mode("cursor", ""), "full");
         assert_eq!(effective_mode("amp", "edit"), "edit");
         assert!(mode_error("amp", "plan").is_some());
@@ -2900,14 +2960,11 @@ mod arg_tests {
         });
         assert!(opencode.windows(2).any(|w| w == ["--agent", "plan"]));
         assert!(!opencode.contains(&"build".to_string()));
-        // Grok and Amp can't stay read-only, so they don't run in Plan only.
-        assert!(mode_error("grok", "plan").is_some());
+        // Amp can't stay read-only, so it doesn't run in Plan only.
         assert!(mode_error("amp", "plan").is_some());
         assert!(mode_error("amp", "edit").is_none());
         assert!(mode_error("copilot", "plan").is_none());
-        assert_eq!(modes("grok"), ["full"]);
         assert_eq!(modes("cursor"), ["plan", "full"]);
-        assert_eq!(effective_mode("grok", "edit"), "full");
         assert_eq!(effective_mode("cursor", ""), "full");
         assert_eq!(effective_mode("copilot", "edit"), "edit");
     }
@@ -2923,7 +2980,6 @@ mod arg_tests {
         assert!(run_args("amp", "edit", false, &[]).contains(&"--stream-json".to_string()));
         assert_eq!(output("codex"), Output::Json);
         assert_eq!(output("amp"), Output::Claude);
-        assert_eq!(output("grok"), Output::Text);
     }
 
     #[test]
@@ -3064,74 +3120,154 @@ mod arg_tests {
     }
 
     #[test]
-    fn grok_continues_its_session_once_its_help_lists_the_flag() {
-        crate::caps::set("grok", crate::caps::Caps::default());
-        assert!(!resumes("grok"), "older releases start fresh every turn");
+    fn grok_runs_xais_grok_build() {
+        // Grok Build 1.0.70 speaks Claude Code's stream-json and permission modes, and
+        // takes a session UUID up front. Lines from its `--help`.
         crate::caps::set(
             "grok",
             crate::caps::Caps {
-                help: "  -s, --session <id>             Continue a saved session by id, or use\n                                 'latest'".into(),
+                help: "Grok Build TUI\n      --include-partial-messages\n          Emit incremental text and thinking deltas alongside whole messages\n      --output-format <OUTPUT_FORMAT>\n          Output format for headless mode [default: plain] [possible values: plain, json, streaming-json, streaming-messages-json]".into(),
                 ..Default::default()
             },
         );
-        assert!(resumes("grok"));
-        assert!(!names_conversation("grok"), "Grok names its own sessions");
-        let fresh = run_args("grok", "full", false, &[]);
-        assert!(!fresh.contains(&"-s".to_string()));
-        assert!(fresh.ends_with(&["-p".into(), "hi".into()]));
-        let resumed = run_args("grok", "full", true, &[]);
-        assert_eq!(&resumed[..2], ["-s", "id-1"]);
-        assert!(resumed.ends_with(&["-p".into(), "hi".into()]));
-        // The interactive CLI opens the same session.
-        let sel = sel(&[("model", "grok-4.3")]);
+        assert_eq!(output("grok"), Output::Claude);
+        assert!(resumes("grok") && names_conversation("grok"));
+        assert_eq!(modes("grok"), ["edit", "plan", "full"]);
+        assert_eq!(effective_mode("grok", "edit"), "edit");
+        assert!(mode_error("grok", "plan").is_none());
+        assert!(reports_cost("grok") && reports_tokens("grok"));
+        assert_eq!(cost_limit_note("grok"), None);
+        let hint = sign_in_help("grok");
+        assert!(hint.starts_with("Grok isn't signed in. Open a terminal and run `grok login`"));
+        assert!(hint.contains("XAI_API_KEY") && !hint.contains("GROK_API_KEY"));
+        assert_eq!(
+            crate::install::sign_in_command("grok", "grok"),
+            "grok login"
+        );
+
+        const ID: &str = "0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f";
+        let mode = sel(&[("model", "grok-4.7"), ("mode", "edit")]);
         let o = AgentOptions::default();
-        let spec = |resume, prompt| RunSpec {
+        let spec = |resume, session_id| RunSpec {
             provider: "grok",
-            prompt,
+            prompt: "hi",
             resume,
-            sel: &sel,
+            sel: &mode,
             opts: &o,
             in_git: true,
-            session_id: "9857aae5fff2",
+            session_id,
             images: &[],
             memory: None,
             local: true,
             thread: 0,
         };
         assert_eq!(
-            interactive_args(&spec(true, "")),
-            ["-m", "grok-4.3", "-s", "9857aae5fff2"]
+            provider_args(&spec(false, ID)),
+            [
+                "--output-format",
+                "streaming-messages-json",
+                "--include-partial-messages",
+                "--permission-mode",
+                "acceptEdits",
+                "-m",
+                "grok-4.7",
+                "-s",
+                ID,
+                "-p",
+                "hi"
+            ]
         );
-        assert_eq!(
-            interactive_args(&spec(false, "start here")),
-            ["-m", "grok-4.3", "start here"]
-        );
-    }
+        let resumed = provider_args(&spec(true, ID));
+        assert!(resumed.windows(2).any(|w| w == ["-r", ID]));
+        assert!(!resumed.contains(&"-s".to_string()));
+        assert!(resumed.ends_with(&["-p".into(), "hi".into()]));
+        assert!(run_args("grok", "plan", false, &[])
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "plan"]));
+        assert!(run_args("grok", "full", false, &[])
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "bypassPermissions"]));
 
-    #[test]
-    fn grok_names_its_session_on_stderr() {
-        // Exactly what grok-dev 1.1.7 prints at the start of a headless run.
-        let line = "\u{1b}[2mSession: 9857aae5fff2\u{1b}[0m";
+        // A session the community Grok CLI kept has an id Grok Build can't take: it starts
+        // a new conversation, with the history in the prompt.
+        assert!(!can_resume("grok", "9857aae5fff2"));
+        assert!(can_resume("grok", ID) && can_resume("grok", ""));
+        assert!(can_resume("claude", "9857aae5fff2"));
+        let old = provider_args(&spec(true, "9857aae5fff2"));
+        assert!(!old
+            .iter()
+            .any(|a| a == "-r" || a == "-s" || a == "9857aae5fff2"));
+
+        // Settings' effort, rules and tool rules reach it; extra folders only start a
+        // session, since a resumed one keeps its own.
+        let o = AgentOptions {
+            effort: "high".into(),
+            append_prompt: "Be brief.".into(),
+            allowed_tools: "Bash(git *)".into(),
+            disallowed_tools: "Bash(rm *)".into(),
+            add_dirs: "../lib".into(),
+            ..Default::default()
+        };
+        let mut build = spec(false, ID);
+        build.opts = &o;
+        let args = provider_args(&build);
+        for pair in [
+            ["--reasoning-effort", "high"],
+            ["--rules", "Be brief."],
+            ["--allow", "Bash(git *)"],
+            ["--deny", "Bash(rm *)"],
+            ["--add-dir", "../lib"],
+        ] {
+            assert!(args.windows(2).any(|w| w == pair), "{pair:?} in {args:?}");
+        }
+        build.resume = true;
+        assert!(!provider_args(&build).contains(&"--add-dir".to_string()));
+
+        // The interactive CLI opens the same session, in the same mode.
+        let plan = sel(&[("model", "grok-4.7"), ("mode", "plan")]);
+        let mut open = spec(true, ID);
+        open.sel = &plan;
+        open.prompt = "";
         assert_eq!(
-            stderr_conversation("grok", line).as_deref(),
-            Some("9857aae5fff2")
+            interactive_args(&open),
+            ["-m", "grok-4.7", "--permission-mode", "plan", "-r", ID]
+        );
+        open.resume = false;
+        open.prompt = "start here";
+        assert_eq!(
+            interactive_args(&open),
+            [
+                "-m",
+                "grok-4.7",
+                "--permission-mode",
+                "plan",
+                "-s",
+                ID,
+                "start here"
+            ]
+        );
+        let args = |c: Command| -> Vec<String> {
+            c.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(
+            args(ask_command_on("grok", "", "why?", "grok-4.6")),
+            ["--permission-mode", "plan", "-m", "grok-4.6", "-p", "why?"]
         );
         assert_eq!(
-            stderr_conversation("grok", "Session: 9857aae5fff2").as_deref(),
-            Some("9857aae5fff2")
+            args(recap_command("grok", "", ID, "recap").unwrap()),
+            [
+                "--permission-mode",
+                "plan",
+                "-r",
+                ID,
+                "--fork-session",
+                "-p",
+                "recap"
+            ]
         );
-        // Only Grok's own line, never a reply or an error that mentions a session.
-        assert_eq!(stderr_conversation("claude", line), None);
-        assert_eq!(stderr_conversation("grok", "Session: "), None);
-        assert_eq!(
-            stderr_conversation("grok", "Session \"abc\" was not found."),
-            None
-        );
-        assert_eq!(stderr_conversation("grok", "Session: two words"), None);
-        assert_eq!(
-            stderr_conversation("grok", "\u{1b}[33m▸ bash: ls\u{1b}[0m"),
-            None
-        );
+        assert!(recap_command("grok", "", "9857aae5fff2", "recap").is_none());
     }
 
     #[test]
@@ -3181,22 +3317,16 @@ mod arg_tests {
         assert!(model_hint("codex", "Model metadata for `x` not found.").is_some());
         assert!(model_hint("codex", "file not found").is_none());
         let note = cost_note();
-        assert!(note.starts_with("Only Claude Code, OpenCode and Pi report a cost; Codex, "));
-        assert!(note.contains(" and Grok report none"));
+        assert!(note.starts_with("Only Claude Code, OpenCode, Grok and Pi report a cost; Codex, "));
         assert!(note.contains("spending limits don't hold them"));
         assert!(note.contains("turn limits") && note.contains("token limit"));
         assert!(reports_tokens("claude") && reports_tokens("codex") && reports_tokens("cursor"));
-        assert!(!reports_tokens("grok"));
         assert_eq!(cost_limit_note("claude"), None);
         assert_eq!(cost_limit_note("opencode"), None);
         assert!(cost_limit_note("codex")
             .unwrap()
             .ends_with("the turn and token limits do"));
         assert!(cost_limit_note("cursor").unwrap().contains("token limits"));
-        assert_eq!(
-            cost_limit_note("grok").as_deref(),
-            Some("Grok reports no cost or tokens, so only the turn limits count it")
-        );
         assert!(sign_in_hint("opencode", "Error: Token refresh failed: 401")
             .unwrap()
             .contains("opencode auth login"));

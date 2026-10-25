@@ -8,8 +8,8 @@
 //! Cursor, Gemini and Droid only read config files, so for each run Runo merges its
 //! servers into the project file they read in the session folder (`.cursor/mcp.json`,
 //! `.gemini/settings.json`, `.factory/mcp.json`), keeps a new file out of git, and takes
-//! its entries out again when the turn ends. Grok reads servers only from its user
-//! settings, so it gets none.
+//! its entries out again when the turn ends. Grok takes no servers by flag and reads
+//! project ones only from a trusted folder, so it gets none and keeps its own.
 
 use crate::settings::McpInfo;
 use serde_json::{Map, Value};

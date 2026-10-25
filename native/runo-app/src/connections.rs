@@ -104,9 +104,9 @@ pub const SIGN_INS: [SignIn; 11] = [
     },
     SignIn {
         provider: "grok",
-        keys: &["GROK_API_KEY", "XAI_API_KEY"],
+        keys: &["XAI_API_KEY"],
         file: None,
-        fix: "export GROK_API_KEY (from console.x.ai)",
+        fix: "run `grok login` there with xAI's Grok Build, or export XAI_API_KEY (from console.x.ai)",
     },
     SignIn {
         provider: "pi",
