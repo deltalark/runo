@@ -155,7 +155,7 @@ pub(crate) fn parse_csv(text: &str, sep: char, max_rows: usize) -> Vec<Vec<Strin
     rows
 }
 
-fn human_size(bytes: u64) -> String {
+pub(crate) fn human_size(bytes: u64) -> String {
     match bytes {
         b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1u64 << 20) as f64),
         b if b >= 1 << 10 => format!("{:.1} KB", b as f64 / 1024.),

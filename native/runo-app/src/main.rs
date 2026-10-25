@@ -67,6 +67,7 @@ mod home;
 mod inbox;
 mod install;
 mod keymap;
+mod lightbox;
 mod mcp;
 mod memory_mcp;
 mod menubar;
@@ -627,6 +628,9 @@ struct RunoApp {
     crew: crew_ui::CrewState,
     /// Images attached to each session's unsent prompt.
     attachments: HashMap<u64, Vec<String>>,
+    /// The image viewer, while a picture from a chat is open large.
+    lightbox: Option<lightbox::Lightbox>,
+    lightbox_focus: FocusHandle,
     /// Images that go with a new session's first prompt.
     launch_images: HashMap<u64, Vec<String>>,
     /// Context from Design or Architecture for the session the New session dialog starts.
@@ -1761,6 +1765,8 @@ impl RunoApp {
             reviewing: HashMap::new(),
             crew: Default::default(),
             attachments: HashMap::new(),
+            lightbox: None,
+            lightbox_focus: cx.focus_handle(),
             launch_images: HashMap::new(),
             new_context: None,
             new_model: None,
@@ -5395,13 +5401,19 @@ impl RunoApp {
             let sid = self.selected.unwrap_or(0);
             let can_undo = !message.checkpoint.is_empty() && !working;
             let mut images = div().flex().flex_wrap().justify_end().gap_2();
-            for path in &message.images {
+            for (k, path) in message.images.iter().enumerate() {
                 images = images.child(
-                    img(std::path::PathBuf::from(path))
-                        .max_w(px(220.))
-                        .max_h(px(160.))
-                        .rounded_lg()
-                        .object_fit(ObjectFit::Contain),
+                    self.viewable(
+                        SharedString::from(format!("msg-img-{sid}-{index}-{k}")),
+                        sid,
+                        lightbox::Pick::Message(index, k),
+                        img(std::path::PathBuf::from(path))
+                            .max_w(px(220.))
+                            .max_h(px(160.))
+                            .rounded_lg()
+                            .object_fit(ObjectFit::Contain),
+                        cx,
+                    ),
                 );
             }
             let group = SharedString::from(format!("user-msg-{sid}-{index}"));
@@ -9647,7 +9659,9 @@ impl Render for RunoApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
-                if this.tour.is_some() {
+                if this.lightbox.is_some() {
+                    this.close_lightbox(window, cx);
+                } else if this.tour.is_some() {
                     this.end_tour(cx);
                 } else if this.arcade_open {
                     this.close_arcade(window, cx);
@@ -9864,6 +9878,7 @@ impl Render for RunoApp {
             .children(self.tour_view(window, cx))
             .children(self.browser_offer(cx))
             .children(self.whats_new_view(cx))
+            .children(self.lightbox_view(window, cx))
             // Painted last, once everything that moves has asked for motion.
             .child(
                 canvas(

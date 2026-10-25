@@ -2051,10 +2051,16 @@ impl RunoApp {
                         .border_1()
                         .border_color(divider())
                         .child(
-                            img(std::path::PathBuf::from(path))
-                                .size(px(40.))
-                                .rounded_sm()
-                                .object_fit(ObjectFit::Cover),
+                            self.viewable(
+                                ("attached-img", i),
+                                id,
+                                crate::lightbox::Pick::Attached(i),
+                                img(std::path::PathBuf::from(path))
+                                    .size(px(40.))
+                                    .rounded_sm()
+                                    .object_fit(ObjectFit::Cover),
+                                cx,
+                            ),
                         )
                         .child(
                             div()

@@ -323,10 +323,33 @@ impl RunoApp {
             ChatRow::Strip => self.thread_strip(session, true, cx),
             ChatRow::Message(i) => {
                 let links = self.thread_links(cx);
-                session
-                    .messages
-                    .get(i)
-                    .map(|m| self.peek_message(thread, i, m, links.as_ref(), cx))
+                session.messages.get(i).map(|m| {
+                    let text = self.peek_message(thread, i, m, links.as_ref(), cx);
+                    if m.role != Role::User || m.images.is_empty() {
+                        return text;
+                    }
+                    let mut images = div().flex().flex_wrap().justify_end().gap_1();
+                    for (k, path) in m.images.iter().enumerate() {
+                        images = images.child(
+                            self.viewable(
+                                SharedString::from(format!("peek-img-{thread}-{i}-{k}")),
+                                thread,
+                                crate::lightbox::Pick::Message(i, k),
+                                img(std::path::PathBuf::from(path))
+                                    .size(px(56.))
+                                    .rounded_md()
+                                    .object_fit(ObjectFit::Cover),
+                                cx,
+                            ),
+                        );
+                    }
+                    div()
+                        .v_flex()
+                        .gap_3()
+                        .child(images)
+                        .child(text)
+                        .into_any_element()
+                })
             }
             ChatRow::Working => {
                 let since = self
