@@ -333,6 +333,8 @@ struct RunoApp {
     threads_done_all: bool,
     /// Projects whose finished Crew threads are unfolded in the sidebar.
     sidebar_done_open: HashSet<u64>,
+    /// Of those, projects listing every finished thread, not only the latest few.
+    sidebar_done_all: HashSet<u64>,
     /// The Browser is open as a tab beside the session tabs, and whether it is the one shown.
     browser_open: bool,
     browser_main: bool,
@@ -1551,6 +1553,7 @@ impl RunoApp {
             peek_prompt,
             threads_done_all: false,
             sidebar_done_open: HashSet::new(),
+            sidebar_done_all: HashSet::new(),
             browser_open: false,
             browser_main: false,
             shells: Vec::new(),
@@ -4856,13 +4859,13 @@ impl RunoApp {
                 // Sessions sit a step in from their project's name.
                 let mut rows = div().v_flex().gap(px(2.)).mt(px(2.)).mb_1().pl(px(15.));
                 let crew_on = self.crew_mode(pid);
-                // Crew's threads and each race's agents sit under their parent, not in
-                // the list.
+                // Crew's threads, resolved ones too, and each race's agents sit under
+                // their parent, not in the list.
                 let threads: Vec<&Session> = if crew_on {
                     sessions
                         .iter()
                         .copied()
-                        .filter(|s| s.crew.as_ref().is_some_and(|i| !i.resolved))
+                        .filter(|s| s.crew.is_some())
                         .collect()
                 } else {
                     Vec::new()
@@ -4879,8 +4882,22 @@ impl RunoApp {
                     .filter(|s| !threads.iter().any(|t| t.id == s.id))
                     .collect();
                 if crew_on && !sessions.is_empty() {
-                    // A hairline closes Crew's block off from the project's own sessions.
-                    rows = rows.child(div().mx_2().my(px(3.)).h(px(1.)).bg(divider()));
+                    // A hairline and a label close Crew's block off from the sessions the
+                    // person started themselves.
+                    rows = rows
+                        .child(div().mx_2().mt(px(3.)).h(px(1.)).bg(divider()))
+                        .child(
+                            div()
+                                .h(px(22.))
+                                .px_2()
+                                .pb(px(3.))
+                                .flex()
+                                .items_end()
+                                .text_size(px(10.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(c_muted()))
+                                .child("Sessions"),
+                        );
                 }
                 let mut raced: Vec<u64> = Vec::new();
                 if sessions.is_empty() && !crew_on {

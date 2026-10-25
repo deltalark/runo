@@ -47,6 +47,127 @@ fn small(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
+/// A small label over a group of Crew's threads in the sidebar, with how many it holds.
+fn group_label(label: &'static str, n: usize, first: bool) -> AnyElement {
+    div()
+        .h(px(if first { 18. } else { 22. }))
+        .px_2()
+        .pb(px(3.))
+        .flex()
+        .items_end()
+        .gap(px(5.))
+        .text_size(px(10.5))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(c_muted()))
+        .child(label)
+        .child(div().font_weight(FontWeight::NORMAL).child(n.to_string()))
+        .into_any_element()
+}
+
+/// What the card on a Crew thread's sidebar row shows, gathered when the row is drawn.
+#[derive(Clone)]
+struct ThreadCard {
+    title: String,
+    status: String,
+    tone: u32,
+    mark: &'static str,
+    color: u32,
+    agent: String,
+    branch: Option<String>,
+    pr: Option<u64>,
+    size: Option<String>,
+    stats: Option<(usize, usize)>,
+    mono: SharedString,
+}
+
+impl ThreadCard {
+    fn element(&self) -> Div {
+        let line = |key: &'static str, value: AnyElement| {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(72.))
+                        .flex_none()
+                        .text_color(rgb(c_muted()))
+                        .child(key),
+                )
+                .child(value)
+        };
+        let text = |s: String, color: u32| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(rgb(color))
+                .child(s)
+                .into_any_element()
+        };
+        div()
+            .w(px(250.))
+            .v_flex()
+            .gap(px(4.))
+            .text_size(px(11.5))
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(c_text()))
+                    .child(self.title.clone()),
+            )
+            .child(
+                div()
+                    .mb_1()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_color(rgb(c_muted()))
+                    .child(div().size(px(7.)).rounded_full().bg(rgb(self.tone)))
+                    .child(self.status.clone()),
+            )
+            .child(line(
+                "Agent",
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(self.color))
+                            .child(self.mark),
+                    )
+                    .child(text(self.agent.clone(), c_secondary()))
+                    .into_any_element(),
+            ))
+            .when_some(self.branch.clone(), |el, b| {
+                el.child(line("Branch", text(b, c_secondary())))
+            })
+            .when_some(self.pr, |el, n| {
+                el.child(line("Pull request", text(format!("#{n}"), c_blue())))
+            })
+            .when_some(self.size.clone(), |el, size| {
+                el.child(line("Worktree", text(size, c_secondary())))
+            })
+            .when_some(self.stats, |el, (a, r)| {
+                el.child(line(
+                    "Changes",
+                    div()
+                        .flex()
+                        .gap_1()
+                        .font_family(self.mono.clone())
+                        .child(div().text_color(rgb(c_add())).child(format!("+{a}")))
+                        .child(div().text_color(rgb(c_del())).child(format!("−{r}")))
+                        .into_any_element(),
+                ))
+            })
+    }
+}
+
 impl RunoApp {
     /// A thread's decision as one chip per answer, the recommended one filled, for the
     /// corner cards and the Inbox.
@@ -192,46 +313,48 @@ impl RunoApp {
             .into_any_element()
     }
 
-    /// Crew's open threads under its row in the sidebar, each on one line. Finished ones
-    /// fold into a single "N done" row until it is opened. Selecting a thread only
-    /// highlights it: rows keep their place.
+    /// Crew's threads under its row in the sidebar, and only there, grouped by what they
+    /// need: the person, then working, then waiting on something else. Finished and
+    /// resolved ones fold into a single "N done" row until it is opened. Each thread is
+    /// one line with its time; the selected one also shows its agent, branch and worktree
+    /// size, and hovering one shows all its details.
     pub(crate) fn crew_children(
         &self,
         pid: u64,
         threads: &[&Session],
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let unfolded = self.sidebar_done_open.contains(&pid);
-        let mut open: Vec<AnyElement> = Vec::new();
-        let mut finished: Vec<AnyElement> = Vec::new();
-        // The open thread stays in view even once finished and folded: it shows just
-        // under the "N done" row rather than jumping above it.
-        let mut selected_done: Option<AnyElement> = None;
+        let mut groups: [Vec<AnyElement>; 3] = Default::default();
+        let mut finished: Vec<(&Session, &'static str)> = Vec::new();
         for t in threads {
             let status = thread_status(self.thread_working(t.id), t);
-            let done = status == "done";
-            let row = self
-                .child_row(
-                    t,
-                    self.thread_glyph(t.id, status, "side"),
-                    crew::shown_title(&t.title),
-                    cx,
-                )
-                .into_any_element();
-            if !done {
-                open.push(row);
-            } else if !unfolded && self.selected == Some(t.id) {
-                selected_done = Some(row);
-            } else {
-                finished.push(row);
+            let group = match status {
+                "needs you" | "failed" => 0,
+                "working" => 1,
+                "done" | "resolved" => {
+                    finished.push((t, status));
+                    continue;
+                }
+                _ => 2,
+            };
+            groups[group].push(self.thread_row(t, status, cx));
+        }
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for (label, group) in ["Needs you", "Working", "Waiting"].into_iter().zip(groups) {
+            if !group.is_empty() {
+                rows.push(group_label(label, group.len(), rows.is_empty()));
+                rows.extend(group);
             }
         }
-        let n = finished.len() + usize::from(selected_done.is_some());
-        if n > 0 {
-            open.push(
+        if !finished.is_empty() {
+            finished.sort_by_key(|(t, _)| std::cmp::Reverse(t.id));
+            let unfolded = self.sidebar_done_open.contains(&pid);
+            let n = finished.len();
+            rows.push(
                 div()
                     .id(("crew-done-fold", pid as usize))
-                    .h(px(24.))
+                    .when(!rows.is_empty(), |el| el.mt(px(4.)))
+                    .h(px(26.))
                     .px_2()
                     .flex()
                     .items_center()
@@ -242,7 +365,9 @@ impl RunoApp {
                     .text_color(rgb(c_muted()))
                     .hover(|el| el.bg(tint(c_subtle())))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.sidebar_done_open.remove(&pid) {
+                        if this.sidebar_done_open.remove(&pid) {
+                            this.sidebar_done_all.remove(&pid);
+                        } else {
                             this.sidebar_done_open.insert(pid);
                         }
                         cx.notify();
@@ -267,10 +392,38 @@ impl RunoApp {
                     ))
                     .into_any_element(),
             );
-            if unfolded {
-                open.extend(finished);
-            } else {
-                open.extend(selected_done);
+            // The newest few, then the rest on request. The open thread stays in view
+            // even when it is folded away, just under the "N done" row.
+            let shown = match (unfolded, self.sidebar_done_all.contains(&pid)) {
+                (false, _) => 0,
+                (true, false) => n.min(DONE_SHOWN),
+                (true, true) => n,
+            };
+            for (i, (t, status)) in finished.iter().enumerate() {
+                if i < shown || self.selected == Some(t.id) {
+                    rows.push(self.thread_row(t, status, cx));
+                }
+            }
+            if unfolded && shown < n {
+                rows.push(
+                    div()
+                        .id(("crew-done-all", pid as usize))
+                        .h(px(24.))
+                        .pl(px(30.))
+                        .flex()
+                        .items_center()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_size(px(11.5))
+                        .text_color(rgb(c_blue()))
+                        .hover(|el| el.bg(tint(c_subtle())))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.sidebar_done_all.insert(pid);
+                            cx.notify();
+                        }))
+                        .child(format!("Show {} more", n - shown))
+                        .into_any_element(),
+                );
             }
         }
         // Crew's threads hang off its chip on an accent guide line, so they read as
@@ -284,8 +437,200 @@ impl RunoApp {
             .border_color(accent_wash(if is_dark() { 0x55 } else { 0x4a }))
             .v_flex()
             .gap(px(1.))
-            .children(open)
+            .children(rows)
             .into_any_element()
+    }
+
+    /// One of Crew's threads in the sidebar: its status, its title and, in the corner,
+    /// how long it has worked or when it last spoke (a finished one's pull request).
+    /// Selected, a second line gives its agent, branch and worktree size; hovering it
+    /// shows all of that and more on a card.
+    fn thread_row(&self, t: &Session, status: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        let id = t.id;
+        let selected = self.selected == Some(id) && self.view == View::Session;
+        let finished = matches!(status, "done" | "resolved");
+        let provider = agent::provider(&t.provider);
+        let model = t
+            .selections()
+            .get("model")
+            .filter(|m| !m.is_empty())
+            .cloned();
+        let branch = (!t.branch.is_empty() && t.branch != "local folder").then(|| t.branch.clone());
+        let size = t.isolated.then(|| self.space.chip_label(&t.dir)).flatten();
+        let pr = crew::pr_number(&t.pr_url).or_else(|| {
+            t.crew.as_ref().and_then(|i| {
+                i.reports
+                    .iter()
+                    .rev()
+                    .flat_map(|r| r.links.iter())
+                    .find_map(|l| crew::pr_number(l))
+            })
+        });
+        let when = match self.turns.get(&id) {
+            Some(turn) if status == "working" => elapsed(turn.started.elapsed()),
+            _ => t
+                .messages
+                .last()
+                .map(|m| m.time.clone())
+                .unwrap_or_default(),
+        };
+        let tone = match status {
+            "working" => c_blue(),
+            "needs you" => c_amber(),
+            "failed" => c_red(),
+            _ => c_muted(),
+        };
+        let corner = match pr.filter(|_| finished) {
+            Some(n) => div()
+                .flex_none()
+                .whitespace_nowrap()
+                .px(px(5.))
+                .rounded(px(4.))
+                .bg(accent_wash(0x1c))
+                .text_size(px(10.5))
+                .text_color(rgb(c_blue()))
+                .child(format!("#{n}")),
+            None => div()
+                .flex_none()
+                .whitespace_nowrap()
+                .text_size(px(11.))
+                .text_color(rgb(tone))
+                .child(when.clone()),
+        };
+        let agent = match &model {
+            Some(m) => format!("{} · {m}", provider.name),
+            None => provider.name.to_string(),
+        };
+        let card = ThreadCard {
+            title: crew::shown_title(&t.title),
+            status: match status {
+                "working" if !when.is_empty() => format!("Working · {when}"),
+                "resolved" => "Done".into(),
+                s => {
+                    let mut c = s.chars();
+                    c.next()
+                        .map(|f| f.to_uppercase().chain(c).collect())
+                        .unwrap_or_default()
+                }
+            },
+            tone: if finished { c_green() } else { tone },
+            mark: provider.mark,
+            color: provider.color,
+            agent: agent.clone(),
+            branch: branch.clone(),
+            pr,
+            size: size.clone(),
+            stats: self
+                .stats
+                .get(&id)
+                .copied()
+                .filter(|s| s.0 > 0)
+                .map(|(_, a, r)| (a, r)),
+            mono: self.mono_font.clone(),
+        };
+        let title = div()
+            .w_full()
+            .min_w_0()
+            .h(px(18.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .when(selected || t.unread, |el| {
+                        el.font_weight(FontWeight::MEDIUM)
+                    })
+                    .text_color(rgb(if selected || t.unread {
+                        c_text()
+                    } else {
+                        c_secondary()
+                    }))
+                    .child(crew::shown_title(&t.title)),
+            )
+            .child(corner);
+        let details = selected.then(|| {
+            div()
+                .w_full()
+                .min_w_0()
+                .h(px(15.))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .text_size(px(11.))
+                .text_color(rgb(c_muted()))
+                .child(self.provider_mark(provider, 10.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(branch.unwrap_or(agent)),
+                )
+                .when_some(size, |el, size| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .px(px(5.))
+                            .rounded(px(4.))
+                            .bg(tint(c_subtle()))
+                            .text_size(px(10.5))
+                            .child(size),
+                    )
+                })
+        });
+        let row = div()
+            .id(("crew-thread", id as usize))
+            .on_mouse_down(
+                MouseButton::Right,
+                self.on_context(ctxmenu::CtxTarget::Session(id), cx),
+            )
+            .relative()
+            .py(px(5.))
+            .px_2()
+            .flex()
+            .items_start()
+            .gap_2()
+            .rounded_md()
+            .cursor_pointer()
+            .text_size(px(12.5))
+            .when(self.cursor == Some(id), |el| el.bg(tint(c_selected())))
+            .tooltip(move |window, cx| {
+                let card = card.clone();
+                gpui_kit::component::tooltip::Tooltip::element(move |_, _| card.element())
+                    .px_3()
+                    .py_2()
+                    .build(window, cx)
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.select(id);
+                cx.notify();
+            }));
+        let row = if selected {
+            row.bg(tint(c_active()))
+                .child(shell::accent_bracket(format!("child-mark-{id}"), 6.))
+        } else {
+            row.hover(|el| el.bg(tint(c_subtle())))
+        };
+        row.child(
+            div()
+                .h(px(18.))
+                .flex()
+                .items_center()
+                .child(self.thread_glyph(id, status, "side")),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .v_flex()
+                .gap(px(1.))
+                .child(title)
+                .children(details),
+        )
+        .into_any_element()
     }
 
     /// Crew or Direct for project `pid`, as a two-way switch.
