@@ -4967,22 +4967,21 @@ impl RunoApp {
                     .filter(|s| !threads.iter().any(|t| t.id == s.id))
                     .collect();
                 if crew_on && !sessions.is_empty() {
-                    // A hairline and a label close Crew's block off from the sessions the
-                    // person started themselves.
-                    rows = rows
-                        .child(div().mx_2().mt(px(3.)).h(px(1.)).bg(divider()))
-                        .child(
-                            div()
-                                .h(px(22.))
-                                .px_2()
-                                .pb(px(3.))
-                                .flex()
-                                .items_end()
-                                .text_size(px(10.5))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(c_muted()))
-                                .child("Sessions"),
-                        );
+                    // Air and a quiet label, not a rule, set Crew's block apart from the
+                    // sessions the person started themselves, like the Inbox's sections.
+                    rows = rows.child(
+                        div()
+                            .mt(px(14.))
+                            .h(px(20.))
+                            .px_2()
+                            .pb(px(4.))
+                            .flex()
+                            .items_end()
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(c_muted()))
+                            .child("SESSIONS"),
+                    );
                 }
                 let mut raced: Vec<u64> = Vec::new();
                 if sessions.is_empty() && !crew_on {

@@ -35,7 +35,7 @@ fn short_age(then: u64, now: u64) -> String {
 /// How many finished threads the Threads tab lists before "Show all".
 const DONE_SHOWN: usize = 5;
 
-/// The accent at `alpha` (0 to 0xff), for Crew's wash, outline and guide line.
+/// The accent at `alpha` (0 to 0xff), for Crew's wash and chip.
 fn accent_wash(alpha: u32) -> Rgba {
     rgba((c_blue() << 8) | alpha)
 }
@@ -57,10 +57,15 @@ fn group_label(label: &'static str, n: usize, first: bool) -> AnyElement {
         .items_end()
         .gap(px(5.))
         .text_size(px(10.5))
-        .font_weight(FontWeight::SEMIBOLD)
+        .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(c_muted()))
         .child(label)
-        .child(div().font_weight(FontWeight::NORMAL).child(n.to_string()))
+        .child(
+            div()
+                .opacity(0.8)
+                .font_weight(FontWeight::NORMAL)
+                .child(n.to_string()),
+        )
         .into_any_element()
 }
 
@@ -199,8 +204,8 @@ impl RunoApp {
     }
 
     /// The pinned Crew row at the top of a Crew project's sessions. It is Crew's own
-    /// place, not one more session, so it always sits on a soft wash of the accent with a
-    /// thin accent outline, its mark in a small accent chip; picked, both grow fuller.
+    /// place, not one more session, so it always sits on a soft wash of the accent, its
+    /// mark in a small accent chip; picked, the wash grows fuller.
     /// While Crew works the chip glows, steady with Animations off.
     pub(crate) fn crew_row(&self, pid: u64, cx: &mut Context<Self>) -> AnyElement {
         let chat = self.crew_chat(pid);
@@ -214,11 +219,11 @@ impl RunoApp {
             .filter(|t| thread_status(self.thread_working(t.id), t) == "needs you")
             .count();
         let dark = is_dark();
-        let (wash, hover, edge) = match (on, dark) {
-            (true, true) => (0x36, 0x36, 0x99),
-            (true, false) => (0x2a, 0x2a, 0x88),
-            (false, true) => (0x16, 0x24, 0x40),
-            (false, false) => (0x10, 0x1c, 0x38),
+        let (wash, hover) = match (on, dark) {
+            (true, true) => (0x3a, 0x3a),
+            (true, false) => (0x2e, 0x2e),
+            (false, true) => (0x16, 0x24),
+            (false, false) => (0x10, 0x1c),
         };
         let mut chip = div()
             .relative()
@@ -263,8 +268,6 @@ impl RunoApp {
             .rounded_md()
             .cursor_pointer()
             .bg(accent_wash(wash))
-            .border_1()
-            .border_color(accent_wash(edge))
             .hover(move |el| el.bg(accent_wash(hover)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_crew(pid, cx);
@@ -354,16 +357,16 @@ impl RunoApp {
                 div()
                     .id(("crew-done-fold", pid as usize))
                     .when(!rows.is_empty(), |el| el.mt(px(4.)))
-                    .h(px(26.))
+                    .h(px(24.))
                     .px_2()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .rounded_md()
                     .cursor_pointer()
                     .text_size(px(12.))
                     .text_color(rgb(c_muted()))
-                    .hover(|el| el.bg(tint(c_subtle())))
+                    // A quiet text action: hovering brightens the words, no box.
+                    .hover(|el| el.text_color(rgb(c_secondary())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.sidebar_done_open.remove(&pid) {
                             this.sidebar_done_all.remove(&pid);
@@ -408,15 +411,14 @@ impl RunoApp {
                 rows.push(
                     div()
                         .id(("crew-done-all", pid as usize))
-                        .h(px(24.))
+                        .h(px(22.))
                         .pl(px(30.))
                         .flex()
                         .items_center()
-                        .rounded_md()
                         .cursor_pointer()
                         .text_size(px(11.5))
-                        .text_color(rgb(c_blue()))
-                        .hover(|el| el.bg(tint(c_subtle())))
+                        .text_color(rgb(c_muted()))
+                        .hover(|el| el.text_color(rgb(c_secondary())))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.sidebar_done_all.insert(pid);
                             cx.notify();
@@ -426,15 +428,11 @@ impl RunoApp {
                 );
             }
         }
-        // Crew's threads hang off its chip on an accent guide line, so they read as
-        // Crew's and not as the project's other sessions.
+        // Crew's threads sit a step in, under Crew's chip, so they read as Crew's and not
+        // as the project's other sessions; indentation does that without a guide line.
         div()
-            .ml(px(17.))
-            .mt(px(1.))
-            .mb_1()
-            .pl(px(6.))
-            .border_l_2()
-            .border_color(accent_wash(if is_dark() { 0x55 } else { 0x4a }))
+            .ml(px(18.))
+            .mt(px(2.))
             .v_flex()
             .gap(px(1.))
             .children(rows)
