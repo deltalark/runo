@@ -853,7 +853,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     "Logs and crash reports",
                     &format!("Each launch writes a log, and crashes leave a report, in {}. Copy diagnostics copies your version, system, agent CLIs, settings without secrets and the end of the log, to paste into a bug report.", tilde(&crate::applog::logs_dir())),
                     Ctl::Buttons(vec![
-                        ("Show".into(), Rc::new(|_, cx| cx.reveal_path(&crate::applog::logs_dir())) as Action),
+                        ("Show".into(), Rc::new(|_: &mut RunoApp, cx: &mut Context<RunoApp>| cx.reveal_path(&crate::applog::logs_dir())) as Action),
                         (
                             "Copy diagnostics".into(),
                             Rc::new(|this: &mut RunoApp, cx: &mut Context<RunoApp>| {
