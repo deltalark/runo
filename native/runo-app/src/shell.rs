@@ -1293,7 +1293,7 @@ impl RunoApp {
         out
     }
 
-    /// How many things need the person, for the corner mark's badge and the Dock icon:
+    /// How many things need the person, for the Dock icon:
     /// sessions and threads waiting on them or finished unseen, permission requests,
     /// unread Crew replies, and Reviews' review requests and failed checks. Each session
     /// counts once, and the one on screen in the focused window counts as seen.
@@ -2266,6 +2266,7 @@ impl RunoApp {
         let (where_name, where_color, where_tip) = self.runs_on();
         let where_session = self.current().map(|s| s.id);
         div()
+            .w_full()
             .h(px(44.))
             .flex_none()
             .flex()

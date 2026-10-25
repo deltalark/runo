@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Runo does much less while you aren't using it. The Browser tab's frame timer runs only while a page is on screen, and agents' output and background results wake the app when they arrive instead of being checked 50 times a second. While the window is hidden, minimized or covered, git rescans, dev-server port scans, pull request and GitHub checks, plan usage and update checks pause until it is back; saves, queued turns, Crew, the menu bar and the Dock count keep going at a slower pace. Pull request lookups, and git scans of a session nobody is working in, come less and less often while nothing changes. Freeing build output and finding dev-server ports no longer scan every process on the Mac with `lsof`, and a quiet terminal no longer wakes the app 100 times a second.
+
 ## [0.5.8] - 2026-10-25
 
 ### Fixed

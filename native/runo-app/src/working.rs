@@ -2,7 +2,9 @@
 //! sweeping round it and a core breathing in the middle, what the agent is doing ("Thinking",
 //! "Reading", "Running Bash") with a soft light passing along the word, and the time so
 //! far. The ring is one canvas and the word one text, and both move on the window's
-//! shared clock (see `motion`). When the turn ends the arc closes into a ring, a check
+//! shared clock (see `motion`): where they are is worked out from the time of the frame
+//! alone, so drawing the row again, for a new word or a new second, carries on from where
+//! it was rather than starting over, and a late frame only skips ahead. When the turn ends the arc closes into a ring, a check
 //! draws in, and the row fades out. Holding still, the arc rests part way round.
 
 use super::*;
@@ -112,25 +114,47 @@ impl Ring {
     };
 
     fn now() -> Ring {
-        let spin = motion::phase(SPIN);
-        let breathe = 0.5 - 0.5 * (motion::phase(BREATHE) * std::f32::consts::TAU).cos();
+        Ring::at(motion::now())
+    }
+
+    /// The ring at time `t` on the window's clock.
+    fn at(t: Duration) -> Ring {
+        let phase = |period: Duration| motion::phase_at(t, period);
+        let spin = phase(SPIN);
+        let breathe = 0.5 - 0.5 * (phase(BREATHE) * std::f32::consts::TAU).cos();
         Ring {
             // A touch of easing on top of a steady turn, so the head surges a little as
             // the arc stretches.
             head: spin + 0.04 * (breathe * std::f32::consts::PI).sin(),
             sweep: 0.24 + 0.36 * breathe,
-            core: 0.5 - 0.5 * (motion::phase(BREATHE / 2) * std::f32::consts::TAU).cos(),
+            core: 0.5 - 0.5 * (phase(BREATHE / 2) * std::f32::consts::TAU).cos(),
             done: 0.,
         }
     }
 }
 
-/// The row for a running turn: the ring, `label` and `detail`, such as the time so far.
+/// The row for a turn that has run since `started`: the ring, `label` and the time so
+/// far, which, while nothing moves, redraws just as its second changes.
+pub(crate) fn running(label: impl Into<SharedString>, started: Option<Instant>) -> AnyElement {
+    let took = started.map(|at| {
+        let took = motion::frame()
+            .unwrap_or_else(Instant::now)
+            .saturating_duration_since(at);
+        motion::tick_in(to_next_second(took));
+        took
+    });
+    indicator(label, took.map(elapsed))
+}
+
+/// How long after `took` the time shown next changes, a little past the second so the
+/// frame then is sure to show the new one.
+fn to_next_second(took: Duration) -> Duration {
+    Duration::from_millis(1000 - took.subsec_millis() as u64 + 10)
+}
+
+/// The row for a running turn: the ring, `label` and `detail`, such as how many run.
 pub(crate) fn indicator(label: impl Into<SharedString>, detail: Option<String>) -> AnyElement {
     let moving = motion::moving();
-    if detail.is_some() {
-        motion::ticking();
-    }
     let ring = if moving { Ring::now() } else { Ring::STILL };
     let label = label.into();
     let shimmer = moving.then(|| motion::phase(SHIMMER));
@@ -394,6 +418,41 @@ mod tests {
         // A reply from an earlier turn doesn't count.
         let old = agent("Done.", vec![]);
         assert_eq!(&*doing(&[old, ask]), "Thinking");
+    }
+
+    #[test]
+    fn the_time_redraws_just_after_its_second_changes() {
+        let at = |ms| to_next_second(Duration::from_millis(ms));
+        assert_eq!(at(27_000), Duration::from_millis(1010));
+        assert_eq!(at(27_400), Duration::from_millis(610));
+        assert_eq!(at(27_999), Duration::from_millis(11));
+        // And then the time shown is the next second's.
+        let took = Duration::from_millis(27_400);
+        assert_eq!(elapsed(took + at(27_400)), "28s");
+    }
+
+    #[test]
+    fn the_ring_moves_on_smoothly_and_never_starts_over() {
+        // Frame after frame at 60 a second, three days into the app and 27 minutes into
+        // a turn: the head always moves forward a little, never jumps or goes back to the
+        // top.
+        let frame = Duration::from_micros(16_667);
+        let mut t = Duration::from_secs(3 * 24 * 3600 + 27 * 60);
+        let mut last = Ring::at(t);
+        for _ in 0..600 {
+            t += frame;
+            let ring = Ring::at(t);
+            let step = (ring.head - last.head).rem_euclid(1.);
+            assert!(
+                step > 0.008 && step < 0.02,
+                "a step of {step} turns at {t:?}"
+            );
+            assert!((ring.sweep - last.sweep).abs() < 0.02);
+            last = ring;
+        }
+        // A dropped frame is only a longer step.
+        let step = (Ring::at(t + frame * 2).head - last.head).rem_euclid(1.);
+        assert!(step > 0.02 && step < 0.04);
     }
 
     #[test]

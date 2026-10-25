@@ -1,6 +1,7 @@
 //! Frame timing for the main window, on only when `RUNO_FRAME_STATS` names a file: every
 //! two seconds a line goes to it with how many frames drew, how long building and drawing
-//! them took, how many missed the display's refresh, and how much CPU Runo used meanwhile.
+//! them took, how many missed the display's refresh, how evenly frames of motion (the
+//! working indicator, live dots; see `motion`) came, and how much CPU Runo used meanwhile.
 //! While a scene is named (see `scene`, which `bench` uses), one line covers the whole
 //! scene instead.
 
@@ -24,6 +25,9 @@ struct Stats {
     render: Vec<Duration>,
     frame: Vec<Duration>,
     late: usize,
+    /// The gaps between frames of motion, and when the last was drawn.
+    motion: Vec<Duration>,
+    last_motion: Option<Instant>,
     /// Frames drawn within 50 ms of the one before: the ones a scroll or stream asked for,
     /// as opposed to one-off redraws, so a hitch is counted only among them.
     continuous: usize,
@@ -76,7 +80,7 @@ impl Stats {
     fn summary(&mut self, name: &str, span: Duration) -> String {
         let cpu = cpu_time().saturating_sub(self.cpu_start);
         format!(
-            "{name}\tframes/s {fps:.0}\trender p50 {r50:.2} p95 {r95:.2} max {rmax:.2}\tframe p50 {f50:.2} p95 {f95:.2} max {fmax:.2} ms\tslow {slow}/{frames}\tlate {late}/{cont}\tcpu {cpu:.0}%\n",
+            "{name}\tframes/s {fps:.0}\trender p50 {r50:.2} p95 {r95:.2} max {rmax:.2}\tframe p50 {f50:.2} p95 {f95:.2} max {fmax:.2} ms\tslow {slow}/{frames}\tlate {late}/{cont}\tmotion gap p50 {m50:.2} p95 {m95:.2} max {mmax:.2} ms ({motions})\tcpu {cpu:.0}%\n",
             slow = self.frame.iter().filter(|f| **f > SLOW).count(),
             frames = self.frame.len(),
             fps = self.frame.len() as f64 / span.as_secs_f64(),
@@ -87,6 +91,10 @@ impl Stats {
             f95 = pct(&mut self.frame, 0.95),
             fmax = pct(&mut self.frame, 1.),
             late = self.late,
+            motions = self.motion.len(),
+            m50 = pct(&mut self.motion, 0.5),
+            m95 = pct(&mut self.motion, 0.95),
+            mmax = pct(&mut self.motion, 1.),
             cont = self.continuous,
             cpu = cpu.as_secs_f64() / span.as_secs_f64() * 100.,
         )
@@ -108,6 +116,7 @@ impl Stats {
         self.render.clear();
         self.frame.clear();
         self.late = 0;
+        self.motion.clear();
         self.continuous = 0;
         self.window_start = None;
     }
@@ -133,6 +142,21 @@ pub(crate) fn begin() {
         if s.window_start.is_none() {
             s.window_start = Some(now);
             s.cpu_start = cpu_time();
+        }
+    });
+}
+
+/// A frame of motion is drawn at `now`. Gaps of more than a quarter second are between
+/// one run of motion and the next, not within one, and don't count.
+pub(crate) fn motion_frame(now: Instant) {
+    STATS.with(|s| {
+        let mut s = s.borrow_mut();
+        let Some(s) = s.as_mut() else { return };
+        if let Some(last) = s.last_motion.replace(now) {
+            let gap = now - last;
+            if gap < Duration::from_millis(250) {
+                s.motion.push(gap);
+            }
         }
     });
 }

@@ -371,16 +371,18 @@ pub(crate) fn install(cx: &mut App) {
             .spawn(async move { cx.update(|cx| tick(false, cx)) })
             .detach();
     });
-    cx.spawn(async move |cx| {
-        let mut n = 0u32;
-        loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(250))
-                .await;
-            let refresh = n.is_multiple_of(4);
-            n = n.wrapping_add(1);
-            cx.update(|cx| tick(refresh, cx));
-        }
+    // The glyph's counts, once a second (every two while the window is hidden, since the
+    // menu bar still shows them), and every two seconds a look at whether it was turned
+    // on while it is off.
+    cx.spawn(async move |cx| loop {
+        let on = cx.update(|cx| cx.global::<AppSettings>().menu_bar);
+        let wait = if on {
+            crate::wake::pace(Duration::from_secs(1), Duration::from_secs(2))
+        } else {
+            Duration::from_secs(2)
+        };
+        cx.background_executor().timer(wait).await;
+        cx.update(|cx| tick(true, cx));
     })
     .detach();
 }

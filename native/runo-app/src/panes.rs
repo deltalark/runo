@@ -93,9 +93,19 @@ impl Render for Pane {
         let Some(app) = self.app.upgrade() else {
             return div().into_any_element();
         };
-        let el = motion::within(view, || {
+        let drawn = motion::within(view, || {
             app.update(cx, |app, cx| app.draw_part(part, window, cx))
         });
+        // A cached view's content is laid out as a root, where nothing stretches it: a part
+        // that gives only its height (the top bar, the status bar) would shrink to what it
+        // holds and leave the rest of its slot bare. Held in a column the size of the slot,
+        // it is stretched across it as it was inside the window's own layout.
+        let el = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(drawn)
+            .into_any_element();
         if framestats::on() {
             Timed {
                 part,
@@ -232,6 +242,10 @@ impl RunoApp {
     /// are drawn every frame: it finds what it points at as it is painted, and a part
     /// reused from the last frame isn't painted again.
     pub(crate) fn part(&self, part: Part, style: StyleRefinement) -> AnyElement {
+        debug_assert!(
+            style.size.width.is_some() && style.size.height.is_some(),
+            "{part:?} needs a definite size"
+        );
         let Some(panes) = &self.panes else {
             return div().into_any_element();
         };

@@ -409,7 +409,7 @@ fn accept(listener: TcpListener, base: &Path, stop: &AtomicBool) {
                 std::thread::spawn(move || handle(stream, &base));
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(250));
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => std::thread::sleep(Duration::from_millis(500)),

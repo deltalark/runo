@@ -5,8 +5,12 @@
 //! - `idle`: nothing happens, no agent runs;
 //! - `scroll`: the chat scrolls up and down, a step every frame;
 //! - `type`: a character goes into the composer every 70 ms, as fast typing does;
+//! - `working`: a turn runs in the open chat with nothing coming in, so only the working
+//!   indicator moves (its frames' gaps are the line's `motion gap`);
+//! - `working+type`: typing as in `type` while that turn runs;
 //! - `stream`: three agents stream replies, the open chat's and two in the background,
-//!   through the same path a real agent's output takes;
+//!   through the same path a real agent's output takes, with the working indicator
+//!   showing in the open chat;
 //! - `stream-bg`: one agent streams in the background.
 //!
 //! Then, in groups that `RUNO_BENCH=<group>,<group>` picks from (any other value plays
@@ -347,6 +351,22 @@ impl RunoApp {
 
             bench_scene(Some("type"));
             let _ = this.update(cx, |this, _| this.jump_to_bottom());
+            if !typing(&this, cx, SCENE).await {
+                return;
+            }
+
+            // A turn running in the open chat with nothing coming in yet, so only the
+            // working indicator moves; then typing while it does.
+            let _ = this.update(cx, |this, cx| {
+                this.bench_turn(ids[0], &dir);
+                this.handles.insert(Target::Session(ids[0]), Handle::none());
+                cx.notify();
+            });
+            // Let the row come in before measuring.
+            wait(cx, Duration::from_millis(500)).await;
+            bench_scene(Some("working"));
+            wait(cx, SCENE).await;
+            bench_scene(Some("working+type"));
             if !typing(&this, cx, SCENE).await {
                 return;
             }

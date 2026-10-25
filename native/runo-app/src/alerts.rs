@@ -1056,6 +1056,10 @@ impl RunoApp {
     /// Pick up the permission requests agents wait on, answering at once the tools the
     /// person always allowed for that session, and drop ones nobody waits for any more.
     pub(crate) fn poll_approvals(&mut self, cx: &mut Context<Self>) {
+        // Only a running agent can ask, and only one shown can be dropped.
+        if self.handles.is_empty() && self.turns.is_empty() && self.approvals.is_empty() {
+            return;
+        }
         let base = approvals::folder();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1101,6 +1105,7 @@ impl RunoApp {
             }
         }
         self.approvals = live;
+        self.show_dock(cx);
         cx.notify();
     }
 

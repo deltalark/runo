@@ -545,7 +545,7 @@ impl RunoApp {
             .cloned();
         let missing = project
             .as_ref()
-            .filter(|p| !self.home_all && !checks::is_dir(&p.path))
+            .filter(|p| !self.home_all && !crate::checks::is_dir(&p.path))
             .map(|p| (p.id, p.path.clone()));
         let no_projects = self.state.projects.is_empty();
         let typed = !self.home.prompt.read(cx).value().trim().is_empty();
@@ -735,7 +735,7 @@ impl RunoApp {
         } else {
             settings::mix(VIOLET, accent, 0.6)
         };
-        let is_git = project.is_some_and(|p| checks::is_repo(&p.path));
+        let is_git = project.is_some_and(|p| crate::checks::is_repo(&p.path));
         let project_open = self.menu.as_deref() == Some("home-project");
         let project_chip = div()
             .relative()
@@ -1054,7 +1054,7 @@ impl RunoApp {
                             && self
                                 .current_project()
                                 .and_then(|id| self.state.projects.iter().find(|p| p.id == id))
-                                .is_some_and(|p| checks::is_repo(&p.path));
+                                .is_some_and(|p| crate::checks::is_repo(&p.path));
                         (
                             icon(IconName::Sparkles, 14., c_blue()).into_any_element(),
                             div()
