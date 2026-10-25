@@ -192,9 +192,10 @@ pub(crate) const THREAD_TOOLS: [&str; 4] =
     ["set_checklist", "report", "ask_decision", "message_crew"];
 
 /// Messages a thread may send Crew from one run of this server, which lasts one turn in
-/// Chat. More would let two agents keep each other busy.
-const MESSAGES_PER_RUN: u32 = 1;
-static MESSAGES_SENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Chat. They queue and reach Crew in order; more would let two agents keep each other busy.
+const MESSAGES_PER_RUN: usize = 5;
+/// What this run already sent Crew, so an exact repeat isn't sent twice.
+static MESSAGES_SENT: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 fn thread_tools() -> Vec<Value> {
     vec![
@@ -260,7 +261,7 @@ fn thread_tools() -> Vec<Value> {
         }),
         json!({
             "name": "message_crew",
-            "description": "Send a short message to Crew, which runs this project's threads: for example to ask another thread for something your work depends on. One message per turn.",
+            "description": "Send a short message to Crew, which runs this project's threads: for example to ask another thread for something your work depends on. A few per turn at most; they reach Crew in order.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "text": { "type": "string" } },
@@ -276,7 +277,7 @@ fn thread_call(
     thread: u64,
     name: &str,
     args: &Value,
-    sent: &std::sync::atomic::AtomicU32,
+    sent: &std::sync::Mutex<Vec<String>>,
 ) -> Value {
     use crate::crew::{check_decision, clean_steps, Decision, EventKind, Mark, Step};
     let kind = match name {
@@ -343,12 +344,16 @@ fn thread_call(
             if text.is_empty() {
                 return failure("The message is empty.");
             }
-            use std::sync::atomic::Ordering;
-            if sent.fetch_add(1, Ordering::SeqCst) >= MESSAGES_PER_RUN {
-                return failure(
-                    "You already sent Crew a message this turn. Put anything else in your report.",
-                );
+            let mut sent = sent.lock().unwrap_or_else(|e| e.into_inner());
+            if sent.iter().any(|t| t == text) {
+                return self::text("Already sent to Crew.");
             }
+            if sent.len() >= MESSAGES_PER_RUN {
+                return failure(format!(
+                    "You already sent Crew {MESSAGES_PER_RUN} messages this turn. Put anything else in your report."
+                ));
+            }
+            sent.push(text.to_string());
             EventKind::Message {
                 text: text.to_string(),
             }
@@ -812,10 +817,9 @@ mod tests {
     #[test]
     fn thread_tools_leave_events() {
         use crate::crew::{take_events, EventKind, Mark, Seen};
-        use std::sync::atomic::AtomicU32;
         let events = std::env::temp_dir().join(format!("runo-thread-tools-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&events);
-        let sent = AtomicU32::new(0);
+        let sent = std::sync::Mutex::new(Vec::new());
         let call = |name: &str, args: Value| thread_call(&events, 7, name, &args, &sent);
         let ok = |v: Value| v.get("isError").is_none();
 
@@ -845,10 +849,26 @@ mod tests {
             "message_crew",
             json!({"text":"Ask Cove for its API"})
         )));
-        assert!(!ok(call("message_crew", json!({"text":"Again"}))));
+        // A second message in the same turn queues behind the first; an exact repeat is
+        // taken but not sent again.
+        assert!(ok(call(
+            "message_crew",
+            json!({"text":"And ask Docs to wait"})
+        )));
+        assert!(ok(call(
+            "message_crew",
+            json!({"text":"Ask Cove for its API"})
+        )));
+        for i in 0..3 {
+            assert!(ok(call(
+                "message_crew",
+                json!({ "text": format!("More {i}") })
+            )));
+        }
+        assert!(!ok(call("message_crew", json!({"text":"One too many"}))));
 
         let taken = take_events(&events, &mut Seen::default());
-        assert_eq!(taken.len(), 4);
+        assert_eq!(taken.len(), 8);
         assert!(taken.iter().all(|e| e.thread == 7));
         let EventKind::Checklist { steps, .. } = &taken[0].kind else {
             panic!("first event is not the checklist");
@@ -856,7 +876,23 @@ mod tests {
         assert_eq!(steps[1].mark, Mark::Doing);
         assert!(matches!(taken[1].kind, EventKind::Report { .. }));
         assert!(matches!(taken[2].kind, EventKind::Decision(_)));
-        assert!(matches!(taken[3].kind, EventKind::Message { .. }));
+        let said: Vec<&str> = taken[3..]
+            .iter()
+            .map(|e| match &e.kind {
+                EventKind::Message { text } => text.as_str(),
+                _ => panic!("not a message"),
+            })
+            .collect();
+        assert_eq!(
+            said,
+            [
+                "Ask Cove for its API",
+                "And ask Docs to wait",
+                "More 0",
+                "More 1",
+                "More 2"
+            ]
+        );
         let _ = std::fs::remove_dir_all(events);
     }
 

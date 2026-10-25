@@ -160,7 +160,7 @@ impl RunoApp {
             return;
         }
         // Crew's rules and what changed in its threads, or a thread's rules: unseen context.
-        let preface = self.crew_preface(id);
+        let preface = self.crew_preface(id, &prompt);
         // Notes the person shared with agents open each new conversation in the project.
         let notes = self
             .state
