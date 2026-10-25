@@ -98,6 +98,7 @@ mod radar;
 mod registry;
 mod review;
 mod reviewable;
+mod safefs;
 mod schedule;
 mod seatbelt;
 mod session_header;

@@ -1685,6 +1685,26 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
         rows.push(conn_text(c, "Keys passed in", "Environment variables from this machine the agent gets there, comma separated. Nothing else reaches it.", connections::DEFAULT_KEYS, c.keys.clone(), |c, v| c.keys = v));
         rows.push(conn_switch(c, "GitHub access", "Give the agent your GitHub login (from gh auth token) for its own work there, such as cloning or opening PRs. Syncing never needs it. Passed per command, never saved there.", c.github, |c, v| c.github = v));
         rows.push(conn_switch(c, "Agents may use it", "Lets agents in any session run commands here with Runo's run_on tool, for research, untrusted code or heavy jobs.", c.agents, |c, v| c.agents = v));
+        // What agents running here may reach on this machine through Runo's tools. Off
+        // by default: code in a VM or on a server shouldn't drive this machine.
+        for (key, title, desc) in connections::RELAY_GROUPS {
+            let on = c.relay_tools.iter().any(|g| g == key);
+            rows.push(row(
+                &format!("Agents here: {title}"),
+                &format!("{desc} Leave off unless you trust what runs on this connection."),
+                Ctl::Switch(
+                    on,
+                    Rc::new(move |s, v| {
+                        if let Some(c) = s.connections.iter_mut().find(|c| c.id == id) {
+                            c.relay_tools.retain(|g| g != key);
+                            if v {
+                                c.relay_tools.push(key.to_string());
+                            }
+                        }
+                    }),
+                ),
+            ));
+        }
         rows.push(row(
             "Remove",
             "Sessions that run here move back to this machine, and their copies there are deleted.",
