@@ -2242,6 +2242,7 @@ impl RunoApp {
         let (where_name, where_color, where_tip) = self.runs_on();
         let where_session = self.current().map(|s| s.id);
         div()
+            .w_full()
             .h(px(44.))
             .flex_none()
             .flex()

@@ -5957,6 +5957,7 @@ impl RunoApp {
         };
         div()
             .id("status")
+            .w_full()
             .h(px(24.))
             .flex_none()
             .px_3()
