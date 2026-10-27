@@ -135,9 +135,7 @@ fn signed_in_as(line: &str) -> Option<String> {
             let rest = &clean[at + head.len()..];
             // The name ends at a line break or a trailing comment such as "(key …)";
             // dots inside the name are kept so email addresses stay whole.
-            let end = rest
-                .find(|c: char| c == '\n' || c == '\r' || c == '(' || c == '[')
-                .unwrap_or(rest.len());
+            let end = rest.find(['\n', '\r', '(', '[']).unwrap_or(rest.len());
             // Strip at most one sentence-ending dot; dots inside the token stay.
             let token = rest[..end].trim();
             let token = token.strip_suffix('.').unwrap_or(token);
@@ -427,12 +425,12 @@ impl RunoApp {
             signin::refresh(true);
             return;
         }
+        let from_lines = tail_reason(run.lines.as_slice());
         let why = match &result {
-            Err(e) if !e.trim().is_empty() => tail_reason(run.lines.as_slice())
-                .is_empty()
-                .then(|| e.lines().next().unwrap_or(e).trim().to_string())
-                .unwrap_or_else(|| tail_reason(run.lines.as_slice())),
-            _ => tail_reason(run.lines.as_slice()),
+            Err(e) if !e.trim().is_empty() && from_lines.is_empty() => {
+                e.lines().next().unwrap_or(e).trim().to_string()
+            }
+            _ => from_lines,
         };
         let why = if why.trim().is_empty() {
             format!(
