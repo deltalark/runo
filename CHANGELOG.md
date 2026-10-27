@@ -4,6 +4,23 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+## [0.5.12] - 2026-10-27
+
+### Added
+
+- Antigravity now runs Google's Antigravity CLI (`agy`), signed in with a Google account on first run (browser OAuth, kept in the OS keyring) or with `GEMINI_API_KEY`. Headless streaming, session resume, permission modes and recap-on-fork work as with Grok and Claude Code.
+- The post-merge watcher reads a turn's shell commands and reply text for what to watch — pushes to the default branch (including `HEAD:main`, `+main`, `-C dir` and env prefixes), `gh pr merge`, tag pushes and `gh release create`, or an explicit `runo-watch:` line — then watches that commit, tag or run and wakes the thread when every job finishes. The thread card says "Watching main CI" or "Watching release", and watching doesn't use a Crew slot.
+- A turn that prints nothing for 10 minutes (3× that for known long commands like cargo, npm, xcodebuild and pytest, at least 30 minutes; blocking waits like `gh run watch` don't get the extra time) says so on the Working line, the thread card and to Crew ("#76 stalled 10m on gh run watch"), with Stop and Retry. A new Settings › Safety switch, off by default, can stop such a turn on its own.
+
+### Changed
+
+- Pressing Sign in on an Installed card (or on a failed turn) runs the CLI's own login command for providers that have one (Grok, Codex, Opencode, Cursor, Amp, Antigravity), streams its output into an alerts card and polls the local sign-in check every 2.5 seconds, flipping to "Signed in as …" without taking over the terminal panel. CLIs with a logout (codex, opencode, cursor, amp, grok) get a Sign out action on the signed-in card. Providers without `login` (Claude Code, Copilot, Qwen, Droid, Gemini) keep the terminal-panel fallback.
+
+### Fixed
+
+- Grok Build ending a turn with `error_during_execution` now shows a readable sentence — the mapped headline, the failing tool's text and Grok's own `errors` codes — instead of just the raw subtype. With a reason in the chat, the existing sign-in and model-switch fix cards reach cases they used to miss, including Grok auth failures that showed only `error_during_execution` before.
+- A permission request whose card was dismissed no longer leaves a turn waiting unseen: pending approvals always show on the Working line with their answers, and a dismissed card comes back once the turn has waited as long as a stall.
+
 ## [0.5.11] - 2026-10-26
 
 ### Added
