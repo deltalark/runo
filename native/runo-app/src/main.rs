@@ -112,6 +112,7 @@ mod shell;
 mod shellenv;
 mod ship;
 mod signin;
+mod signinrun;
 mod space_ui;
 mod stall;
 mod startup;
@@ -379,6 +380,12 @@ struct RunoApp {
     sign_ins: HashMap<u64, &'static str>,
     /// Of those, the ones signing in on a Cove server: shell → session.
     server_sign_ins: HashMap<u64, u64>,
+    /// Live sign-in runs for the local machine, by provider. The card shows each one's
+    /// output, its last URL and its status, and takes Cancel, Retry and Sign out actions.
+    sign_in_runs: HashMap<&'static str, signinrun::SignInRun>,
+    /// Background pollers for live sign-in runs: their alive flag is flipped when the run
+    /// ends or is cancelled, so the poller can stop.
+    sign_in_pollers: HashMap<&'static str, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// The session whose failed turn shows the model list.
     fix_models: Option<u64>,
     project_form: Option<projects::ProjectForm>,
@@ -1580,6 +1587,8 @@ impl RunoApp {
             remove_copy: None,
             sign_ins: HashMap::new(),
             server_sign_ins: HashMap::new(),
+            sign_in_runs: HashMap::new(),
+            sign_in_pollers: HashMap::new(),
             fix_models: None,
             project_form: None,
             project_name,
