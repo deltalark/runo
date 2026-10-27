@@ -451,24 +451,11 @@ pub(crate) fn finished(at: Instant, took: Duration) -> Option<AnyElement> {
 }
 
 fn row(ring: Ring, label: StyledText, detail: Option<String>) -> Div {
-    let color = accent();
-    let green = if is_dark() {
-        mix(c_green(), 0xffffff, 0.75)
-    } else {
-        c_green()
-    };
     div()
         .flex()
         .items_center()
         .gap_2()
-        .child(
-            canvas(
-                |_, _, _| (),
-                move |b, _, window, _| paint_ring(b, ring, color, green, window),
-            )
-            .flex_none()
-            .size(px(BOX)),
-        )
+        .child(ring_canvas(ring, accent()))
         .child(label)
         .when_some(detail, |row, d| {
             row.child(
@@ -479,6 +466,31 @@ fn row(ring: Ring, label: StyledText, detail: Option<String>) -> Div {
                     .child(format!("· {d}")),
             )
         })
+}
+
+/// The ring on its own: the small animated arc, drawn in `color`, at `BOX` across.
+/// For reuse where the row is laid out differently (menu bar panel, etc.).
+pub(crate) fn ring(color: u32) -> AnyElement {
+    let ring = if motion::moving() {
+        Ring::now()
+    } else {
+        Ring::STILL
+    };
+    ring_canvas(ring, color).into_any_element()
+}
+
+fn ring_canvas(ring: Ring, color: u32) -> impl IntoElement {
+    let green = if is_dark() {
+        mix(c_green(), 0xffffff, 0.75)
+    } else {
+        c_green()
+    };
+    canvas(
+        |_, _, _| (),
+        move |b, _, window, _| paint_ring(b, ring, color, green, window),
+    )
+    .flex_none()
+    .size(px(BOX))
 }
 
 /// `label` in the secondary text colour with, at `shimmer` of the way through its loop,

@@ -8,8 +8,15 @@ use crate::*;
 use std::cell::{Cell, RefCell};
 use std::time::Instant;
 
-const WIDTH: f32 = 392.;
+const WIDTH: f32 = 376.;
 const HEIGHT: f32 = 620.;
+
+/// The tile the person tapped to filter the list below.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Filter {
+    Working,
+    Needs,
+}
 
 thread_local! {
     static OPEN: RefCell<Option<AnyWindowHandle>> = const { RefCell::new(None) };
@@ -81,9 +88,13 @@ struct Panel {
     input: Entity<InputState>,
     /// Ask Runo is showing rather than Activity.
     asking: bool,
+    /// Which tile is currently narrowing the list below. None shows everything.
+    filter: Option<Filter>,
     /// The row opened to show its detail, and the one under the pointer.
     opened: Option<u64>,
     hovered: Option<u64>,
+    /// Which stat tile is under the pointer, to lift its wash.
+    hovered_tile: Option<Filter>,
     scroll: ScrollHandle,
     /// How many messages the chat had when last drawn, to follow new ones down.
     seen: usize,
@@ -132,12 +143,19 @@ impl Panel {
             app,
             input,
             asking,
+            filter: None,
             opened: None,
             hovered: None,
+            hovered_tile: None,
             scroll: ScrollHandle::new(),
             seen: 0,
             _subs: subs,
         }
+    }
+
+    fn toggle_filter(&mut self, f: Filter, cx: &mut Context<Self>) {
+        self.filter = (self.filter != Some(f)).then_some(f);
+        cx.notify();
     }
 
     fn with_app(&self, cx: &mut App, f: impl FnOnce(&mut RunoApp, &mut Context<RunoApp>)) {
@@ -162,31 +180,45 @@ impl Panel {
     }
 
     fn header(&self, snap: &Snapshot, mood: Mood) -> Div {
+        // "Good evening." becomes "Good evening" so it joins other lines without a stop.
+        let hello = crate::home::greeting().trim_end_matches('.');
         let status = if snap.closed {
-            "Runo's window is closed".to_string()
-        } else if snap.running == 0 && snap.needs_you == 0 {
-            format!("{} · all quiet", crate::home::greeting())
+            "Window closed".to_string()
         } else {
-            format!("{} · {}", crate::home::greeting(), snap.summary)
+            summary_line(snap)
         };
         div()
             .flex()
             .items_center()
-            .gap(px(11.))
+            .gap(px(10.))
             .px(px(14.))
-            .pt(px(14.))
-            .pb(px(12.))
-            .child(crate::assistant::live_mark_sized(mood, 32.))
+            .pt(px(13.))
+            .pb(px(10.))
+            .child(crate::assistant::live_mark_sized(mood, 30.))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .v_flex()
+                    .gap(px(1.))
                     .child(
                         div()
-                            .text_size(px(14.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Runo"),
+                            .flex()
+                            .items_baseline()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .text_size(px(11.5))
+                                    .text_color(rgb(c_muted()))
+                                    .child(hello),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(14.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(c_text()))
+                                    .child("Runo"),
+                            ),
                     )
                     .child(
                         div()
@@ -208,83 +240,137 @@ impl Panel {
             )
     }
 
-    /// The three counts under the header; each goes where its sessions are.
+    /// The three counts under the header; working and needs filter the list below, review
+    /// opens the Review page in the window.
     fn stats(&self, snap: &Snapshot, cx: &mut Context<Self>) -> Div {
-        let tile = |id: &'static str, n: usize, what: &'static str, color: u32, loud: bool| {
-            let lit = n > 0;
-            div()
-                .id(id)
-                .flex_1()
-                .px(px(10.))
-                .py(px(8.))
-                .rounded(px(11.))
-                .cursor_pointer()
-                .border_1()
-                .when(loud && lit, |el| {
-                    el.border_color(glow(color, 0.5)).bg(glow(color, 0.08))
-                })
-                .when(!(loud && lit), |el| {
-                    el.border_color(divider())
-                        .bg(tint(c_subtle()))
-                        .hover(|el| el.bg(tint(c_border())))
-                })
-                .active(|el| el.opacity(0.8))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(7.))
-                        .when(lit, |el| {
-                            el.child(
-                                div()
-                                    .size(px(7.))
-                                    .rounded_full()
-                                    .bg(rgb(color))
-                                    .shadow(vec![crate::assistant::halo(color, 0.8, 8., 0., 0.)]),
-                            )
-                        })
-                        .child(
-                            div()
-                                .text_size(px(19.))
-                                .line_height(px(24.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(if lit { c_text() } else { c_muted() }))
-                                .child(n.to_string()),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.5))
-                        .text_color(rgb(c_muted()))
-                        .child(what),
-                )
+        let working = self.stat_tile(
+            "mb-stat-working",
+            snap.running,
+            "Working",
+            c_blue(),
+            Some(Filter::Working),
+            cx,
+        );
+        let needs_label = if snap.needs_you == 1 {
+            "Needs you"
+        } else {
+            "Need you"
         };
+        let needs = self.stat_tile(
+            "mb-stat-needs",
+            snap.needs_you,
+            needs_label,
+            c_amber(),
+            Some(Filter::Needs),
+            cx,
+        );
+        let review = self.stat_tile(
+            "mb-stat-review",
+            snap.review,
+            "To review",
+            c_green(),
+            None,
+            cx,
+        );
         div()
             .flex()
             .gap(px(8.))
             .px(px(14.))
             .pb(px(12.))
+            .child(working)
+            .child(needs)
+            .child(review)
+    }
+
+    fn stat_tile(
+        &self,
+        id: &'static str,
+        n: usize,
+        what: &'static str,
+        color: u32,
+        filter: Option<Filter>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let lit = n > 0;
+        let active = filter.is_some() && self.filter == filter;
+        let hovered = filter.is_some() && self.hovered_tile == filter;
+        // Tint strength: a quiet wash at rest, a fuller one for the chosen tile. Unlit
+        // tiles sit near canvas so a count of 0 does not pull the eye.
+        let (wash_a, wash_b) = match (lit, active) {
+            (false, _) => (0.045, 0.025),
+            (true, false) => (0.11, 0.06),
+            (true, true) => (0.20, 0.12),
+        };
+        let number_color = if lit { c_text() } else { c_muted() };
+        div()
+            .id(id)
+            .flex_1()
+            .min_w_0()
+            .relative()
+            .px(px(10.))
+            .py(px(8.))
+            .rounded(px(12.))
+            .cursor_pointer()
+            .bg(linear_gradient(
+                160.,
+                linear_color_stop(glow(color, wash_a), 0.),
+                linear_color_stop(glow(color, wash_b), 1.),
+            ))
+            .when(hovered && !active, |el| {
+                el.bg(linear_gradient(
+                    160.,
+                    linear_color_stop(glow(color, wash_a + 0.04), 0.),
+                    linear_color_stop(glow(color, wash_b + 0.03), 1.),
+                ))
+            })
+            .active(|el| el.opacity(0.85))
+            .when_some(filter, |el, f| {
+                el.on_hover(cx.listener(move |this, over: &bool, _, cx| {
+                    this.hovered_tile = if *over { Some(f) } else { None };
+                    cx.notify();
+                }))
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_filter(f, cx)))
+            })
+            .when(filter.is_none(), |el| {
+                el.on_click(|_, _, cx| super::go(Go::Review, cx))
+            })
             .child(
-                tile("mb-stat-working", snap.running, "Working", c_blue(), false)
-                    .on_click(cx.listener(|this, _, _, cx| this.show_ask(false, cx))),
-            )
-            .child(
-                tile(
-                    "mb-stat-needs",
-                    snap.needs_you,
-                    if snap.needs_you == 1 {
-                        "Needs you"
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.))
+                    .child(
+                        div()
+                            .text_size(px(21.))
+                            .line_height(px(24.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(number_color))
+                            .font_features(tnum())
+                            .child(n.to_string()),
+                    )
+                    .child(div().flex_1())
+                    // Top-right glyph: a lit dot for a non-zero count, a hollow ring
+                    // otherwise, in the tile's own colour.
+                    .child(if lit {
+                        div()
+                            .size(px(7.))
+                            .rounded_full()
+                            .bg(rgb(color))
+                            .shadow(vec![crate::assistant::halo(color, 0.75, 7., 0., 0.)])
                     } else {
-                        "Need you"
-                    },
-                    c_amber(),
-                    true,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.show_ask(false, cx))),
+                        div()
+                            .size(px(7.))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(glow(color, 0.45))
+                    }),
             )
             .child(
-                tile("mb-stat-review", snap.review, "To review", c_green(), false)
-                    .on_click(|_, _, cx| super::go(Go::Review, cx)),
+                div()
+                    .pt(px(2.))
+                    .text_size(px(11.5))
+                    .text_color(rgb(c_muted()))
+                    .child(what),
             )
     }
 
@@ -422,24 +508,97 @@ impl Panel {
             .child(body)
     }
 
-    /// An agent at work: its badge, title and time, a light running along under it, and
-    /// Stop while the pointer is over it.
+    /// A session row: a status glyph on the left (ring for Working, dot for the rest),
+    /// title with project · branch under it, elapsed on the right. Click opens the row
+    /// for more; click Open to jump to it in the window. Dense but with air.
     fn working(&self, row: &Row, cx: &mut Context<Self>) -> Stateful<Div> {
         let id = row.id;
         let opened = self.opened == Some(id);
         let hovered = self.hovered == Some(id);
-        let mut meta = vec![row.project.clone()];
-        if !row.branch.is_empty() {
-            meta.push(row.branch.clone());
-        }
-        meta.retain(|m| !m.is_empty());
+        let (tone, running) = match row.dot {
+            Dot::Working => (c_blue(), true),
+            Dot::Waiting => (c_amber(), false),
+            Dot::Failed => (c_red(), false),
+            Dot::Finished => (c_green(), false),
+        };
+        let meta = {
+            let mut m = Vec::new();
+            if !row.project.is_empty() {
+                m.push(row.project.clone());
+            }
+            if !row.branch.is_empty() {
+                m.push(row.branch.clone());
+            }
+            m.join(" · ")
+        };
+        let indicator: AnyElement = if running {
+            working::ring(tone)
+        } else {
+            div()
+                .size(px(16.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .size(px(7.))
+                        .rounded_full()
+                        .bg(rgb(tone))
+                        .shadow(vec![crate::assistant::halo(tone, 0.75, 7., 0., 0.)]),
+                )
+                .into_any_element()
+        };
+
+        let top = div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .child(indicator)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .v_flex()
+                    .gap(px(1.))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(c_text()))
+                            .child(row.title.clone()),
+                    )
+                    .when(!meta.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .truncate()
+                                .text_size(px(11.5))
+                                .text_color(rgb(c_muted()))
+                                .child(meta),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.5))
+                    .text_color(rgb(if row.dot == Dot::Failed {
+                        c_red()
+                    } else {
+                        c_muted()
+                    }))
+                    .font_features(tnum())
+                    .child(row.status.clone()),
+            );
+
         let mut out = div()
             .id(("mb-work", id))
             .relative()
-            .mx(px(10.))
+            .mx(px(8.))
             .px(px(10.))
-            .py(px(9.))
-            .rounded(px(11.))
+            .py(px(7.))
+            .rounded(px(10.))
             .cursor_pointer()
             .when(hovered || opened, |el| el.bg(tint(c_subtle())))
             .on_hover(cx.listener(move |this, over: &bool, _, cx| {
@@ -451,23 +610,13 @@ impl Panel {
                 cx.notify();
             }))
             .v_flex()
-            .gap(px(3.))
-            .child(head_line(row, None))
-            .when(!meta.is_empty(), |el| {
-                el.child(
-                    div()
-                        .pl(px(31.))
-                        .truncate()
-                        .text_size(px(11.5))
-                        .text_color(rgb(c_muted()))
-                        .child(meta.join(" · ")),
-                )
-            });
+            .gap(px(4.))
+            .child(top);
         if opened {
             if let Some(last) = &row.last {
                 out = out.child(
                     div()
-                        .pl(px(31.))
+                        .pl(px(26.))
                         .pt(px(3.))
                         .text_size(px(12.))
                         .text_color(rgb(c_secondary()))
@@ -477,8 +626,8 @@ impl Panel {
             }
             out = out.child(
                 div()
-                    .pl(px(31.))
-                    .pt(px(6.))
+                    .pl(px(26.))
+                    .pt(px(4.))
                     .flex()
                     .items_center()
                     .gap(px(6.))
@@ -498,10 +647,9 @@ impl Panel {
                     ),
             );
         }
-        out = out.child(div().pl(px(31.)).pt(px(5.)).child(shimmer(id, row.color)));
         if row.stoppable && (hovered || opened) {
             out = out.child(
-                div().absolute().top(px(7.)).right(px(8.)).child(
+                div().absolute().top(px(6.)).right(px(8.)).child(
                     button(("mb-stop", id), "Stop", false)
                         .flex()
                         .items_center()
@@ -517,22 +665,19 @@ impl Panel {
 
     fn activity(&self, snap: &Snapshot, acts: bool, cx: &mut Context<Self>) -> Div {
         let mut out = div().v_flex();
-        if !snap.needs.is_empty() {
+        let show_needs = self.filter != Some(Filter::Working);
+        let show_working = self.filter != Some(Filter::Needs);
+        // Waiting and Failed want your eye; Finished is just a result to read.
+        let (attention, done): (Vec<&Row>, Vec<&Row>) =
+            snap.needs.iter().partition(|r| r.dot != Dot::Finished);
+
+        if show_needs && !attention.is_empty() {
             out = out.child(heading("NEEDS YOU"));
-            for row in &snap.needs {
+            for row in &attention {
                 out = out.child(self.card(row, cx));
             }
-            if snap.more_needs > 0 {
-                out = out.child(
-                    link(
-                        "mb-more-needs",
-                        format!("{} more in the Inbox", snap.more_needs),
-                    )
-                    .on_click(|_, _, cx| super::go(Go::Inbox, cx)),
-                );
-            }
         }
-        if !snap.working.is_empty() {
+        if show_working && !snap.working.is_empty() {
             out = out.child(heading("WORKING"));
             for row in &snap.working {
                 out = out.child(self.working(row, cx));
@@ -543,6 +688,36 @@ impl Panel {
                         .on_click(|_, _, cx| super::go(Go::Sessions, cx)),
                 );
             }
+        }
+        if show_needs && !done.is_empty() {
+            out = out.child(heading("DONE"));
+            for row in &done {
+                out = out.child(self.working(row, cx));
+            }
+        }
+        if show_needs && snap.more_needs > 0 {
+            out = out.child(
+                link(
+                    "mb-more-needs",
+                    format!("{} more in the Inbox", snap.more_needs),
+                )
+                .on_click(|_, _, cx| super::go(Go::Inbox, cx)),
+            );
+        }
+        if self.filter.is_some()
+            && attention.is_empty()
+            && done.is_empty()
+            && snap.working.is_empty()
+        {
+            out = out.child(
+                div()
+                    .px(px(16.))
+                    .pt(px(14.))
+                    .pb(px(10.))
+                    .text_size(px(12.))
+                    .text_color(rgb(c_muted()))
+                    .child("Nothing here right now."),
+            );
         }
         if snap.needs.is_empty() && snap.working.is_empty() {
             out = out
@@ -746,51 +921,88 @@ fn badge(mark: &'static str, color: u32) -> Div {
         .child(mark)
 }
 
-/// A thin track with a light running along it, in the agent's colour.
-fn shimmer(id: u64, color: u32) -> AnyElement {
-    let track = div()
-        .h(px(2.))
-        .w_full()
-        .rounded_full()
-        .bg(tint(c_subtle()))
-        .overflow_hidden()
-        .relative();
-    let light = |at: f32| {
-        div()
-            .absolute()
-            .top_0()
-            .h_full()
-            .w(relative(0.35))
-            .left(relative(at))
-            .rounded_full()
-            .bg(linear_gradient(
-                90.,
-                linear_color_stop(glow(color, 0.), 0.),
-                linear_color_stop(glow(color, 0.9), 0.5),
-            ))
-    };
-    if !anim_on() {
-        return track.child(light(0.3)).into_any_element();
-    }
-    track
-        .child(light(0.).with_animation(
-            ("mb-shimmer", id),
-            Animation::new(Duration::from_millis(1600)).repeat(),
-            |el, t| el.left(relative(-0.35 + 1.35 * t)),
-        ))
-        .into_any_element()
-}
-
-/// A small grey heading over a section.
+/// A small grey heading over a section: muted, borderless, matches the window.
 fn heading(text: &'static str) -> Div {
     div()
         .px(px(16.))
-        .pt(px(8.))
-        .pb(px(6.))
-        .text_size(px(10.5))
+        .pt(px(10.))
+        .pb(px(4.))
+        .text_size(px(10.))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgb(c_muted()))
         .child(text)
+}
+
+/// Tabular figures: the time ticks over without the row shifting.
+fn tnum() -> FontFeatures {
+    FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]))
+}
+
+/// The one-line summary under the greeting: "1 working · 2 need you". Zeros are hidden,
+/// so a quiet moment reads as "All quiet" rather than "0 working · 0 need you".
+fn summary_line(snap: &Snapshot) -> String {
+    let mut parts = Vec::new();
+    if snap.running > 0 {
+        parts.push(format!("{} working", snap.running));
+    }
+    if snap.needs_you > 0 {
+        parts.push(format!(
+            "{} need{} you",
+            snap.needs_you,
+            if snap.needs_you == 1 { "s" } else { "" }
+        ));
+    }
+    if snap.review > 0 {
+        parts.push(format!("{} to review", snap.review));
+    }
+    if parts.is_empty() {
+        "All quiet".into()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+/// The footer's primary call: a solid accent pill with a small plus chip on the left.
+fn new_session_button() -> Stateful<Div> {
+    let accent = c_blue();
+    div()
+        .id("mb-new")
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(7.))
+        .pl(px(5.))
+        .pr(px(11.))
+        .py(px(4.))
+        .rounded(px(8.))
+        .cursor_pointer()
+        .bg(rgb(accent))
+        .text_color(rgb(0xffffff))
+        .shadow(vec![crate::assistant::halo(accent, 0.5, 10., 0., 1.)])
+        .hover(|el| el.bg(rgb(settings::mix(accent, 0xffffff, 0.9))))
+        .active(|el| el.opacity(0.85))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(|_, _, cx| super::go(Go::NewSession, cx))
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new("New session").build(window, cx)
+        })
+        .child(
+            div()
+                .size(px(18.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .bg(rgba(0xffffff33))
+                .child(icon(IconName::Plus, 12., 0xffffff)),
+        )
+        .child(
+            div()
+                .text_size(px(12.))
+                .font_weight(FontWeight::MEDIUM)
+                .child("New session"),
+        )
 }
 
 fn button(id: impl Into<ElementId>, label: &'static str, primary: bool) -> Stateful<Div> {
@@ -944,15 +1156,8 @@ impl Render for Panel {
             .gap(px(8.))
             .px(px(12.))
             .py(px(10.))
-            .mt(px(8.))
-            .border_t_1()
-            .border_color(divider())
-            .when(!snap.closed, |el| {
-                el.child(
-                    button("mb-new", "+ New session", false)
-                        .on_click(|_, _, cx| super::go(Go::NewSession, cx)),
-                )
-            })
+            .mt(px(4.))
+            .when(!snap.closed, |el| el.child(new_session_button()))
             .child(div().flex_1())
             .child(
                 link("mb-quit", "Quit Runo")
