@@ -100,6 +100,7 @@ mod radar;
 mod registry;
 mod review;
 mod reviewable;
+mod runwatch;
 mod safefs;
 mod schedule;
 mod seatbelt;
@@ -112,6 +113,7 @@ mod shellenv;
 mod ship;
 mod signin;
 mod space_ui;
+mod stall;
 mod startup;
 mod store;
 mod stream;
@@ -737,6 +739,8 @@ struct RunoApp {
     pr_loading: std::collections::HashSet<u64>,
     /// When each Crew thread's watched pull request is read next.
     pr_watch: prwatch::Polls,
+    /// CI runs watched after a push to the default branch, a merge or a tag push.
+    run_watch: runwatch::Polls,
     /// The merge methods each project's GitHub repository allows, read once a run, and
     /// the projects being read.
     merge_methods: HashMap<u64, Vec<github::MergeMethod>>,
@@ -1782,6 +1786,7 @@ impl RunoApp {
             pr_status: HashMap::new(),
             pr_loading: Default::default(),
             pr_watch: Default::default(),
+            run_watch: Default::default(),
             merge_methods: HashMap::new(),
             merge_methods_loading: Default::default(),
             pr_form: None,
@@ -2090,6 +2095,7 @@ impl RunoApp {
                         this.take_phone_requests(cx);
                         this.crew_tick(cx);
                         this.pr_watch_tick();
+                        this.run_watch_tick();
                     })
                     .is_err()
                 {

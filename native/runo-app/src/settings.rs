@@ -210,6 +210,9 @@ pub struct AppSettings {
     pub cove_tools: bool,
     /// Minutes without output before a running agent is flagged as maybe stuck; 0 never.
     pub stuck_after_mins: u32,
+    /// Minutes without output after which a running agent is stopped on its own; 0, the
+    /// default, never.
+    pub stuck_stop_after_mins: u32,
     /// Spending limits in US dollars, per session and per day; 0 for none.
     pub session_limit_usd: u32,
     pub daily_limit_usd: u32,
@@ -350,6 +353,7 @@ impl Default for AppSettings {
             confirm_agent_playbooks: true,
             cove_tools: true,
             stuck_after_mins: 10,
+            stuck_stop_after_mins: 0,
             session_limit_usd: 0,
             daily_limit_usd: 0,
             session_turn_limit: 0,
@@ -500,6 +504,7 @@ impl AppSettings {
         STOP_ON_DENIAL.store(self.stop_on_denial, Ordering::Relaxed);
         KEEP_RUNS.store(self.playbook_keep_runs, Ordering::Relaxed);
         STUCK_AFTER.store(self.stuck_after_mins, Ordering::Relaxed);
+        STUCK_STOP.store(self.stuck_stop_after_mins, Ordering::Relaxed);
         SESSION_LIMIT.store(self.session_limit_usd, Ordering::Relaxed);
         DAILY_LIMIT.store(self.daily_limit_usd, Ordering::Relaxed);
         SESSION_TURNS.store(self.session_turn_limit, Ordering::Relaxed);
@@ -578,6 +583,7 @@ static SYNC_BACKUP_UNTRACKED: AtomicBool = AtomicBool::new(false);
 static STOP_ON_DENIAL: AtomicBool = AtomicBool::new(true);
 static KEEP_RUNS: AtomicU32 = AtomicU32::new(10);
 static STUCK_AFTER: AtomicU32 = AtomicU32::new(10);
+static STUCK_STOP: AtomicU32 = AtomicU32::new(0);
 static SESSION_LIMIT: AtomicU32 = AtomicU32::new(0);
 static DAILY_LIMIT: AtomicU32 = AtomicU32::new(0);
 static SESSION_TURNS: AtomicU32 = AtomicU32::new(0);
@@ -590,6 +596,11 @@ static PLAN_HOLD: AtomicU32 = AtomicU32::new(0);
 /// Minutes of silence before an agent is flagged as maybe stuck; 0 never.
 pub fn stuck_after_mins() -> u32 {
     STUCK_AFTER.load(Ordering::Relaxed)
+}
+
+/// Minutes of silence after which an agent is stopped on its own; 0 never.
+pub fn stuck_stop_after_mins() -> u32 {
+    STUCK_STOP.load(Ordering::Relaxed)
 }
 
 /// The limits that hold new turns; 0 for none.

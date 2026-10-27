@@ -29,6 +29,8 @@ pub(crate) struct Health {
     last_output: HashMap<u64, Instant>,
     /// Sessions whose quiet-agent card was hidden, until they print again.
     quiet_hidden: HashSet<u64>,
+    /// Sessions whose stall was told to Crew, until they print again.
+    stall_noted: HashSet<u64>,
     /// Sessions whose turns wait on a limit, with which and why.
     held: HashMap<u64, Hold>,
     /// Sessions the person let past their limit for one turn.
@@ -55,14 +57,24 @@ impl Health {
             Event::Line(Target::Session(id), _) | Event::Err(Target::Session(id), _) => {
                 self.last_output.insert(*id, Instant::now());
                 self.quiet_hidden.remove(id);
+                self.stall_noted.remove(id);
             }
             Event::Done(Target::Session(id), _) => {
                 self.last_output.remove(id);
                 self.quiet_hidden.remove(id);
+                self.stall_noted.remove(id);
             }
             _ => {}
         }
     }
+}
+
+/// A running turn that has printed nothing for too long, and the step it is on.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Stall {
+    pub quiet: Duration,
+    /// The running step's label, such as "Ran gh run watch 123".
+    pub step: Option<String>,
 }
 
 /// Subagents the session's agent has running now, from its latest reply's steps.
@@ -621,6 +633,7 @@ impl RunoApp {
             self.save_now();
         }
         self.start_waiting(cx);
+        self.stall_tick();
         if !self.health.crash_looked {
             self.health.crash_looked = true;
             self.health.crash = crate::applog::unseen_crash(&crate::applog::logs_dir());
@@ -713,13 +726,38 @@ impl RunoApp {
         }
     }
 
-    /// Sessions whose agent has printed nothing for longer than the setting allows.
-    fn quiet_sessions(&self) -> Vec<(u64, u64)> {
-        let mins = settings::stuck_after_mins();
-        if mins == 0 {
-            return Vec::new();
+    /// How long session `id`'s running agent has printed nothing.
+    fn quiet_for(&self, id: u64) -> Option<Duration> {
+        if !self.handles.contains_key(&Target::Session(id)) {
+            return None;
         }
-        let mut quiet: Vec<(u64, u64)> = self
+        let since = self
+            .health
+            .last_output
+            .get(&id)
+            .or_else(|| self.turns.get(&id).map(|t| &t.started))?;
+        Some(since.elapsed())
+    }
+
+    /// Session `id`'s running turn, if it has stalled: printed nothing for longer than
+    /// the setting allows, given the command it is on (see `stall`). A turn waiting on a
+    /// permission answer is waiting on the person, and shows that instead.
+    pub(crate) fn stall(&self, id: u64) -> Option<Stall> {
+        let quiet = self.quiet_for(id)?;
+        if self.approval_for(id).is_some() {
+            return None;
+        }
+        let step = self
+            .state
+            .session(id)
+            .and_then(|s| working::running_step(&s.messages));
+        crate::stall::stalled(quiet, settings::stuck_after_mins(), step.as_deref())
+            .then_some(Stall { quiet, step })
+    }
+
+    /// Sessions whose agent has printed nothing for longer than the setting allows.
+    fn quiet_sessions(&self) -> Vec<(u64, Stall)> {
+        let mut quiet: Vec<(u64, Stall)> = self
             .handles
             .keys()
             .filter_map(|t| match t {
@@ -727,27 +765,96 @@ impl RunoApp {
                 _ => None,
             })
             .filter(|id| !self.health.quiet_hidden.contains(id))
-            // An agent waiting on a permission answer is waiting on the person.
-            .filter(|id| self.approval_for(*id).is_none())
-            .filter_map(|id| {
-                let since = self
-                    .health
-                    .last_output
-                    .get(&id)
-                    .or_else(|| self.turns.get(&id).map(|t| &t.started))?;
-                let secs = since.elapsed().as_secs();
-                (secs >= u64::from(mins) * 60).then_some((id, secs / 60))
+            .filter_map(|id| self.stall(id).map(|st| (id, st)))
+            .collect();
+        quiet.sort_unstable_by_key(|(id, _)| *id);
+        quiet
+    }
+
+    /// Stalled turns are told to Crew once, and stopped when the person set a time for
+    /// that. A turn waiting on a permission whose card was hidden gets its card back once
+    /// it has waited as long, so no approval sits unseen.
+    pub(crate) fn stall_tick(&mut self) {
+        let running: Vec<u64> = self
+            .handles
+            .keys()
+            .filter_map(|t| match t {
+                Target::Session(id) => Some(*id),
+                _ => None,
             })
             .collect();
-        quiet.sort_unstable();
-        quiet
+        let base = settings::stuck_after_mins();
+        for id in running {
+            if self.health.stall_noted.contains(&id) {
+                if let Some(st) = self.stall(id) {
+                    let stopping = self.turns.get(&id).is_some_and(|t| t.stopping);
+                    if !stopping
+                        && crate::stall::auto_stop(st.quiet, settings::stuck_stop_after_mins())
+                    {
+                        let what = crate::stall::working_text(st.quiet, st.step.as_deref());
+                        self.state.log(id, format!("Stopped: {what}"));
+                        self.watch_news(id, format!("was stopped: {what}."));
+                        self.stop_session(id);
+                    }
+                }
+                continue;
+            }
+            if let Some(request) = self.approval_for(id).cloned() {
+                let key = format!("a:{}", request.id);
+                let waited = self
+                    .quiet_for(id)
+                    .is_some_and(|q| crate::stall::stalled(q, base, None));
+                if waited && self.alerts_hidden.contains(&key) {
+                    self.alerts_hidden.remove(&key);
+                    self.health.stall_noted.insert(id);
+                    let what = approvals::describe(&request.tool, &request.input);
+                    self.state
+                        .log(id, format!("Still waiting on a permission: {what}"));
+                    self.watch_news(
+                        id,
+                        format!("(#{id}) is waiting on a permission nobody answered: {what}. Its card is back."),
+                    );
+                }
+                continue;
+            }
+            let Some(st) = self.stall(id) else {
+                continue;
+            };
+            self.health.stall_noted.insert(id);
+            let what = crate::stall::working_text(st.quiet, st.step.as_deref());
+            self.state.log(id, what);
+            if self.state.session(id).is_some_and(|s| s.crew.is_some()) {
+                self.watch_news(
+                    id,
+                    format!(
+                        "— {}",
+                        crate::stall::crew_text(id, st.quiet, st.step.as_deref())
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Stop a stalled turn and, once it has stopped, send the thread a prompt to carry on.
+    pub(crate) fn retry_stalled(&mut self, id: u64, cx: &mut Context<Self>) {
+        let st = self.stall(id);
+        let prompt = crate::stall::retry_prompt(
+            st.as_ref().map_or(Duration::ZERO, |s| s.quiet),
+            st.as_ref().and_then(|s| s.step.as_deref()),
+        );
+        if let Some(s) = self.state.session_mut(id) {
+            s.queue.insert(0, Queued::new(prompt, Vec::new()));
+        }
+        // Stops the turn; the prompt goes out once it has exited.
+        self.send_queued(id, 0, cx);
     }
 
     /// Cards for the corner of the window: quiet agents, limits reached, a crash last
     /// time, and a newer Runo.
     pub(crate) fn health_cards(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut cards = Vec::new();
-        for (n, (id, mins)) in self.quiet_sessions().into_iter().enumerate() {
+        for (n, (id, st)) in self.quiet_sessions().into_iter().enumerate() {
+            let mins = st.quiet.as_secs() / 60;
             let Some(session) = self.state.session(id) else {
                 continue;
             };
@@ -780,8 +887,8 @@ impl RunoApp {
                 Some(session.title.clone()),
                 Some(self.provider_badge(provider, 18.)),
                 format!(
-                    "No output for {mins} minute{}. It may be waiting on something, or busy with a long command.",
-                    if mins == 1 { "" } else { "s" }
+                    "{}. It may be waiting on something, or busy with a long command.",
+                    crate::stall::working_text(st.quiet, st.step.as_deref())
                 ),
                 actions,
                 format!("quiet:{id}:{mins}"),

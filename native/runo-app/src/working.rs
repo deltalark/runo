@@ -63,6 +63,23 @@ pub(crate) fn doing(messages: &[Message]) -> SharedString {
     }
 }
 
+/// The label of the step the agent is running now, such as "Ran cargo test", from its
+/// turn so far.
+pub(crate) fn running_step(messages: &[Message]) -> Option<String> {
+    let turn = messages
+        .iter()
+        .rposition(|m| m.role == Role::User)
+        .map_or(messages, |i| &messages[i + 1..]);
+    turn.iter()
+        .rev()
+        .find(|m| m.role == Role::Agent)?
+        .steps
+        .iter()
+        .rev()
+        .find(|s| s.state == StepState::Running)
+        .map(|s| s.label.clone())
+}
+
 /// A subagent the agent started this turn, for the list under the Working line.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Helper {
@@ -185,8 +202,9 @@ impl RunoApp {
         let label = helpers_label(&helpers);
         let open = !helpers.is_empty() && self.open_helpers.contains(&id);
         let line = running(doing(messages), label.clone(), started);
+        let note = self.working_note(id, cx);
         if helpers.is_empty() {
-            return div().child(line);
+            return div().v_flex().gap_1().child(line).children(note);
         }
         div()
             .v_flex()
@@ -216,12 +234,71 @@ impl RunoApp {
                     )),
             )
             .when(open, |el| el.child(helper_list(&helpers)))
+            .children(note)
     }
 
-    /// Changes when the Working line's height may have: helpers added, or the list opened.
+    /// Under the Working line: the permission the turn waits on, with its answers, even
+    /// when its card was hidden; or, when the turn has printed nothing for too long, how
+    /// long and on what, with Stop and Retry.
+    fn working_note(&self, id: u64, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let row = |text: String| {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_size(px(12.))
+                .text_color(rgb(c_amber()))
+                .child(icon(IconName::Clock, 12., c_amber()))
+                .child(div().min_w_0().truncate().child(text))
+        };
+        if let Some(request) = self.approval_for(id) {
+            let what = crate::approvals::describe(&request.tool, &request.input);
+            return Some(
+                div()
+                    .v_flex()
+                    .gap_1()
+                    .child(row(format!("Waiting for your permission to {what}")))
+                    .child(self.approval_actions("wk", 0, request, cx))
+                    .into_any_element(),
+            );
+        }
+        let st = self.stall(id)?;
+        let stopping = self.turns.get(&id).is_some_and(|t| t.stopping);
+        let text = crate::stall::working_text(st.quiet, st.step.as_deref());
+        Some(
+            row(text)
+                .when(!stopping, |el| {
+                    el.child(
+                        self.button(("stall-stop", id as usize), "Stop", false)
+                            .h(px(22.))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.stop_session(id);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.button(("stall-retry", id as usize), "Retry", true)
+                            .h(px(22.))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.retry_stalled(id, cx);
+                                cx.notify();
+                            })),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// Changes when the Working line's height may have: helpers added, the list opened, or
+    /// a note on a permission or a stall shown.
     pub(crate) fn working_version(&self, id: u64, messages: &[Message]) -> u64 {
         let n = helpers(messages).len();
-        chat_list::hash((n, n > 0 && self.open_helpers.contains(&id)))
+        chat_list::hash((
+            n,
+            n > 0 && self.open_helpers.contains(&id),
+            self.approval_for(id).map(|r| r.id.clone()),
+            self.stall(id).is_some(),
+        ))
     }
 }
 

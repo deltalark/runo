@@ -62,6 +62,10 @@ pub struct ThreadInfo {
     /// turn (`prwatch.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch: Option<crate::prwatch::Watch>,
+    /// CI runs Runo watches for the thread after it pushed or merged to the default
+    /// branch, or pushed a tag (`runwatch.rs`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<crate::runwatch::RunWatch>,
     /// The last decision Crew answered for the person, shown on the thread's card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crew_answer: Option<CrewAnswer>,
@@ -1147,6 +1151,12 @@ pub fn board_line(id: u64, title: &str, status: &str, info: &ThreadInfo) -> Stri
             None => line.push_str(&format!(" Runo watches PR #{} and wakes it.", w.pr)),
         }
     }
+    for w in &info.runs {
+        line.push_str(&format!(
+            " Runo is {} and wakes it when the runs finish.",
+            crate::runwatch::label(w).to_lowercase()
+        ));
+    }
     if let Some(r) = info.reports.last() {
         line.push_str(&format!(" Last report: {}", clip(&r.summary, 240)));
     }
@@ -1230,7 +1240,7 @@ pub fn thread_rules(tools: bool) -> String {
         "Write these fenced blocks in your reply; Runo takes them out of the text. ```runo-checklist with a first line such as \"title: Settings spacing pass\" naming the task in 2 to 5 words, then one step per line (- [x] done, - [~] doing, - [ ] to do), written again at the end so every step shows how it ended, ```runo-report opening with a short sentence on the outcome, then a few sentences and any links on lines of their own, and ```runo-decision with JSON {\"question\":…, \"options\":[{\"label\":…, \"consequence\":…}], \"recommended\":0} when a choice changes what the person gets or can't be undone."
     };
     format!(
-        "## You are a Crew thread\nCrew, which runs this project for the person, started you for the task below. Work on it until it's done. {how}\n\nOther threads may be running side by side, and all of them share the person's plan usage. Do the work in this thread. Use subagents only for independent lookups or reviews that would otherwise fill your context, at most two at a time, and never one per item of a list. Before you push, run the project's quick local check once (a compile or type check), not after every change. When the project has CI, let it run the full tests and lints on the pull request. Don't wait for other threads' builds to finish.\n\nOnce you have pushed and opened the pull request, report and end your turn. Don't wait for CI: no `gh pr checks --watch`, `gh run watch` or sleep loops. Runo watches the pull request and wakes you if a check fails, someone reviews or comments, or the branch conflicts with its base.\n\n## Your task\n"
+        "## You are a Crew thread\nCrew, which runs this project for the person, started you for the task below. Work on it until it's done. {how}\n\nOther threads may be running side by side, and all of them share the person's plan usage. Do the work in this thread. Use subagents only for independent lookups or reviews that would otherwise fill your context, at most two at a time, and never one per item of a list. Before you push, run the project's quick local check once (a compile or type check), not after every change. When the project has CI, let it run the full tests and lints on the pull request. Don't wait for other threads' builds to finish.\n\nOnce you have pushed and opened the pull request, report and end your turn. Don't wait for CI: no `gh pr checks --watch`, `gh run watch` or sleep loops. Runo watches the pull request and wakes you if a check fails, someone reviews or comments, or the branch conflicts with its base. After you push or merge to the default branch, or push a tag, end your turn too: Runo watches the GitHub Actions runs for that commit or tag and wakes you when they finish. To have a run watched that Runo can't tell from your commands, put a line `runo-watch: main`, `runo-watch: tag <name>` or `runo-watch: run <id>` in your reply. Never run a command that blocks with no end (`gh run watch` or `gh pr checks --watch` without a timeout, `sleep` loops): end the turn and let Runo's watchers wake you, or check once with `gh run view <id>` and, if you must wait inside the turn, give the wait a time limit. A turn that prints nothing for long is flagged as stalled.\n\n## Your task\n"
     )
 }
 
@@ -2013,6 +2023,8 @@ mod tests {
         assert!(thread_rules(true).contains("quick local check"));
         assert!(!thread_rules(true).contains("full test suite"));
         assert!(thread_rules(false).contains("no `gh pr checks --watch`, `gh run watch`"));
+        assert!(thread_rules(true).contains("Never run a command that blocks with no end"));
+        assert!(thread_rules(true).contains("runo-watch: main"));
     }
 
     #[test]

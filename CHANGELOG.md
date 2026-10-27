@@ -12,6 +12,12 @@ All notable changes to Runo are documented here.
 - The assistant can run any Quick open command for you, such as quitting Runo ("exit runo" now offers a Quit Runo card), opening the Terminal or going to Design. Quitting from the assistant quits for real even when Runo keeps running in the menu bar, with the usual warning if agents are running.
 - The assistant can change any switch or choice in Settings by its name, or press a button there such as Check now for updates, each as a card you click first that shows the setting's value now and the new one. Settings that decide what agents may do (Safety, Connections, Phone, permissions, sandboxes) and anything holding a key or token stay for you to change in Settings, and pairing links and tokens are never sent to the assistant's agent.
 - Guide articles for the parts that had none: quitting and updating Runo, Settings, Projects, Design (with its canvas keys), Architecture, the Timeline, Project notes, the Arcade, the Inbox and Home. Every place and command in Runo now points at an article, and the tests fail when a new one doesn't.
+- Crew threads that push or merge to the default branch, or push a tag, are watched after their turn: Runo reads the GitHub Actions runs for that commit or tag, on the pull request watcher's pace, and wakes the thread when they finish ("Main CI passed for 1a2b3c4", "Release workflow failed: build (macos)"). The card says "Watching main CI" or "Watching release". A thread can also ask with a line such as `runo-watch: run 123`.
+- A turn that prints nothing for 10 minutes (three times that while a build or test runs) says so on its Working line, its card and to Crew ("#76 stalled 10m on gh run watch"), with Stop and Retry. Settings › Safety can stop such a turn on its own after 30 minutes or more; it's off by default.
+
+### Fixed
+
+- A permission request whose card was dismissed no longer leaves a turn waiting unseen: it shows on the Working line with its answers, and its card comes back once the turn has waited as long as a stall.
 
 ## [0.5.10] - 2026-10-26
 
