@@ -1711,12 +1711,9 @@ impl RunoApp {
                         .items_center()
                         .gap_2()
                         .child(update_done_badge(n, "Installed"))
-                        .child(
-                            self.button(("install-sign-in", n), label, true)
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.start_sign_in(id, cx)),
-                                ),
-                        ),
+                        .child(self.button(("install-sign-in", n), label, true).on_click(
+                            cx.listener(move |this, _, _, cx| this.start_sign_in(id, cx)),
+                        )),
                 )
             } else if let Some(failure) = run.failed.clone() {
                 (

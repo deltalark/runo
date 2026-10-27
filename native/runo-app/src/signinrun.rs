@@ -308,11 +308,7 @@ impl RunoApp {
         };
         // If one is already running for this provider, bring the card to the front and
         // leave the existing run as it is.
-        if self
-            .sign_in_runs
-            .get(provider)
-            .is_some_and(|r| r.running())
-        {
+        if self.sign_in_runs.get(provider).is_some_and(|r| r.running()) {
             self.info = Some((
                 format!(
                     "{} sign-in is already running. The card at the top shows the steps.",
@@ -620,16 +616,16 @@ impl RunoApp {
         let mut row = div().flex().flex_wrap().gap_2();
         if let Some(url) = run.url.clone().filter(|_| run.running()) {
             row = row.child(
-                small(self.button(("sign-in-copy", n), "Copy URL", false)).on_click(
-                    cx.listener(move |this, _, _, cx| {
+                small(self.button(("sign-in-copy", n), "Copy URL", false)).on_click(cx.listener(
+                    move |this, _, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
                         this.info = Some((
                             "Copied the sign-in URL. Open it in your browser.".into(),
                             std::time::Instant::now(),
                         ));
                         cx.notify();
-                    }),
-                ),
+                    },
+                )),
             );
         }
         match &run.status {
@@ -641,7 +637,12 @@ impl RunoApp {
                 );
             }
             SignInStatus::Signed => {
-                row = row.child(div().flex().items_center().child(alerts::update_done_badge(n, "Signed in")));
+                row = row.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .child(alerts::update_done_badge(n, "Signed in")),
+                );
                 if has_logout {
                     row = row.child(
                         small(self.button(("sign-in-out", n), "Sign out", false)).on_click(
@@ -722,7 +723,10 @@ mod tests {
         );
         // Lines that aren't a sign-in: no match.
         assert_eq!(signed_in_as("Opening browser for sign-in…"), None);
-        assert_eq!(signed_in_as("Visit https://x.ai/auth/login to continue"), None);
+        assert_eq!(
+            signed_in_as("Visit https://x.ai/auth/login to continue"),
+            None
+        );
         // Colour codes don't trip it up.
         assert_eq!(
             signed_in_as("\x1b[32m✓\x1b[0m Signed in as person@example.com"),
