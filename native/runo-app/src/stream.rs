@@ -416,15 +416,16 @@ impl ClaudeStream {
     /// plus an `errors` list of short codes and (just above) the tool_result that cut
     /// the turn short; this stitches them into a sentence a person can read.
     fn failure_reason(&mut self, event: &Value) -> String {
-        if let Some(text) = event["result"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(text) = event["result"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             return text.to_string();
         }
         let subtype = event["subtype"].as_str().unwrap_or("");
         let header = failure_header(subtype);
-        let detail = self
-            .last_tool_error
-            .take()
-            .filter(|d| !d.trim().is_empty());
+        let detail = self.last_tool_error.take().filter(|d| !d.trim().is_empty());
         let codes: Vec<String> = event["errors"]
             .as_array()
             .into_iter()
@@ -1596,8 +1597,9 @@ mod tests {
         // A `result` event alone, with no tool failure above it and no `errors` list:
         // the mapped headline is still shown.
         let mut p = ClaudeStream::new("/x");
-        let out =
-            p.feed(r#"{"type":"result","subtype":"error_max_structured_output_retries","is_error":true}"#);
+        let out = p.feed(
+            r#"{"type":"result","subtype":"error_max_structured_output_retries","is_error":true}"#,
+        );
         assert_eq!(
             out.into_iter().find_map(|e| match e {
                 AgentEvent::Error(e) => Some(e),
@@ -1643,7 +1645,10 @@ mod tests {
             refused: &[],
             model: None,
         };
-        assert!(apply(&mut session, events, &cx), "the turn is marked failed");
+        assert!(
+            apply(&mut session, events, &cx),
+            "the turn is marked failed"
+        );
         // Retry resends the last Role::User message, which must still be reachable.
         let last_prompt = session
             .messages
