@@ -3205,7 +3205,7 @@ impl RunoApp {
                     .rounded(px(shell::ISLAND_R))
                     .border_1()
                     .border_color(float_edge())
-                    .bg(float(c_sheet()))
+                    .bg(elev_bg(Elev::Modal, c_sheet()))
                     .shadow_lg()
                     .overflow_hidden()
                     .on_click(|_, _, cx| cx.stop_propagation())
@@ -6825,7 +6825,7 @@ impl RunoApp {
             .rounded(px(crate::shell::ISLAND_R))
             .border_1()
             .border_color(float_edge())
-            .bg(float(c_sheet()))
+            .bg(elev_bg(Elev::Modal, c_sheet()))
             .shadow_2xl()
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(
@@ -6954,7 +6954,7 @@ impl RunoApp {
                         .rounded(px(shell::ISLAND_R))
                         .border_1()
                         .border_color(float_edge())
-                        .bg(float(c_sheet()))
+                        .bg(elev_bg(Elev::Modal, c_sheet()))
                         .shadow_2xl()
                         .overflow_hidden()
                         // Clicks inside the dialog must not reach the backdrop.

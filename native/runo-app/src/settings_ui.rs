@@ -2520,8 +2520,8 @@ impl RunoApp {
                                                     .max_h(px(320.))
                                                     .rounded_xl()
                                                     .border_1()
-                                                    .border_color(divider())
-                                                    .bg(rgb(c_canvas()))
+                                                    .border_color(float_edge())
+                                                    .bg(float(c_canvas()))
                                                     .shadow_lg()
                                                     .occlude()
                                                     .on_mouse_down_out(cx.listener(

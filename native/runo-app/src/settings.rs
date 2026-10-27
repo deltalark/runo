@@ -715,7 +715,24 @@ pub fn memory_server() -> bool {
 }
 
 pub fn glass_on() -> bool {
-    GLASS.load(Ordering::Relaxed) < 255
+    GLASS.load(Ordering::Relaxed) < 255 && !reduce_transparency()
+}
+
+/// Whether the OS asks apps to use solid surfaces instead of translucent ones. Reads
+/// the macOS Accessibility > Display > Reduce transparency setting; false on other
+/// platforms, since Linux and Windows don't expose a direct equivalent for this.
+pub fn reduce_transparency() -> bool {
+    system_reduce_transparency()
+}
+
+#[cfg(target_os = "macos")]
+fn system_reduce_transparency() -> bool {
+    objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceTransparency()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_reduce_transparency() -> bool {
+    false
 }
 
 fn with_alpha(color: u32, alpha: u8) -> Rgba {
@@ -880,19 +897,67 @@ pub fn over(top: Rgba, under: Rgba) -> Rgba {
     }
 }
 
-/// Dialogs, menus and popups floating over the app. Only the window itself is blurred,
-/// so these stay nearly solid: text behind a thin card would show through unblurred.
-pub fn float(color: u32) -> Rgba {
-    if glass_on() && GLASS_CARDS.load(Ordering::Relaxed) {
-        with_alpha(color, 246)
+/// Nesting depth for a floating surface, so the hierarchy reads against the wallpaper
+/// when the window is translucent. Each level has its own alpha wash in `elev_bg`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Elev {
+    /// A modal or dialog that fills most of the window: Arcade, New session, lightbox.
+    /// The most see-through, so the wallpaper reads clearly behind it.
+    Modal,
+    /// A popover, menu, toast or alert that floats over the chat: Usage, context menus,
+    /// alerts, approval cards. Smaller surfaces, so a touch more body for crisp text.
+    Overlay,
+    /// A card that sits on top of a Modal: Arcade's Game over / Paused / Ready cards.
+    /// A step above its parent, so it reads above the sheet it rests on.
+    Nested,
+}
+
+/// Alpha for an elevated surface in glass mode, by level and theme. Picked so each level
+/// reads as its own layer against the wallpaper and the window: Modal lets the most
+/// through, Overlay is a touch more opaque for small text, Nested lifts above its parent.
+/// Light themes gain a few extra points of body since a pale sheet over a bright
+/// desktop loses contrast fast.
+fn elev_alpha(level: Elev) -> u8 {
+    match (level, is_dark()) {
+        (Elev::Modal, true) => 0xcc,
+        (Elev::Modal, false) => 0xd9,
+        (Elev::Overlay, true) => 0xd9,
+        (Elev::Overlay, false) => 0xe6,
+        (Elev::Nested, true) => 0xe0,
+        (Elev::Nested, false) => 0xeb,
+    }
+}
+
+/// Whether elevated surfaces (modals, popovers, menus, cards) should be translucent.
+/// The main-window glass setting and the person's "Menus and dialogs too" switch both
+/// control this; `glass_on` already turns off when the OS asks for Reduce Transparency,
+/// so every modal and popover falls back to solid through this one gate.
+pub fn translucent_surfaces() -> bool {
+    glass_on() && GLASS_CARDS.load(Ordering::Relaxed)
+}
+
+/// Background fill for a floating surface at the given elevation. Translucent when the
+/// window is in glass mode and the person hasn't asked for solid cards or the OS isn't
+/// Reduce Transparency; solid otherwise, so a single gate controls every modal and
+/// popover.
+pub fn elev_bg(level: Elev, color: u32) -> Rgba {
+    if translucent_surfaces() {
+        with_alpha(color, elev_alpha(level))
     } else {
         rgb(color)
     }
 }
 
+/// Dialogs, menus and popups floating over the app. Thin wrapper over `elev_bg` at the
+/// Overlay level: popovers and alerts stay a touch more opaque than full modals so the
+/// small text in them keeps its contrast against the wallpaper.
+pub fn float(color: u32) -> Rgba {
+    elev_bg(Elev::Overlay, color)
+}
+
 /// The edge of a floating surface: a soft light rim in glass mode, like frosted glass.
 pub fn float_edge() -> Rgba {
-    if glass_on() && GLASS_CARDS.load(Ordering::Relaxed) {
+    if translucent_surfaces() {
         if is_dark() {
             rgba(0xffffff26)
         } else {
@@ -1752,5 +1817,96 @@ mod tests {
         let old: AppSettings =
             serde_json::from_str(r#"{"theme":"dark","share_cargo_target":false}"#).unwrap();
         assert_eq!(old.theme, "dark");
+    }
+
+    /// Floating surfaces fall back to solid when any of the gates (glass off, cards off,
+    /// Reduce Transparency) say they should, and when all gates allow translucency they
+    /// stack from Modal (most see-through) → Overlay → Nested so each level reads above
+    /// the one below.
+    #[test]
+    fn elev_bg_honours_each_translucency_gate() {
+        use super::{elev_bg, is_dark, Elev, DARK, GLASS, GLASS_CARDS};
+        use std::sync::atomic::Ordering;
+
+        // Save the live state and restore it, so the test doesn't leak into the running
+        // app or other threads of the test binary.
+        let saved = (
+            DARK.load(Ordering::Relaxed),
+            GLASS.load(Ordering::Relaxed),
+            GLASS_CARDS.load(Ordering::Relaxed),
+        );
+        let restore = || {
+            DARK.store(saved.0, Ordering::Relaxed);
+            GLASS.store(saved.1, Ordering::Relaxed);
+            GLASS_CARDS.store(saved.2, Ordering::Relaxed);
+        };
+        // Keep the system Reduce Transparency state out of these checks: the test runs
+        // in whatever the host says, so skip when the host asks for solid surfaces.
+        if super::reduce_transparency() {
+            return;
+        }
+
+        // Opaque window: every level is solid, whatever the theme.
+        for dark in [false, true] {
+            DARK.store(dark, Ordering::Relaxed);
+            GLASS.store(255, Ordering::Relaxed);
+            GLASS_CARDS.store(true, Ordering::Relaxed);
+            for &lvl in &[Elev::Modal, Elev::Overlay, Elev::Nested] {
+                let out = elev_bg(lvl, 0x123456);
+                assert_eq!(
+                    out.a, 1.0,
+                    "{dark} {lvl:?} should be solid when glass is off"
+                );
+            }
+        }
+
+        // Translucent window but the person wants solid cards: still solid.
+        GLASS.store(208, Ordering::Relaxed);
+        GLASS_CARDS.store(false, Ordering::Relaxed);
+        for &lvl in &[Elev::Modal, Elev::Overlay, Elev::Nested] {
+            assert_eq!(
+                elev_bg(lvl, 0x123456).a,
+                1.0,
+                "cards off should keep {lvl:?} solid"
+            );
+        }
+
+        // Translucent window and cards on: the alphas are the ones in `elev_alpha`,
+        // stacked so Modal is the most see-through and Nested the least.
+        GLASS_CARDS.store(true, Ordering::Relaxed);
+        for dark in [false, true] {
+            DARK.store(dark, Ordering::Relaxed);
+            assert!(is_dark() == dark);
+            let m = elev_bg(Elev::Modal, 0x000000).a;
+            let o = elev_bg(Elev::Overlay, 0x000000).a;
+            let n = elev_bg(Elev::Nested, 0x000000).a;
+            // Every level stays translucent, well below solid; the Modal shows the most
+            // wallpaper so text behind it still reads.
+            assert!(
+                m < 1.0 && o < 1.0 && n < 1.0,
+                "levels should be translucent"
+            );
+            assert!(m < o && o < n, "Modal < Overlay < Nested in alpha");
+            // Readability floor: a surface over the wallpaper keeps at least ~75% body.
+            assert!(
+                m >= 0.75,
+                "{dark} Modal alpha {m} too low to read text over"
+            );
+            // Light themes need a touch more body since a pale sheet loses contrast fast.
+            if !dark {
+                let d_m = {
+                    DARK.store(true, Ordering::Relaxed);
+                    let a = elev_bg(Elev::Modal, 0x000000).a;
+                    DARK.store(false, Ordering::Relaxed);
+                    a
+                };
+                assert!(
+                    m >= d_m,
+                    "light Modal {m} should carry at least as much body as dark {d_m}"
+                );
+            }
+        }
+
+        restore();
     }
 }
