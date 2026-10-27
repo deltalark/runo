@@ -446,7 +446,7 @@ mod tests {
             ids,
             [
                 "claude", "codex", "opencode", "cursor", "gemini", "copilot", "amp", "droid",
-                "qwen", "grok", "pi"
+                "qwen", "grok", "antigravity", "pi"
             ]
         );
         let claude = &specs[0];

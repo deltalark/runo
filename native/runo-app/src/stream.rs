@@ -20,6 +20,8 @@ pub enum Parser {
     Codex(Box<crate::harness::codex::CodexAppStream>),
     /// Pi's events, from its RPC or JSON mode (see `harness::pi`).
     Pi(Box<crate::harness::pi::PiStream>),
+    /// Antigravity CLI's NDJSON events (see `AntigravityStream`).
+    Antigravity(Box<AntigravityStream>),
 }
 
 impl Parser {
@@ -36,6 +38,9 @@ impl Parser {
             crate::agent::Output::Pi => {
                 Some(Parser::Pi(Box::new(crate::harness::pi::PiStream::new(cwd))))
             }
+            crate::agent::Output::Antigravity => Some(Parser::Antigravity(Box::new(
+                AntigravityStream::new(cwd),
+            ))),
             crate::agent::Output::Text => None,
         }
     }
@@ -52,6 +57,7 @@ impl Parser {
             Parser::Acp(p) => p.feed_parsed(line, parsed),
             Parser::Codex(p) => p.feed_parsed(line, parsed),
             Parser::Pi(p) => p.feed_parsed(line, parsed),
+            Parser::Antigravity(p) => p.feed_parsed(line, parsed),
         }
     }
 }
@@ -1269,6 +1275,204 @@ fn duration(ms: u64) -> String {
     }
 }
 
+/// Per-run parser for Google Antigravity CLI's `--output-format stream-json`: an NDJSON
+/// stream whose events are each `{"event":"init|step_update|result","<event>":{…}}`.
+/// Reply text arrives as `text_delta`s on `agent_response` steps; tool calls are their
+/// own step kind; the `result` event has the final usage and status.
+pub struct AntigravityStream {
+    cwd: String,
+    usage: Usage,
+    named: bool,
+    any_text: bool,
+    /// Tool steps shown by step_index, so repeated updates don't re-emit them. The value
+    /// is the id Runo gives the step, which the matching `tool_done` carries.
+    tools: std::collections::HashMap<u64, String>,
+}
+
+impl AntigravityStream {
+    pub fn new(cwd: &str) -> Self {
+        Self {
+            cwd: cwd.trim_end_matches('/').to_string(),
+            usage: Usage::default(),
+            named: false,
+            any_text: false,
+            tools: Default::default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
+        self.feed_parsed(line, parse_line(line))
+    }
+
+    pub fn feed_parsed(&mut self, line: &str, parsed: Option<Value>) -> Vec<AgentEvent> {
+        let Some(event) = parsed else {
+            return if line.trim().is_empty() {
+                vec![]
+            } else {
+                self.any_text = true;
+                vec![AgentEvent::Text(line.to_string())]
+            };
+        };
+        let mut out = Vec::new();
+        let kind = event["event"].as_str().unwrap_or("");
+        let body = match kind {
+            "init" => &event["init"],
+            "step_update" => &event["step_update"],
+            "result" => &event["result"],
+            _ => return out,
+        };
+        if !self.named {
+            if let Some(id) = body["conversation_id"].as_str().filter(|s| !s.is_empty()) {
+                self.named = true;
+                out.push(AgentEvent::Conversation(id.to_string()));
+            }
+        }
+        match kind {
+            "step_update" => out.extend(self.step(body)),
+            "result" => out.extend(self.result(body)),
+            _ => {}
+        }
+        out
+    }
+
+    /// A step as it starts, grows (`state` ACTIVE) or finishes (`state` DONE).
+    fn step(&mut self, step: &Value) -> Vec<AgentEvent> {
+        let mut out = Vec::new();
+        if let Some(u) = antigravity_usage(step) {
+            self.usage = combine(self.usage, u);
+            out.push(AgentEvent::Usage(self.usage));
+        }
+        let state = step["state"].as_str().unwrap_or("");
+        let step_type = step["step_type"].as_str().unwrap_or("");
+        match step_type {
+            "agent_response" => {
+                if let Some(piece) = step["text_delta"].as_str().filter(|t| !t.is_empty()) {
+                    self.any_text = true;
+                    out.push(AgentEvent::Text(piece.to_string()));
+                }
+            }
+            "tool" => {
+                let index = step["step_index"].as_u64().unwrap_or(0);
+                let tool = step["tool_name"].as_str().unwrap_or("tool");
+                let input = &step["tool_input"];
+                let label = step_label(&self.cwd, tool, input);
+                match (self.tools.get(&index).cloned(), state) {
+                    (None, "DONE") => {
+                        // The CLI reported the call and its result in one event; a step
+                        // without an id reads as already finished.
+                        let mut step_entry = ToolStep::of(tool, label);
+                        if !tool_ok(step) {
+                            step_entry.finish(false);
+                        }
+                        out.push(AgentEvent::Tool(step_entry));
+                    }
+                    (None, _) => {
+                        let id = format!("agy-{index}");
+                        self.tools.insert(index, id.clone());
+                        out.push(AgentEvent::Tool(ToolStep::running(&id, tool, label)));
+                    }
+                    (Some(id), "DONE") => {
+                        self.tools.remove(&index);
+                        out.push(AgentEvent::ToolDone {
+                            id,
+                            ok: tool_ok(step),
+                            output: tool_output(step),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+
+    fn result(&mut self, result: &Value) -> Vec<AgentEvent> {
+        let mut out = Vec::new();
+        if let Some(u) = antigravity_usage(result) {
+            self.usage = combine(self.usage, u);
+            out.push(AgentEvent::Usage(self.usage));
+        }
+        let mut parts = Vec::new();
+        if let Some(secs) = result["duration_seconds"].as_f64().filter(|s| *s > 0.0) {
+            parts.push(duration((secs * 1000.0) as u64));
+        }
+        if let Some(turns) = result["num_turns"].as_u64() {
+            parts.push(format!("{turns} turn{}", if turns == 1 { "" } else { "s" }));
+        }
+        if !parts.is_empty() {
+            out.push(AgentEvent::Summary(parts.join(" · ")));
+        }
+        match result["status"].as_str().unwrap_or("") {
+            "ERROR" | "CANCELED" | "INTERRUPTED" | "INVALID" => {
+                let message = result["error"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        result["status"]
+                            .as_str()
+                            .unwrap_or("The agent reported an error.")
+                            .to_string()
+                    });
+                out.push(AgentEvent::Error(message));
+            }
+            _ if !self.any_text => {
+                if let Some(text) = result["response"].as_str().filter(|t| !t.is_empty()) {
+                    self.any_text = true;
+                    out.push(AgentEvent::Text(text.to_string()));
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+}
+
+/// Antigravity's per-step usage, if the event names one. The CLI reports thinking
+/// tokens separately; Runo folds them into the output count so the token limit sees them.
+fn antigravity_usage(event: &Value) -> Option<Usage> {
+    let u = &event["usage"];
+    if !u.is_object() {
+        return None;
+    }
+    let n = |k: &str| u[k].as_u64().unwrap_or(0);
+    Some(Usage {
+        input: n("input_tokens"),
+        output: n("output_tokens") + n("thinking_tokens"),
+        cached: n("cache_read_tokens"),
+        ..Usage::default()
+    })
+}
+
+/// Keep the larger of each count: step events report running totals, so a later one
+/// supersedes an earlier one.
+fn combine(mut acc: Usage, next: Usage) -> Usage {
+    acc.input = acc.input.max(next.input);
+    acc.output = acc.output.max(next.output);
+    acc.cached = acc.cached.max(next.cached);
+    acc
+}
+
+/// Whether a finished Antigravity tool step succeeded.
+fn tool_ok(step: &Value) -> bool {
+    !matches!(
+        step["tool_status"].as_str(),
+        Some("ERROR" | "FAILED" | "DENIED")
+    ) && step["error"].is_null()
+}
+
+/// What a finished Antigravity tool step printed, trimmed to the end.
+fn tool_output(step: &Value) -> String {
+    let text = step["tool_output"]
+        .as_str()
+        .or_else(|| step["output"].as_str())
+        .or_else(|| step["error"].as_str())
+        .unwrap_or("");
+    crate::harness::event::tail(text, 4096)
+}
+
 /// The share of a run's prompt read from the cache, in percent: low means each call
 /// sent the context afresh, which costs more and uses more of a plan.
 fn cache_share(usage: &serde_json::Value) -> Option<u64> {
@@ -1554,6 +1758,85 @@ mod tests {
             Some("Non-interactive plan-only run: plan mode stays on.")
         );
         assert_eq!(grok_tool_text(&Value::String("plain output".into())), None);
+    }
+
+    #[test]
+    fn antigravity_streams_its_ndjson_events() {
+        // The shape the CLI's docs define for `agy -p ... --output-format stream-json`:
+        // one event per line, each `{"event":"init|step_update|result","<event>":{…}}`.
+        // The reply text arrives on `agent_response` steps as `text_delta`s; a tool runs
+        // from ACTIVE to DONE, with usage reported on each `step_update`.
+        let lines = [
+            r#"{"event":"init","init":{"cwd":"/work/app","tools":["read_file","run_terminal_command"],"permission_mode":"request-review","model":"gemini-3-pro"}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f","step_index":0,"state":"DONE","step_type":"user_input"}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f","step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"read_file","tool_input":{"path":"/work/app/note.txt"}}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f","step_index":1,"state":"DONE","step_type":"tool","tool_name":"read_file","tool_input":{"path":"/work/app/note.txt"},"tool_output":"hello from runo\n","tool_status":"SUCCESS"}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f","step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"note.txt said: "}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f","step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"hello from runo."}}"#,
+            r#"{"event":"step_update","step_update":{"conversation_id":"0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f","step_index":2,"state":"DONE","step_type":"agent_response","usage":{"input_tokens":180,"output_tokens":42,"thinking_tokens":8,"cache_read_tokens":1024,"total_tokens":1254}}}"#,
+            r#"{"event":"result","result":{"conversation_id":"0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f","status":"SUCCESS","response":"note.txt said: hello from runo.","duration_seconds":4.21,"num_turns":1,"usage":{"input_tokens":180,"output_tokens":42,"thinking_tokens":8,"cache_read_tokens":1024,"total_tokens":1254}}}"#,
+        ];
+        let mut parser = AntigravityStream::new("/work/app");
+        let out: Vec<AgentEvent> = lines.iter().flat_map(|l| parser.feed(l)).collect();
+        // The first event with a conversation id names the conversation, so follow-ups
+        // resume exactly it.
+        assert!(matches!(
+            out.first(),
+            Some(AgentEvent::Conversation(id)) if id == "0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f"
+        ));
+        let step = out
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::Tool(s) => Some(s),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(step.label, "Read note.txt");
+        assert_eq!(step.id, "agy-1");
+        let outputs: Vec<&str> = out
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolDone {
+                    ok: true, output, ..
+                } => Some(output.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs, ["hello from runo"]);
+        // Deltas stream in without the result's full copy repeating them.
+        let text: String = out
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "note.txt said: hello from runo.");
+        let usage = out
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                AgentEvent::Usage(u) => Some(*u),
+                _ => None,
+            })
+            .unwrap();
+        // Thinking tokens fold into the output count, so the token limit sees them.
+        assert_eq!(usage.input, 180);
+        assert_eq!(usage.output, 50);
+        assert_eq!(usage.cached, 1024);
+        assert_eq!(usage.cost_cents, 0.0);
+        assert!(out
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Summary(s) if s.starts_with("4s · 1 turn"))));
+        assert!(!out.iter().any(|e| matches!(e, AgentEvent::Error(_))));
+
+        // An ERROR status becomes an Error event with the message the CLI reported.
+        let mut err = AntigravityStream::new("/work/app");
+        let out: Vec<AgentEvent> = err
+            .feed(r#"{"event":"result","result":{"conversation_id":"c","status":"ERROR","error":"Model unavailable","duration_seconds":1.0,"num_turns":0}}"#);
+        assert!(out
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Error(m) if m == "Model unavailable")));
     }
 
     #[test]
