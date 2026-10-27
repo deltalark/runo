@@ -327,6 +327,8 @@ fn mcp_servers(spec: &RunSpec) -> Vec<(String, crate::mcp::McpSpec)> {
 
 /// Runo's own tools an agent may call without being asked: memory and reading
 /// playbooks, and a thread's reports back. Starting a playbook as a new session asks.
+/// Enabled built-in skills (image generation, …) are added at call time, since the
+/// list depends on which switches are on; see `unasked_tool_names`.
 fn unasked_tools(spec: &RunSpec) -> Vec<&'static str> {
     if spec.memory.is_none() {
         return Vec::new();
@@ -342,6 +344,9 @@ fn unasked_tools(spec: &RunSpec) -> Vec<&'static str> {
     if spec.thread != 0 {
         tools.extend(crate::memory_mcp::THREAD_TOOLS);
     }
+    // Built-in skills (image generation, …) are allow-listed by name. A disabled skill
+    // still answers in-band ("turned off"), so no permission prompt lands on the person.
+    tools.extend(crate::skills::ALL_TOOL_NAMES.iter().copied());
     tools
 }
 

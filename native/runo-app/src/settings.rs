@@ -274,6 +274,9 @@ pub struct AppSettings {
     pub run_in_background: bool,
     /// The person was told once that Runo kept running in the menu bar.
     pub background_told: bool,
+    /// Runo's built-in skills (image generation, …). Each has its own switch.
+    #[serde(default)]
+    pub skills: crate::skills::SkillSettings,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -379,6 +382,7 @@ impl Default for AppSettings {
             dock_badge: true,
             run_in_background: true,
             background_told: false,
+            skills: crate::skills::SkillSettings::default(),
         }
     }
 }

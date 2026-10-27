@@ -74,6 +74,15 @@ pub fn handle_thread(dir: &str, thread: Option<u64>, request: &Value) -> Option<
                     list.extend(crate::db::agent::tools());
                 }
             }
+            // Built-in skills (image generation, …) ride on this server, so every agent
+            // Runo starts picks them up without extra wiring per CLI.
+            let skills = crate::settings::AppSettings::load().skills;
+            let skill_tools = crate::skills::enabled_tools(&skills);
+            if !skill_tools.is_empty() {
+                if let Some(list) = all.as_array_mut() {
+                    list.extend(skill_tools);
+                }
+            }
             Ok(json!({ "tools": all }))
         }
         "tools/call" => {
@@ -92,6 +101,15 @@ pub fn handle_thread(dir: &str, thread: Option<u64>, request: &Value) -> Option<
                     }
                     None => failure("This folder isn't one of Runo's projects."),
                 }),
+                None if crate::skills::skill_for(name).is_some() => {
+                    let settings = crate::settings::AppSettings::load();
+                    Ok(crate::skills::call(
+                        dir,
+                        &settings.skills,
+                        name,
+                        &params["arguments"],
+                    ))
+                }
                 None => Ok(call(dir, name, &params["arguments"])),
             }
         }

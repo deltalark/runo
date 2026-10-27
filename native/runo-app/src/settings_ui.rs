@@ -1268,7 +1268,8 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             sections
         }
         SettingsPage::Skills => {
-            let mut sections = vec![section(
+            let mut sections = builtin_skill_sections(st);
+            sections.push(section(
                 "Create",
                 "A skill is a folder with a SKILL.md: a name, a description saying when to use it, and the steps.",
                 vec![row(
@@ -1282,7 +1283,8 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                         }
                     }) as Action)]),
                 )],
-            )];
+            ));
+            let mut found_any = false;
             for source in ["project", "claude", "agents", "codex"] {
                 let rows: Vec<Row> = data
                     .skills
@@ -1291,6 +1293,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     .map(|k| row(&k.name, &k.description.chars().take(200).collect::<String>(), Ctl::Edit(k.path.clone())))
                     .collect();
                 if !rows.is_empty() {
+                    found_any = true;
                     let title = match source {
                         "project" => "Project skills",
                         "claude" => "Claude skills (~/.claude/skills)",
@@ -1300,7 +1303,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     sections.push(section(title, &format!("{} found", rows.len()), rows));
                 }
             }
-            if sections.len() == 1 {
+            if !found_any {
                 sections.push(section("Skills", "Skills live in SKILL.md files under your agents' skills folders.", vec![row("No skills found", "Create one in ~/.claude/skills, ~/.agents/skills or ~/.codex/skills.", Ctl::Chip("0".into(), 3))]));
             }
             sections
@@ -1730,6 +1733,155 @@ pub(crate) fn find_setting(page: &str, name: &str, data: &Discovered, cx: &App) 
         }
     }
     None
+}
+
+/// The "Built-in skills" sections at the top of Settings > Skills: one row per skill
+/// to turn it on, plus per-skill controls (backend picker, API keys, …) when it is on.
+/// New skills land in Runo's `skills` module and show up here automatically.
+fn builtin_skill_sections(st: &AppSettings) -> Vec<Section> {
+    let mut sections = Vec::new();
+    let mut switches: Vec<Row> = Vec::new();
+    for skill in crate::skills::all() {
+        let id = skill.id().to_string();
+        let on = st.skills.is_enabled(&id);
+        switches.push(row(
+            skill.name(),
+            skill.description(),
+            Ctl::Switch(
+                on,
+                Rc::new(move |s: &mut AppSettings, v: bool| s.skills.set_enabled(&id, v)),
+            ),
+        ));
+    }
+    sections.push(section(
+        "Built-in skills",
+        "MCP tools Runo ships. Each one works in every agent, no extra setup. Turn one on to make it available.",
+        switches,
+    ));
+    if st.skills.is_enabled("image") {
+        sections.push(image_skill_section(&st.skills.image));
+    }
+    sections
+}
+
+/// Settings for the image generation skill. Mirrors the Figma token row's shape: a
+/// text field per API key, a dropdown per backend choice, saved as the person types.
+fn image_skill_section(image: &crate::skills::image::ImageSettings) -> Section {
+    use crate::skills::image::{BACKENDS, SIZES};
+    let backend_options: Vec<(String, String)> = BACKENDS
+        .iter()
+        .map(|(id, name)| (id.to_string(), name.to_string()))
+        .collect();
+    let size_options: Vec<(String, String)> = SIZES
+        .iter()
+        .map(|s| (s.to_string(), s.to_string()))
+        .collect();
+    let mut rows = vec![
+        row(
+            "Backend",
+            "Where to generate pictures. Hosted backends send the prompt out; the Local backend runs a command on this computer.",
+            Ctl::Dropdown(
+                backend_options,
+                image.backend.clone(),
+                Rc::new(|s, v| s.skills.image.backend = v),
+            ),
+        ),
+        row(
+            "Default size",
+            "Used when the agent doesn't give one.",
+            Ctl::Dropdown(
+                size_options,
+                image.default_size.clone(),
+                Rc::new(|s, v| s.skills.image.default_size = v),
+            ),
+        ),
+    ];
+    match image.backend.as_str() {
+        "openai" => {
+            rows.push(row(
+                "OpenAI API key",
+                "From platform.openai.com/api-keys. Settings are saved 0600 so only you can read them.",
+                Ctl::Text {
+                    key: "skills.image.openai_key".into(),
+                    value: image.openai_key.clone(),
+                    placeholder: "sk-…".into(),
+                    set: Rc::new(|s, v| s.skills.image.openai_key = v.trim().to_string()),
+                },
+            ));
+            rows.push(row(
+                "Model",
+                "gpt-image-1 (newer, cheaper) or dall-e-3.",
+                Ctl::Text {
+                    key: "skills.image.openai_model".into(),
+                    value: image.openai_model.clone(),
+                    placeholder: "gpt-image-1".into(),
+                    set: Rc::new(|s, v| s.skills.image.openai_model = v.trim().to_string()),
+                },
+            ));
+        }
+        "stability" => {
+            rows.push(row(
+                "Stability API key",
+                "From platform.stability.ai/account/keys.",
+                Ctl::Text {
+                    key: "skills.image.stability_key".into(),
+                    value: image.stability_key.clone(),
+                    placeholder: "sk-…".into(),
+                    set: Rc::new(|s, v| s.skills.image.stability_key = v.trim().to_string()),
+                },
+            ));
+            rows.push(row(
+                "Engine",
+                "sd3, sd3.5 or core.",
+                Ctl::Text {
+                    key: "skills.image.stability_engine".into(),
+                    value: image.stability_engine.clone(),
+                    placeholder: "sd3".into(),
+                    set: Rc::new(|s, v| s.skills.image.stability_engine = v.trim().to_string()),
+                },
+            ));
+        }
+        "replicate" => {
+            rows.push(row(
+                "Replicate API token",
+                "From replicate.com/account/api-tokens.",
+                Ctl::Text {
+                    key: "skills.image.replicate_key".into(),
+                    value: image.replicate_key.clone(),
+                    placeholder: "r8_…".into(),
+                    set: Rc::new(|s, v| s.skills.image.replicate_key = v.trim().to_string()),
+                },
+            ));
+            rows.push(row(
+                "Model version",
+                "A model id or specific version hash from Replicate (owner/name or 64-hex version).",
+                Ctl::Text {
+                    key: "skills.image.replicate_model".into(),
+                    value: image.replicate_model.clone(),
+                    placeholder: "stability-ai/stable-diffusion-3".into(),
+                    set: Rc::new(|s, v| s.skills.image.replicate_model = v.trim().to_string()),
+                },
+            ));
+        }
+        "local" => {
+            rows.push(row(
+                "Shell command",
+                "Runs on this computer. Receives the prompt on stdin; the output path is given as the first argument, the size as the second. Example: `sdcli --steps 30 --out`.",
+                Ctl::Text {
+                    key: "skills.image.local_command".into(),
+                    value: image.local_command.clone(),
+                    placeholder: "sdcli --steps 30 --out".into(),
+                    set: Rc::new(|s, v| s.skills.image.local_command = v),
+                },
+            ));
+        }
+        _ => {}
+    }
+    section(
+        "Image generation",
+        "The `generate_image` tool. Pictures land in the session's attachments and show inline in the chat.",
+        rows,
+    )
 }
 
 fn connection_sections(st: &AppSettings) -> Vec<Section> {
