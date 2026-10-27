@@ -4,6 +4,17 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+## [0.5.13] - 2026-10-27
+
+### Added
+
+- The post-turn CI watcher now works on any git host. Runo classifies a project's remote (GitHub, GitLab, Bitbucket Cloud/Server, Gitea, Azure DevOps, Unknown, None), scans for known CI configs (GitHub Actions, GitLab Pipelines, Bitbucket Pipelines, Circle, Jenkins, Buildkite, Azure, Drone, Woodpecker, Earthly, TeamCity) and shows a provider-aware chip — "Watching GitHub Actions", "No remote, no CI tracking", "Bitbucket Server not supported yet", "No CI detected on this push" or "CI tracking off". After a push the watcher gives CI about two minutes to appear instead of hanging forever, and refuses to watch on hosts it doesn't support yet. GitHub still works through `gh` as before; GitLab, Bitbucket Cloud/Server, Gitea and Azure DevOps are detected but not yet read.
+- Each project has a `ci_tracking` setting (`auto` / `off` / `github_actions` / `gitlab_pipelines` / `bitbucket_pipelines` / `custom:URL`) that pins or disables detection for that project.
+
+### Changed
+
+- Crew's thread rules no longer tell threads to run `gh pr checks --watch` or `gh run watch`. They say "open a pull or merge request on your host, end your turn — Runo watches CI if the project has one, or moves on if not", so threads on non-GitHub hosts stop waiting on commands that would never return.
+
 ## [0.5.12] - 2026-10-27
 
 ### Added
