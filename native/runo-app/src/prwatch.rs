@@ -18,6 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use super::*;
 use crate::github::{PrStatus, Voice};
+use crate::provider::{self, Host, TrackingPlan, TrackingReason};
 
 /// How often a watched pull request is read.
 pub const POLL: Duration = Duration::from_secs(120);
@@ -30,6 +31,11 @@ pub const MAX_CI_WAKES: u32 = 3;
 /// Wakes to fix CI, over all head commits, since checks last passed. Each fix pushes a new
 /// head, so the per-head cap alone would let a thread chase CI forever.
 pub const MAX_CI_STREAK: u32 = 6;
+/// Reads of an open pull request where no CI run has appeared before the watcher
+/// decides there is no CI on this push. With `POLL` of two minutes, two reads land
+/// just over two minutes after the first one and give external CI (Jenkins, Buildkite,
+/// Circle) time to report back to the host.
+pub const MAX_PROBE_READS: u32 = 2;
 
 /// Why a thread was last woken, so its card can say what it is doing.
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -83,6 +89,13 @@ pub struct Watch {
     /// The time of that latest comment already shown.
     #[serde(default)]
     pub stranger_seen: String,
+    /// Reads of this pull request where no CI run or check had appeared yet. A push
+    /// that never triggers CI stops waking the thread after `MAX_PROBE_READS`.
+    #[serde(default)]
+    pub probe_reads: u32,
+    /// The push produced no CI at all; the card says so instead of pretending to wait.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_ci_detected: bool,
 }
 
 /// What to do after one read of the pull request.
@@ -103,8 +116,15 @@ pub enum Step {
     Stop(String),
 }
 
-/// A watch for a thread on `branch`, when `pr` is an open pull request from it.
-pub fn start(pr: &PrStatus, branch: &str) -> Option<Watch> {
+/// A watch for a thread on `branch`, when `pr` is an open pull request from it. A
+/// `plan` with no CI tracking (no remote, host unsupported, person turned it off,
+/// custom URL) stops the watcher from starting at all.
+pub fn start(pr: &PrStatus, branch: &str, plan: Option<&TrackingPlan>) -> Option<Watch> {
+    if let Some(plan) = plan {
+        if !matches!(plan.reason, TrackingReason::Watching) {
+            return None;
+        }
+    }
     (pr.state == "OPEN" && !branch.is_empty() && pr.head_branch == branch).then(|| Watch {
         pr: pr.number,
         url: pr.url.clone(),
@@ -175,6 +195,18 @@ pub fn decide(w: &mut Watch, pr: &PrStatus, busy: bool) -> Step {
         w.conflict_head = pr.head.clone();
         return Step::WakeConflict;
     }
+    // Track whether this push produced any CI at all. External CI reports back a few
+    // seconds after the push; two reads is enough to tell silence from "still spinning
+    // up".
+    if pr.pending == 0 && pr.passed == 0 && pr.failed.is_empty() {
+        w.probe_reads = w.probe_reads.saturating_add(1);
+        if w.probe_reads >= MAX_PROBE_READS {
+            w.no_ci_detected = true;
+        }
+    } else {
+        w.probe_reads = 0;
+        w.no_ci_detected = false;
+    }
     if !pr.failed.is_empty() {
         if w.ci_head != pr.head {
             w.ci_head = pr.head.clone();
@@ -241,24 +273,43 @@ pub fn green(w: &Watch) -> bool {
 }
 
 /// What a watched thread's card says, and whether it reads as trouble, while `working`.
-/// None when a working thread is on something other than a wake.
-pub fn label(w: &Watch, working: bool) -> Option<(String, bool)> {
+/// None when a working thread is on something other than a wake. `plan` tags labels
+/// with the provider's own words ("GitLab pipeline green" rather than "CI green") and
+/// handles the no-remote and unsupported-host cases.
+pub fn label(w: &Watch, working: bool, plan: Option<&TrackingPlan>) -> Option<(String, bool)> {
     if let Some(why) = &w.needs {
         return Some((format!("Needs you: {why}"), true));
     }
+    let ci_name = plan
+        .and_then(|p| p.ci.map(|ci| ci.label().to_string()))
+        .unwrap_or_else(|| "CI".into());
     let text = match (working, w.waking) {
-        (true, Some(Wake::Ci)) => "CI failed, fixing",
-        (true, Some(Wake::Review)) => "Answering review",
-        (true, Some(Wake::Conflict)) => "Fixing conflicts",
+        (true, Some(Wake::Ci)) => format!("{ci_name} failed, fixing"),
+        (true, Some(Wake::Review)) => "Answering review".into(),
+        (true, Some(Wake::Conflict)) => "Fixing conflicts".into(),
         (true, None) => return None,
         (false, _) if w.stranger.is_some() => {
             let who = w.stranger.as_deref().unwrap_or_default();
             return Some((format!("New comment from @{who}"), false));
         }
-        (false, _) if green(w) => "CI green",
-        (false, _) => "Watching CI",
+        (false, _) if green(w) => format!("{ci_name} green"),
+        (false, _) => match plan.map(|p| &p.reason) {
+            Some(TrackingReason::NoRemote) => "No remote, no CI tracking".into(),
+            Some(TrackingReason::DisabledByProject) => "CI tracking off".into(),
+            Some(TrackingReason::Custom) => "Custom CI".into(),
+            Some(TrackingReason::HostUnsupported) => {
+                let host = plan.map(|p| p.host).unwrap_or(Host::Unknown);
+                format!("{} not supported yet", host.name())
+            }
+            Some(TrackingReason::NoCiConfigured) => "No CI configured".into(),
+            Some(TrackingReason::Watching) if w.no_ci_detected => {
+                "No CI detected on this push".into()
+            }
+            _ if w.no_ci_detected => "No CI detected on this push".into(),
+            _ => format!("Watching {ci_name}"),
+        },
     };
-    Some((text.to_string(), working && w.waking == Some(Wake::Ci)))
+    Some((text, working && w.waking == Some(Wake::Ci)))
 }
 
 /// The prompt that wakes a thread whose branch conflicts with its base.
@@ -383,10 +434,11 @@ impl RunoApp {
             return;
         };
         let probing = self.pr_watch.probing.remove(&id);
+        let plan = self.tracking_plan(s);
         let Some(mut watch) = s.crew.as_ref().and_then(|i| i.watch.clone()) else {
             // A thread that just ended a turn: watch its pull request if it opened one.
             if let (true, Ok(Some(pr))) = (probing, &read) {
-                if let Some(w) = start(pr, &s.branch) {
+                if let Some(w) = start(pr, &s.branch, plan.as_ref()) {
                     self.state
                         .log(id, format!("Watching CI on pull request #{}", w.pr));
                     self.set_watch(id, Some(w));
@@ -510,8 +562,40 @@ impl RunoApp {
     /// pull request it links to.
     pub(crate) fn watch_line(&self, s: &Session) -> Option<(String, bool, u64, String)> {
         let w = s.crew.as_ref()?.watch.as_ref()?;
-        let (text, trouble) = label(w, self.is_running(s))?;
+        let plan = self.tracking_plan(s);
+        let (text, trouble) = label(w, self.is_running(s), plan.as_ref())?;
         Some((text, trouble, w.pr, w.url.clone()))
+    }
+
+    /// What the CI watcher should do for a session's project: host, CI configs the
+    /// repo has, and whether the person turned the watcher off here. Returns `None`
+    /// when the session has no project path to read, so callers fall through to the
+    /// plain "Watching CI" label.
+    pub(crate) fn tracking_plan(&self, s: &Session) -> Option<TrackingPlan> {
+        let project = self.state.projects.iter().find(|p| p.id == s.project_id)?;
+        let repo = if !s.dir.is_empty() && std::path::Path::new(&s.dir).is_dir() {
+            s.dir.clone()
+        } else if !project.path.is_empty() {
+            project.path.clone()
+        } else {
+            return None;
+        };
+        let remote = git::remote_name(&repo);
+        let url = if remote.is_empty() {
+            String::new()
+        } else {
+            std::process::Command::new("git")
+                .args(["-C", &repo, "remote", "get-url", &remote])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default()
+        };
+        let host = provider::detect_host(&url);
+        let configs = provider::detect_ci_configs(std::path::Path::new(&repo));
+        let override_ = provider::CiTracking::parse(&project.ci_tracking);
+        Some(provider::plan(host, &override_, configs))
     }
 
     /// A small linked chip for a watched thread: "Watching CI #123", "CI failed, fixing
@@ -609,19 +693,35 @@ mod tests {
 
     #[test]
     fn watches_only_an_open_pull_request_from_the_threads_branch() {
-        assert_eq!(start(&pr(), "runo/x").map(|w| w.pr), Some(7));
-        assert!(start(&pr(), "runo/other").is_none());
-        assert!(start(&pr(), "").is_none());
+        assert_eq!(start(&pr(), "runo/x", None).map(|w| w.pr), Some(7));
+        assert!(start(&pr(), "runo/other", None).is_none());
+        assert!(start(&pr(), "", None).is_none());
         let merged = PrStatus {
             state: "MERGED".into(),
             ..pr()
         };
-        assert!(start(&merged, "runo/x").is_none());
+        assert!(start(&merged, "runo/x", None).is_none());
+        // A plan that says the project isn't being watched (no remote, host unsupported,
+        // disabled) stops the watcher from starting even for a valid pull request.
+        let off = TrackingPlan {
+            host: Host::None,
+            ci: None,
+            configs: Vec::new(),
+            reason: TrackingReason::NoRemote,
+            custom_url: None,
+        };
+        assert!(start(&pr(), "runo/x", Some(&off)).is_none());
+        let unsupported = TrackingPlan {
+            host: Host::BitbucketServer,
+            reason: TrackingReason::HostUnsupported,
+            ..off.clone()
+        };
+        assert!(start(&pr(), "runo/x", Some(&unsupported)).is_none());
     }
 
     #[test]
     fn a_failed_check_wakes_the_thread() {
-        let mut w = start(&pr(), "runo/x").unwrap();
+        let mut w = start(&pr(), "runo/x", None).unwrap();
         assert_eq!(decide(&mut w, &failing("a1"), false), Step::WakeCi);
         assert_eq!((w.ci_wakes, w.ci_streak), (1, 1));
         // Still running or queued: nothing wakes it, nothing is counted.
@@ -634,7 +734,7 @@ mod tests {
 
     #[test]
     fn ci_wakes_stop_at_three_a_head_then_need_the_person() {
-        let mut w = start(&pr(), "runo/x").unwrap();
+        let mut w = start(&pr(), "runo/x", None).unwrap();
         for _ in 0..MAX_CI_WAKES {
             assert_eq!(decide(&mut w, &failing("a1"), false), Step::WakeCi);
         }
@@ -647,7 +747,7 @@ mod tests {
 
     #[test]
     fn a_new_head_restarts_the_count_but_the_streak_caps_it() {
-        let mut w = start(&pr(), "runo/x").unwrap();
+        let mut w = start(&pr(), "runo/x", None).unwrap();
         for head in ["h1", "h2", "h3", "h4", "h5", "h6"] {
             assert_eq!(decide(&mut w, &failing(head), false), Step::WakeCi);
             assert_eq!(w.ci_wakes, 1);
@@ -660,7 +760,7 @@ mod tests {
 
     #[test]
     fn green_marks_the_card_once_and_resets_the_streak() {
-        let mut w = start(&pr(), "runo/x").unwrap();
+        let mut w = start(&pr(), "runo/x", None).unwrap();
         assert_eq!(decide(&mut w, &failing("h1"), false), Step::WakeCi);
         let passed = PrStatus {
             head: "h2".into(),
@@ -671,16 +771,16 @@ mod tests {
         assert!(green(&w));
         assert_eq!(w.ci_streak, 0);
         assert_eq!(decide(&mut w, &passed, false), Step::Wait);
-        assert_eq!(label(&w, false).unwrap().0, "CI green");
+        assert_eq!(label(&w, false, None).unwrap().0, "CI green");
         // No checks at all isn't green.
-        let mut w = start(&pr(), "runo/x").unwrap();
+        let mut w = start(&pr(), "runo/x", None).unwrap();
         assert_eq!(decide(&mut w, &pr(), false), Step::Wait);
-        assert_eq!(label(&w, false).unwrap().0, "Watching CI");
+        assert_eq!(label(&w, false, None).unwrap().0, "Watching CI");
     }
 
     #[test]
     fn feedback_from_someone_else_wakes_but_not_the_threads_own() {
-        let mut w = start(&pr(), "runo/x").unwrap();
+        let mut w = start(&pr(), "runo/x", None).unwrap();
         let mut p = pr();
         p.voices = vec![
             voice("me", "2026-10-25T10:00:00Z", false),
@@ -707,7 +807,7 @@ mod tests {
 
     #[test]
     fn a_strangers_comment_shows_on_the_card_but_never_wakes() {
-        let mut w = start(&pr(), "runo/x").unwrap();
+        let mut w = start(&pr(), "runo/x", None).unwrap();
         let mut p = pr();
         p.voices = vec![Voice {
             trusted: false,
@@ -716,7 +816,7 @@ mod tests {
         assert_eq!(decide(&mut w, &p, false), Step::Stranger("eve".into()));
         assert_eq!(w.comment_wakes, 0);
         assert_eq!(
-            label(&w, false),
+            label(&w, false, None),
             Some(("New comment from @eve".into(), false))
         );
         // Shown once.
@@ -728,7 +828,7 @@ mod tests {
 
     #[test]
     fn comment_wakes_stop_after_ten() {
-        let mut w = start(&pr(), "runo/x").unwrap();
+        let mut w = start(&pr(), "runo/x", None).unwrap();
         let mut p = pr();
         for n in 0..MAX_COMMENT_WAKES {
             p.voices
@@ -741,7 +841,7 @@ mod tests {
 
     #[test]
     fn a_conflict_wakes_once_a_head() {
-        let mut w = start(&pr(), "runo/x").unwrap();
+        let mut w = start(&pr(), "runo/x", None).unwrap();
         let p = PrStatus {
             mergeable: "CONFLICTING".into(),
             ..pr()
@@ -759,7 +859,7 @@ mod tests {
 
     #[test]
     fn merge_or_close_stops_watching_even_while_busy() {
-        let mut w = start(&pr(), "runo/x").unwrap();
+        let mut w = start(&pr(), "runo/x", None).unwrap();
         let merged = PrStatus {
             state: "MERGED".into(),
             ..pr()
@@ -778,7 +878,7 @@ mod tests {
 
     #[test]
     fn failed_reads_back_off_and_stop_after_eight_in_a_row() {
-        let mut w = start(&pr(), "runo/x").unwrap();
+        let mut w = start(&pr(), "runo/x", None).unwrap();
         for n in 1..MAX_FAILED_READS {
             assert_eq!(read_failed(&mut w), None);
             assert_eq!(w.failed_reads, n);
@@ -797,13 +897,62 @@ mod tests {
 
     #[test]
     fn labels_follow_the_wake() {
-        let mut w = start(&pr(), "runo/x").unwrap();
-        assert_eq!(label(&w, false), Some(("Watching CI".into(), false)));
+        let mut w = start(&pr(), "runo/x", None).unwrap();
+        assert_eq!(label(&w, false, None), Some(("Watching CI".into(), false)));
         w.waking = Some(Wake::Ci);
-        assert_eq!(label(&w, true), Some(("CI failed, fixing".into(), true)));
+        assert_eq!(
+            label(&w, true, None),
+            Some(("CI failed, fixing".into(), true))
+        );
         w.waking = None;
-        assert_eq!(label(&w, true), None);
+        assert_eq!(label(&w, true, None), None);
         w.needs = Some("CI still fails".into());
-        assert_eq!(label(&w, false).map(|l| l.1), Some(true));
+        assert_eq!(label(&w, false, None).map(|l| l.1), Some(true));
+    }
+
+    #[test]
+    fn labels_use_the_providers_own_words() {
+        let w = start(&pr(), "runo/x", None).unwrap();
+        let plan = TrackingPlan {
+            host: Host::Gitlab,
+            ci: Some(crate::provider::CiKind::GitlabPipelines),
+            configs: vec![crate::provider::CiKind::GitlabPipelines],
+            reason: TrackingReason::Watching,
+            custom_url: None,
+        };
+        assert_eq!(
+            label(&w, false, Some(&plan)).map(|l| l.0),
+            Some("Watching GitLab Pipelines".into())
+        );
+        let unsupported = TrackingPlan {
+            host: Host::BitbucketServer,
+            ci: None,
+            configs: Vec::new(),
+            reason: TrackingReason::HostUnsupported,
+            custom_url: None,
+        };
+        assert_eq!(
+            label(&w, false, Some(&unsupported)).map(|l| l.0),
+            Some("Bitbucket Server not supported yet".into())
+        );
+    }
+
+    #[test]
+    fn two_reads_without_ci_mark_the_push_as_no_ci() {
+        let mut w = start(&pr(), "runo/x", None).unwrap();
+        // First read with no CI info: still probing.
+        assert_eq!(decide(&mut w, &pr(), false), Step::Wait);
+        assert_eq!((w.probe_reads, w.no_ci_detected), (1, false));
+        // Second read in a row: push produced no CI.
+        assert_eq!(decide(&mut w, &pr(), false), Step::Wait);
+        assert!(w.no_ci_detected);
+        assert_eq!(
+            label(&w, false, None).map(|l| l.0),
+            Some("No CI detected on this push".into())
+        );
+        // A later read that finds a check clears the state.
+        let running = PrStatus { pending: 1, ..pr() };
+        assert_eq!(decide(&mut w, &running, false), Step::Wait);
+        assert_eq!((w.probe_reads, w.no_ci_detected), (0, false));
     }
 }

@@ -434,6 +434,12 @@ pub struct Project {
     /// it holds no such settings.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub trust_agent_config: bool,
+    /// How Runo watches CI for this project: `provider::CiTracking::parse` reads it.
+    /// Empty and "auto" use the three-signal detection; "off"/"none" turns the watcher
+    /// off; "github_actions"/"gitlab_pipelines"/"bitbucket_pipelines" pin a kind;
+    /// "custom:<url>" links a status page.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ci_tracking: String,
 }
 
 fn is_zero_u32(n: &u32) -> bool {

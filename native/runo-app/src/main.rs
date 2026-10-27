@@ -94,6 +94,8 @@ mod procs;
 mod projects;
 mod proof;
 mod proof_ui;
+mod provider;
+mod provider_secrets;
 mod prwatch;
 mod pty;
 mod radar;
