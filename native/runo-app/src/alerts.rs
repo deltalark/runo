@@ -527,7 +527,7 @@ fn fade_after_badge(card: AnyElement, id: String) -> AnyElement {
 }
 
 /// The green pill shown when an update or install finishes.
-fn update_done_badge(n: usize, label: &'static str) -> AnyElement {
+pub(crate) fn update_done_badge(n: usize, label: &'static str) -> AnyElement {
     let pill = div()
         .flex()
         .items_center()
@@ -829,6 +829,16 @@ impl RunoApp {
 
     /// Results of update checks and update runs.
     pub(crate) fn handle_alert_job(&mut self, key: &str, result: Result<String, String>) -> bool {
+        if key.starts_with("sign-in:") && key.ends_with("-line") {
+            if let Ok(line) = result {
+                self.sign_in_streamed(key, line);
+            }
+            return true;
+        }
+        if key.starts_with("sign-in:") || key.starts_with("sign-in-check:") {
+            self.sign_in_result(key, result);
+            return true;
+        }
         if let Some(provider) = key
             .strip_prefix("update:")
             .or_else(|| key.strip_prefix("install:"))
@@ -1677,20 +1687,34 @@ impl RunoApp {
                 continue;
             }
             let (body, actions) = if done {
+                let (body, label) = if signinrun::login_command(id).is_some() {
+                    (
+                        format!(
+                            "Press Sign in to run `{}`; Runo watches for it to finish.",
+                            install::sign_in_command(id, provider.bin)
+                        ),
+                        "Sign in",
+                    )
+                } else {
+                    (
+                        format!(
+                            "Sign in once with `{}`, then pick it in New session.",
+                            install::sign_in_command(id, provider.bin)
+                        ),
+                        "Sign in…",
+                    )
+                };
                 (
-                    format!(
-                        "Sign in once with `{}`, then pick it in New session.",
-                        install::sign_in_command(id, provider.bin)
-                    ),
+                    body,
                     div()
                         .flex()
                         .items_center()
                         .gap_2()
                         .child(update_done_badge(n, "Installed"))
                         .child(
-                            self.button(("install-sign-in", n), "Sign in…", true)
+                            self.button(("install-sign-in", n), label, true)
                                 .on_click(
-                                    cx.listener(move |this, _, _, cx| this.sign_in_agent(id, cx)),
+                                    cx.listener(move |this, _, _, cx| this.start_sign_in(id, cx)),
                                 ),
                         ),
                 )
@@ -1734,6 +1758,9 @@ impl RunoApp {
                 None,
                 cx,
             );
+            run_cards.push(card);
+        }
+        for card in self.sign_in_cards(cx) {
             run_cards.push(card);
         }
         cards.extend(self.health_cards(cx));

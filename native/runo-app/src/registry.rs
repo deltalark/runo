@@ -139,6 +139,9 @@ pub struct AgentSpec {
     /// Arguments of the CLI's sign-in command; none means the CLI asks on first run.
     #[serde(default)]
     pub login: Vec<String>,
+    /// Arguments of the CLI's sign-out command; none means the CLI has no logout.
+    #[serde(default)]
+    pub logout: Vec<String>,
     /// The CLI keeps its own conversation that a follow-up can resume.
     #[serde(default)]
     pub resumes: Gate,

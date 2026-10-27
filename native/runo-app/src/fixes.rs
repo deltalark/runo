@@ -753,7 +753,7 @@ impl RunoApp {
                 why = format!("{name} isn't signed in.");
                 row = row.child(
                     small(self.button("fix-sign-in", "Sign in", first())).on_click(
-                        cx.listener(move |this, _, _, cx| this.sign_in_here(provider, cx)),
+                        cx.listener(move |this, _, _, cx| this.start_sign_in(provider, cx)),
                     ),
                 );
             }
