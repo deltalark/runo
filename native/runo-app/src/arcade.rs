@@ -1931,7 +1931,7 @@ impl Arcade {
             .px(px(24.))
             .py(px(18.))
             .rounded(px(14.))
-            .bg(float(c_raised()))
+            .bg(elev_bg(Elev::Nested, c_raised()))
             .border_1()
             .border_color(float_edge())
             .shadow(vec![
@@ -2313,7 +2313,7 @@ impl RunoApp {
             .v_flex()
             .gap_4()
             .rounded(px(r))
-            .bg(float(c_sheet()))
+            .bg(elev_bg(Elev::Modal, c_sheet()))
             .border_1()
             .border_color(float_edge())
             .shadow(vec![
