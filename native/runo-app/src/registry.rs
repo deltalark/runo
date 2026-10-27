@@ -445,8 +445,18 @@ mod tests {
         assert_eq!(
             ids,
             [
-                "claude", "codex", "opencode", "cursor", "gemini", "copilot", "amp", "droid",
-                "qwen", "grok", "antigravity", "pi"
+                "claude",
+                "codex",
+                "opencode",
+                "cursor",
+                "gemini",
+                "copilot",
+                "amp",
+                "droid",
+                "qwen",
+                "grok",
+                "antigravity",
+                "pi"
             ]
         );
         let claude = &specs[0];

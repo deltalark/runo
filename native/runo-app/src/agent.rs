@@ -3494,10 +3494,7 @@ mod arg_tests {
         assert!(hint.starts_with("Antigravity isn't signed in. Open a terminal and run `agy`"));
         assert!(hint.contains("GEMINI_API_KEY"));
         // No `login` subcommand: the CLI itself asks on first run.
-        assert_eq!(
-            crate::install::sign_in_command("antigravity", "agy"),
-            "agy"
-        );
+        assert_eq!(crate::install::sign_in_command("antigravity", "agy"), "agy");
 
         const ID: &str = "0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f";
         let edit = sel(&[("model", "gemini-3-pro"), ("mode", "edit")]);
@@ -3573,25 +3570,11 @@ mod arg_tests {
         };
         assert_eq!(
             args(ask_command_on("antigravity", "", "why?", "gemini-3-pro")),
-            [
-                "--mode",
-                "plan",
-                "--model",
-                "gemini-3-pro",
-                "-p",
-                "why?"
-            ]
+            ["--mode", "plan", "--model", "gemini-3-pro", "-p", "why?"]
         );
         assert_eq!(
             args(recap_command("antigravity", "", ID, "recap").unwrap()),
-            [
-                "--mode",
-                "plan",
-                "--conversation",
-                ID,
-                "-p",
-                "recap"
-            ]
+            ["--mode", "plan", "--conversation", ID, "-p", "recap"]
         );
         assert!(recap_command("antigravity", "", "9857aae5fff2", "recap").is_none());
     }

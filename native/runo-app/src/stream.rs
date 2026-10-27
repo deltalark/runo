@@ -38,9 +38,9 @@ impl Parser {
             crate::agent::Output::Pi => {
                 Some(Parser::Pi(Box::new(crate::harness::pi::PiStream::new(cwd))))
             }
-            crate::agent::Output::Antigravity => Some(Parser::Antigravity(Box::new(
-                AntigravityStream::new(cwd),
-            ))),
+            crate::agent::Output::Antigravity => {
+                Some(Parser::Antigravity(Box::new(AntigravityStream::new(cwd))))
+            }
             crate::agent::Output::Text => None,
         }
     }
