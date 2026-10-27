@@ -53,7 +53,10 @@ impl Store {
 
     pub fn token(&self, host: Host) -> Option<&str> {
         let k = key(host)?;
-        self.tokens.get(k).map(String::as_str).filter(|s| !s.is_empty())
+        self.tokens
+            .get(k)
+            .map(String::as_str)
+            .filter(|s| !s.is_empty())
     }
 
     /// Set or clear a token. An empty token removes the entry.
@@ -116,19 +119,15 @@ fn find_token_start(s: &str) -> Option<usize> {
         "glpat-",
         "gta_",
     ];
-    PREFIXES
-        .iter()
-        .filter_map(|p| s.find(p))
-        .min()
-        .or_else(|| {
-            // `Authorization: Bearer <t>` and `token <t>` headers.
-            for header in ["Bearer ", "token "] {
-                if let Some(i) = s.find(header) {
-                    return Some(i + header.len());
-                }
+    PREFIXES.iter().filter_map(|p| s.find(p)).min().or_else(|| {
+        // `Authorization: Bearer <t>` and `token <t>` headers.
+        for header in ["Bearer ", "token "] {
+            if let Some(i) = s.find(header) {
+                return Some(i + header.len());
             }
-            None
-        })
+        }
+        None
+    })
 }
 
 #[cfg(test)]

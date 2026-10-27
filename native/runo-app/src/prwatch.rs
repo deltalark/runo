@@ -572,11 +572,7 @@ impl RunoApp {
     /// when the session has no project path to read, so callers fall through to the
     /// plain "Watching CI" label.
     pub(crate) fn tracking_plan(&self, s: &Session) -> Option<TrackingPlan> {
-        let project = self
-            .state
-            .projects
-            .iter()
-            .find(|p| p.id == s.project_id)?;
+        let project = self.state.projects.iter().find(|p| p.id == s.project_id)?;
         let repo = if !s.dir.is_empty() && std::path::Path::new(&s.dir).is_dir() {
             s.dir.clone()
         } else if !project.path.is_empty() {
@@ -904,7 +900,10 @@ mod tests {
         let mut w = start(&pr(), "runo/x", None).unwrap();
         assert_eq!(label(&w, false, None), Some(("Watching CI".into(), false)));
         w.waking = Some(Wake::Ci);
-        assert_eq!(label(&w, true, None), Some(("CI failed, fixing".into(), true)));
+        assert_eq!(
+            label(&w, true, None),
+            Some(("CI failed, fixing".into(), true))
+        );
         w.waking = None;
         assert_eq!(label(&w, true, None), None);
         w.needs = Some("CI still fails".into());

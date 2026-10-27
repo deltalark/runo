@@ -422,11 +422,7 @@ pub struct HostCache {
 
 #[allow(dead_code)]
 impl HostCache {
-    pub fn get_or_fetch(
-        &mut self,
-        project: u64,
-        remote_url: &str,
-    ) -> Host {
+    pub fn get_or_fetch(&mut self, project: u64, remote_url: &str) -> Host {
         if remote_url.is_empty() {
             self.by_project.remove(&project);
             return Host::None;
@@ -437,7 +433,8 @@ impl HostCache {
             }
         }
         let host = detect_host(remote_url);
-        self.by_project.insert(project, (remote_url.to_string(), host));
+        self.by_project
+            .insert(project, (remote_url.to_string(), host));
         host
     }
 
@@ -447,9 +444,7 @@ impl HostCache {
 
     #[cfg(test)]
     pub fn seen(&self, project: u64) -> Option<(&str, Host)> {
-        self.by_project
-            .get(&project)
-            .map(|(u, h)| (u.as_str(), *h))
+        self.by_project.get(&project).map(|(u, h)| (u.as_str(), *h))
     }
 }
 
@@ -483,10 +478,7 @@ mod tests {
             detect_host("https://dev.azure.com/org/project/_git/repo"),
             Host::AzureDevops
         );
-        assert_eq!(
-            detect_host("https://git.example.com/a/b"),
-            Host::Unknown
-        );
+        assert_eq!(detect_host("https://git.example.com/a/b"), Host::Unknown);
         assert_eq!(detect_host(""), Host::None);
         assert_eq!(detect_host("not a url"), Host::None);
     }
@@ -634,7 +626,10 @@ mod tests {
             Host::Github
         );
         // Second call is cached: the URL is remembered.
-        assert_eq!(cache.seen(1), Some(("git@github.com:a/b.git", Host::Github)));
+        assert_eq!(
+            cache.seen(1),
+            Some(("git@github.com:a/b.git", Host::Github))
+        );
         // Changing the URL re-detects.
         assert_eq!(
             cache.get_or_fetch(1, "https://gitlab.com/a/b"),
