@@ -168,6 +168,18 @@
       "models": { "args": ["models"] }
     },
     {
+      "id": "antigravity",
+      "name": "Antigravity",
+      "bin": "agy",
+      "mark": "⬢",
+      "color": "#8ab4f8",
+      "install": {
+        "unix": "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+      },
+      "resumes": true,
+      "output": [{ "format": "antigravity" }]
+    },
+    {
       "id": "pi",
       "name": "Pi",
       "bin": "pi",

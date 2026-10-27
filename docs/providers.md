@@ -18,6 +18,7 @@ Install at least one, sign in, and make sure it is on your `PATH` (or point Runo
 | Amp | `amp` | `--stream-json` | `threads continue <thread id>` |
 | Droid | `droid` | `exec -o stream-json` | `-s <session id>` |
 | Grok (xAI's Grok Build) | `grok` | `-p --output-format streaming-messages-json` (Claude Code's stream-json) | `-s <uuid>` on the first turn, then `-r <uuid>` |
+| Antigravity (Google's `agy`) | `agy` | `-p --output-format stream-json` (its own NDJSON) | `--conversation <uuid>`, or `-c` for the most recent |
 
 Settings → Providers lists which are installed, their versions and paths, and whether each is signed in. If you install or update a CLI while Runo is open, use Re-detect. Agents that aren't installed can be installed from there with the vendor's installer.
 
@@ -30,6 +31,7 @@ Runo checks each installed agent's sign-in in the background when it starts and 
 - Claude Code: its login in the macOS keychain, or `~/.claude/.credentials.json` elsewhere.
 - Gemini CLI: `~/.gemini/oauth_creds.json` or `~/.gemini/.env`. OpenCode: `~/.local/share/opencode/auth.json`.
 - Grok: `~/.grok/auth.json`, which `grok login` writes when you sign in with your SuperGrok or X Premium+ subscription, or `XAI_API_KEY`.
+- Antigravity: its OAuth login lives in the OS keyring (Keychain, Secret Service, Credential Manager), which Runo doesn't read; `GEMINI_API_KEY` counts, and a turn that worked signed in is remembered. Antigravity's CLI has no `login` subcommand — running `agy` the first time opens a browser to sign in to your Google account.
 - Copilot, Amp, Droid and Qwen Code are only checked for their API keys; without one Runo can't tell, and says nothing.
 
 A signed-out agent is marked in New session and in Settings → Providers, and a turn sent to it shows how to sign in before it starts. A turn that fails because of the sign-in shows the same hint.
@@ -53,6 +55,7 @@ The composer's Permission chip offers Runo's three levels where the CLI can hold
 | Cursor | not offered (edits come with commands) | `--mode plan` (or without `--force` on older CLIs) | `--force` |
 | Amp | its default | not offered (no read-only mode) | `--dangerously-allow-all` |
 | Grok | `--permission-mode acceptEdits` | `plan` | `bypassPermissions` |
+| Antigravity | `--mode accept-edits` | `--mode plan` | `--dangerously-skip-permissions` |
 
 Cursor runs get `--trust` when the CLI has it, so a new worktree doesn't stop the run at a workspace trust prompt, and one-off questions and model tests run in `--mode ask`.
 
@@ -60,7 +63,7 @@ Codex has no Approval chip: `codex exec` never stops to ask, so an approval poli
 
 ## MCP servers and memory
 
-Runo's memory server and the MCP servers you share reach every agent except Grok: by flag or environment for Claude Code, Codex, OpenCode, Qwen Code, Copilot and Amp, and through their project config file for Cursor, Gemini CLI and Droid (merged with yours, kept out of git and removed after each turn). Grok takes no servers by flag and reads project ones only from a folder you trusted, so it gets none and keeps the servers in its own config.
+Runo's memory server and the MCP servers you share reach every agent except Grok and Antigravity: by flag or environment for Claude Code, Codex, OpenCode, Qwen Code, Copilot and Amp, and through their project config file for Cursor, Gemini CLI and Droid (merged with yours, kept out of git and removed after each turn). Grok and Antigravity take no servers by flag and read project ones only from a folder you trusted, so they get none and keep the servers in their own config.
 
 ## Cost and spending limits
 

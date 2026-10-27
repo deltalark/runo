@@ -44,11 +44,11 @@ pub fn resumes(provider: &str) -> bool {
 }
 
 /// Whether the CLI can resume the conversation Runo kept for a session. Grok (xAI's
-/// Grok Build) resumes only by session UUID; a session from the community Grok CLI Runo
-/// ran before keeps a shorter id, so it starts a new conversation with the history in
-/// the prompt instead.
+/// Grok Build) and Antigravity both resume only by UUID; a session from the community
+/// Grok CLI Runo ran before keeps a shorter id, so it starts a new conversation with the
+/// history in the prompt instead.
 pub fn can_resume(provider: &str, conversation: &str) -> bool {
-    provider != "grok" || conversation.is_empty() || is_uuid(conversation)
+    !matches!(provider, "grok" | "antigravity") || conversation.is_empty() || is_uuid(conversation)
 }
 
 fn is_uuid(id: &str) -> bool {
@@ -223,12 +223,13 @@ pub fn new_uuid() -> String {
 }
 
 /// How a CLI reports a run: Claude Code's stream-json (which Amp and Qwen Code also
-/// speak), its own JSON lines, Pi's events, or plain text.
+/// speak), its own JSON lines, Pi's events, Antigravity's NDJSON, or plain text.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Output {
     Claude,
     Json,
     Pi,
+    Antigravity,
     Text,
 }
 
@@ -239,6 +240,7 @@ pub fn output(provider: &str) -> Output {
         Some("claude") => Output::Claude,
         Some("json") => Output::Json,
         Some("pi") => Output::Pi,
+        Some("antigravity") => Output::Antigravity,
         _ => Output::Text,
     }
 }
@@ -615,6 +617,38 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             args.extend(split_args(&opts.extra_args));
             args.push(with_images(spec));
         }
+        // Google's Antigravity CLI prints its own NDJSON stream (see `AntigravityStream`).
+        // Resume takes a UUID; a headless run can't ask, so Full access skips every prompt
+        // and Auto edit only accepts edits.
+        "antigravity" => {
+            args.extend([s("-p"), s("--output-format"), s("stream-json")]);
+            match mode.as_str() {
+                "plan" => args.extend([s("--mode"), s("plan")]),
+                "full" => args.push(s("--dangerously-skip-permissions")),
+                _ => args.extend([s("--mode"), s("accept-edits")]),
+            }
+            if !model.is_empty() {
+                args.extend([s("--model"), model]);
+            }
+            if !effort.is_empty() {
+                args.extend([s("--effort"), effort]);
+            }
+            let id = spec.session_id;
+            match (spec.resume, id.is_empty()) {
+                (true, false) if is_uuid(id) => args.extend([s("--conversation"), id.to_string()]),
+                (true, true) => args.push(s("-c")),
+                _ => {}
+            }
+            // A fresh or stale-id resume takes its workspace directories up front; a
+            // resumed session keeps the folders it was created with.
+            if !spec.resume || !is_uuid(id) {
+                for dir in list(&opts.add_dirs) {
+                    args.extend([s("--add-dir"), dir]);
+                }
+            }
+            args.extend(split_args(&opts.extra_args));
+            args.push(with_images(spec));
+        }
         // xAI's Grok Build speaks Claude Code's stream-json and permission modes. A
         // headless run can't ask, so a tool call its mode doesn't allow is refused.
         "grok" => {
@@ -984,6 +1018,23 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
             }
             if !resume && !spec.prompt.is_empty() {
                 // The interactive CLI takes its opening message as its argument.
+                args.push(prompt_arg(spec.prompt));
+            }
+            return args;
+        }
+        "antigravity" => {
+            let mut args = with_model(Vec::new(), "--model");
+            match spec.sel.get("mode").map(String::as_str) {
+                Some("plan") => args.extend([s("--mode"), s("plan")]),
+                Some("full") => args.push(s("--dangerously-skip-permissions")),
+                Some("edit") => args.extend([s("--mode"), s("accept-edits")]),
+                _ => {}
+            }
+            let resume = resume && is_uuid(&id);
+            if resume {
+                args.extend([s("--conversation"), id]);
+            }
+            if !resume && !spec.prompt.is_empty() {
                 args.push(prompt_arg(spec.prompt));
             }
             return args;
@@ -1445,6 +1496,16 @@ pub fn recap_command(
                 prompt,
             ]);
         }
+        "antigravity" if is_uuid(conversation) => {
+            command.args([
+                "--mode",
+                "plan",
+                "--conversation",
+                conversation,
+                "-p",
+                prompt,
+            ]);
+        }
         "qwen" if !conversation.is_empty() => {
             command.args([
                 "--approval-mode",
@@ -1545,6 +1606,7 @@ pub fn sign_in_help(provider: &str) -> String {
         "droid" => "Open a terminal and run `droid` to sign in, or set FACTORY_API_KEY under Settings > Droid > Environment.",
         "opencode" => "Open a terminal and run `opencode auth login`.",
         "grok" => "Open a terminal and run `grok login` to sign in with your SuperGrok or X Premium+ subscription, or set XAI_API_KEY under Settings > Grok > Environment.",
+        "antigravity" => "Open a terminal and run `agy` to sign in to your Google account in a browser (Antigravity CLI has no `login` subcommand), or set GEMINI_API_KEY under Settings > Antigravity > Environment.",
         _ => "Sign in to it in a terminal, then try again.",
     };
     format!("{name} isn't signed in. {how}")
@@ -1640,7 +1702,7 @@ pub fn ask_command(provider: &str, configured_bin: &str, prompt: &str) -> Comman
 /// The flag an agent's one-shot ask takes a model with, if it takes one.
 pub fn ask_model_flag(provider: &str) -> Option<&'static str> {
     match provider {
-        "claude" | "copilot" => Some("--model"),
+        "claude" | "copilot" | "antigravity" => Some("--model"),
         "amp" => None,
         _ => Some("-m"),
     }
@@ -1684,6 +1746,10 @@ pub fn ask_command_on(provider: &str, configured_bin: &str, prompt: &str, model:
         }
         "grok" => {
             command.args(["--permission-mode", "plan"]);
+            command.args(&model_args).args(["-p", prompt]);
+        }
+        "antigravity" => {
+            command.args(["--mode", "plan"]);
             command.args(&model_args).args(["-p", prompt]);
         }
         _ => {
@@ -3408,6 +3474,109 @@ mod arg_tests {
             ]
         );
         assert!(recap_command("grok", "", "9857aae5fff2", "recap").is_none());
+    }
+
+    #[test]
+    fn antigravity_runs_googles_agy_cli() {
+        // Antigravity CLI prints its own `--output-format stream-json`; resume takes a
+        // UUID; `--mode accept-edits`/`plan` for the first two levels, and Full access
+        // skips every prompt. The CLI has no `login` subcommand, so sign-in is `agy` itself.
+        assert_eq!(output("antigravity"), Output::Antigravity);
+        assert!(resumes("antigravity") && !names_conversation("antigravity"));
+        assert_eq!(modes("antigravity"), ["edit", "plan", "full"]);
+        assert_eq!(effective_mode("antigravity", "edit"), "edit");
+        assert!(mode_error("antigravity", "plan").is_none());
+        assert!(!reports_cost("antigravity") && reports_tokens("antigravity"));
+        assert!(cost_limit_note("antigravity")
+            .unwrap()
+            .contains("spending limits don't count it"));
+        let hint = sign_in_help("antigravity");
+        assert!(hint.starts_with("Antigravity isn't signed in. Open a terminal and run `agy`"));
+        assert!(hint.contains("GEMINI_API_KEY"));
+        // No `login` subcommand: the CLI itself asks on first run.
+        assert_eq!(crate::install::sign_in_command("antigravity", "agy"), "agy");
+
+        const ID: &str = "0b5c2f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f";
+        let edit = sel(&[("model", "gemini-3-pro"), ("mode", "edit")]);
+        let o = AgentOptions::default();
+        let spec = |resume, session_id| RunSpec {
+            provider: "antigravity",
+            prompt: "hi",
+            resume,
+            sel: &edit,
+            opts: &o,
+            in_git: true,
+            session_id,
+            images: &[],
+            memory: None,
+            local: true,
+            thread: 0,
+            trusted: false,
+        };
+        assert_eq!(
+            provider_args(&spec(false, ID)),
+            [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--mode",
+                "accept-edits",
+                "--model",
+                "gemini-3-pro",
+                "hi"
+            ]
+        );
+        // A known conversation id resumes exactly it.
+        let resumed = provider_args(&spec(true, ID));
+        assert!(resumed.windows(2).any(|w| w == ["--conversation", ID]));
+        assert!(!resumed.contains(&"-c".to_string()));
+        // An unknown id resumes the most recent conversation instead.
+        let continued = provider_args(&spec(true, ""));
+        assert!(continued.contains(&"-c".to_string()));
+        assert!(!continued.contains(&"--conversation".to_string()));
+        assert!(run_args("antigravity", "plan", false, &[])
+            .windows(2)
+            .any(|w| w == ["--mode", "plan"]));
+        let full = run_args("antigravity", "full", false, &[]);
+        assert!(full.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(!full.contains(&"--mode".to_string()));
+
+        // A session with a non-UUID id (nothing Antigravity ever handed out) starts a
+        // new conversation with the history in the prompt.
+        assert!(!can_resume("antigravity", "9857aae5fff2"));
+        assert!(can_resume("antigravity", ID) && can_resume("antigravity", ""));
+        let old = provider_args(&spec(true, "9857aae5fff2"));
+        assert!(!old
+            .iter()
+            .any(|a| a == "-c" || a == "--conversation" || a == "9857aae5fff2"));
+
+        // Interactive, ask and recap all run the CLI as a native speaker.
+        let interactive = interactive_args(&spec(true, ID));
+        assert_eq!(
+            interactive,
+            [
+                "--model",
+                "gemini-3-pro",
+                "--mode",
+                "accept-edits",
+                "--conversation",
+                ID
+            ]
+        );
+        let args = |c: Command| -> Vec<String> {
+            c.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(
+            args(ask_command_on("antigravity", "", "why?", "gemini-3-pro")),
+            ["--mode", "plan", "--model", "gemini-3-pro", "-p", "why?"]
+        );
+        assert_eq!(
+            args(recap_command("antigravity", "", ID, "recap").unwrap()),
+            ["--mode", "plan", "--conversation", ID, "-p", "recap"]
+        );
+        assert!(recap_command("antigravity", "", "9857aae5fff2", "recap").is_none());
     }
 
     #[test]

@@ -41,7 +41,7 @@ pub struct SignIn {
     pub fix: &'static str,
 }
 
-pub const SIGN_INS: [SignIn; 11] = [
+pub const SIGN_INS: [SignIn; 12] = [
     SignIn {
         provider: "claude",
         keys: &["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
@@ -107,6 +107,12 @@ pub const SIGN_INS: [SignIn; 11] = [
         keys: &["XAI_API_KEY"],
         file: None,
         fix: "run `grok login` there with xAI's Grok Build, or export XAI_API_KEY (from console.x.ai)",
+    },
+    SignIn {
+        provider: "antigravity",
+        keys: &["GEMINI_API_KEY"],
+        file: None,
+        fix: "run `agy` there to sign in to your Google account, or export GEMINI_API_KEY (from aistudio.google.com)",
     },
     SignIn {
         provider: "pi",

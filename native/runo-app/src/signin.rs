@@ -258,6 +258,13 @@ fn judge(
             // `grok login` keeps its sign-in here and `grok logout` removes it.
             Some(read(".grok/auth.json").contains("\"key\""))
         }
+        "antigravity" => {
+            // Antigravity's OAuth sign-in lives in the OS keyring (Keychain, Secret
+            // Service, Credential Manager), which Runo doesn't read; a settings file is
+            // only written once a turn has started, so an absent one isn't a signed-out
+            // signal. Only an API key counts here, and a turn that ran sets `turn_showed`.
+            None
+        }
         _ => None,
     }
 }
