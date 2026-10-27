@@ -89,6 +89,10 @@ pub struct ClaudeStream {
     background: Vec<String>,
     /// Background tasks' ids and the calls that started them.
     tasks: Vec<(String, String)>,
+    /// What a failed tool call last printed. Grok Build ends a stuck turn with
+    /// `{"subtype":"error_during_execution"}` and no explanation of its own, so the
+    /// final `result` event borrows this to say what cut the turn short.
+    last_tool_error: Option<String>,
 }
 
 impl ClaudeStream {
@@ -101,6 +105,7 @@ impl ClaudeStream {
             named: false,
             background: Vec::new(),
             tasks: Vec::new(),
+            last_tool_error: None,
         }
     }
 
@@ -304,11 +309,18 @@ impl ClaudeStream {
                             }
                             self.background.retain(|b| b != id);
                         }
+                        let output = grok_tool_text(&block["content"])
+                            .unwrap_or_else(|| result_text(&block["content"]));
+                        if !ok {
+                            let trimmed = output.trim();
+                            if !trimmed.is_empty() {
+                                self.last_tool_error = Some(short(trimmed, 240));
+                            }
+                        }
                         out.push(AgentEvent::ToolDone {
                             id: id.to_string(),
                             ok,
-                            output: grok_tool_text(&block["content"])
-                                .unwrap_or_else(|| result_text(&block["content"])),
+                            output,
                         });
                     }
                 }
@@ -365,15 +377,13 @@ impl ClaudeStream {
                     out.push(AgentEvent::Summary(parts.join(" · ")));
                 }
                 if event["is_error"].as_bool() == Some(true) {
-                    let reason = event["result"]
-                        .as_str()
-                        .or_else(|| event["subtype"].as_str())
-                        .unwrap_or("The agent reported an error.");
+                    let reason = self.failure_reason(&event);
                     // A used-up plan says so in words only when no rate_limit_event came.
-                    if let Some(limit) = crate::planlimit::from_text(reason, chrono::Local::now()) {
+                    if let Some(limit) = crate::planlimit::from_text(&reason, chrono::Local::now())
+                    {
                         out.push(AgentEvent::Limit(limit));
                     }
-                    out.push(AgentEvent::Error(reason.to_string()));
+                    out.push(AgentEvent::Error(reason));
                 } else if !self.any_text {
                     if let Some(text) = event["result"].as_str().filter(|t| !t.is_empty()) {
                         out.push(self.text(text.to_string()));
@@ -398,6 +408,71 @@ impl ClaudeStream {
 
     fn step_label(&self, tool: &str, input: &Value) -> String {
         step_label(&self.cwd, tool, input)
+    }
+
+    /// What to show for a `result` event with `is_error: true`. Claude Code puts the
+    /// reason in the `result` text, so that is used when it is there. Grok Build leaves
+    /// `result` out and only emits a short `subtype` such as `error_during_execution`,
+    /// plus an `errors` list of short codes and (just above) the tool_result that cut
+    /// the turn short; this stitches them into a sentence a person can read.
+    fn failure_reason(&mut self, event: &Value) -> String {
+        if let Some(text) = event["result"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return text.to_string();
+        }
+        let subtype = event["subtype"].as_str().unwrap_or("");
+        let header = failure_header(subtype);
+        let detail = self.last_tool_error.take().filter(|d| !d.trim().is_empty());
+        let codes: Vec<String> = event["errors"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()))
+            .map(str::to_string)
+            .collect();
+        let mut parts: Vec<String> = Vec::new();
+        match header {
+            Some(h) => parts.push(h.to_string()),
+            // Fall back to the raw subtype so the person at least sees Grok's own label.
+            None if !subtype.is_empty() && codes.iter().all(|c| c != subtype) => {
+                parts.push(subtype.to_string())
+            }
+            None => {}
+        }
+        if let Some(d) = detail {
+            parts.push(d);
+        }
+        let codes: Vec<String> = codes
+            .into_iter()
+            .filter(|c| {
+                let lower = c.to_lowercase();
+                !parts.iter().any(|p| p.to_lowercase().contains(&lower))
+            })
+            .collect();
+        if !codes.is_empty() {
+            parts.push(codes.join(", "));
+        }
+        if parts.is_empty() {
+            "The agent reported an error.".to_string()
+        } else {
+            parts.join(": ")
+        }
+    }
+}
+
+/// A readable headline for the `error_*` subtypes Claude Code and Grok Build emit on a
+/// failed `result`. Other subtypes (`success`, custom) pass through.
+fn failure_header(subtype: &str) -> Option<&'static str> {
+    match subtype {
+        "error_during_execution" => Some("The turn was interrupted while a tool was running"),
+        "error_max_turns" => Some("The turn hit the maximum turn limit"),
+        "error_max_structured_output_retries" => {
+            Some("The model couldn't produce output matching the requested schema")
+        }
+        _ => None,
     }
 }
 
@@ -1489,6 +1564,110 @@ mod tests {
     }
 
     #[test]
+    fn grok_builds_error_during_execution_says_what_cut_the_turn_short() {
+        // From a real Grok Build 1.0.70 run of "simple node server": its `write` tool
+        // was cancelled, and the terminal result says only `error_during_execution`
+        // and `errors: ["cancelled"]`. Ids and paths are shortened.
+        let lines = [
+            r#"{"type":"system","subtype":"init","session_id":"01a1754e-f2f9-7f80-acd2-a20947bfb786","apiKeySource":"oauth","model":"grok-4.7","cwd":"/work/app","permissionMode":"default","tools":["run_terminal_command","write"],"mcp_servers":[],"uuid":"u-1"}"#,
+            r#"{"type":"assistant","message":{"id":"msg_0","type":"message","role":"assistant","model":"grok-4.7","content":[{"type":"text","text":"I'll look at the workspace and add a small Node server."},{"type":"tool_use","id":"call-a-0","name":"list_dir","input":{"target_directory":"/work/app"}}],"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"parent_tool_use_id":null,"session_id":"01a1754e-f2f9-7f80-acd2-a20947bfb786","uuid":"u-2"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-a-0","content":"{\"type\":\"ListDir\",\"Content\":{\"content\":\"- /work/app/\\n\",\"absolute_root_path\":\"/work/app\"}}","is_error":false}]},"parent_tool_use_id":null,"session_id":"01a1754e-f2f9-7f80-acd2-a20947bfb786","uuid":"u-3"}"#,
+            r#"{"type":"assistant","message":{"id":"msg_1","type":"message","role":"assistant","model":"grok-4.7","content":[{"type":"text","text":"The workspace is empty. I'll add a single-file Node server."},{"type":"tool_use","id":"call-a-1","name":"write","input":{"file_path":"/work/app/server.js","content":"const http = require('http');\n"}}],"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":20,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"parent_tool_use_id":null,"session_id":"01a1754e-f2f9-7f80-acd2-a20947bfb786","uuid":"u-4"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-a-1","content":"[{\"type\":\"content\",\"content\":{\"type\":\"text\",\"text\":\"User cancelled the execution for tool `write`\"}}]","is_error":true}]},"parent_tool_use_id":null,"session_id":"01a1754e-f2f9-7f80-acd2-a20947bfb786","uuid":"u-5"}"#,
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"duration_ms":6739,"duration_api_ms":5862,"num_turns":2,"stop_reason":"cancelled","total_cost_usd":0.03,"usage":{"input_tokens":30,"output_tokens":30,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"modelUsage":{"grok-4.7-build":{"inputTokens":30,"outputTokens":30,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"webSearchRequests":0,"costUSD":0.03}},"errors":["cancelled"],"session_id":"01a1754e-f2f9-7f80-acd2-a20947bfb786","uuid":"u-6"}"#,
+        ];
+        let mut parser = ClaudeStream::new("/work/app");
+        let out: Vec<AgentEvent> = lines.iter().flat_map(|l| parser.feed(l)).collect();
+        let error = out
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::Error(e) => Some(e.as_str()),
+                _ => None,
+            })
+            .expect("the failed result emits an error");
+        // The error names what cut the turn short — Grok's raw subtype no longer leaks.
+        assert!(error.contains("The turn was interrupted while a tool was running"));
+        assert!(error.contains("User cancelled the execution for tool `write`"));
+        assert!(error.contains("cancelled"));
+        assert!(!error.contains("error_during_execution"));
+    }
+
+    #[test]
+    fn grok_errors_fall_back_to_the_subtype_when_nothing_else_is_known() {
+        // A `result` event alone, with no tool failure above it and no `errors` list:
+        // the mapped headline is still shown.
+        let mut p = ClaudeStream::new("/x");
+        let out = p.feed(
+            r#"{"type":"result","subtype":"error_max_structured_output_retries","is_error":true}"#,
+        );
+        assert_eq!(
+            out.into_iter().find_map(|e| match e {
+                AgentEvent::Error(e) => Some(e),
+                _ => None,
+            }),
+            Some("The model couldn't produce output matching the requested schema".into())
+        );
+        // An unknown subtype still passes through so the person sees something.
+        let mut p = ClaudeStream::new("/x");
+        let out = p.feed(r#"{"type":"result","subtype":"error_banana","is_error":true}"#);
+        assert_eq!(
+            out.into_iter().find_map(|e| match e {
+                AgentEvent::Error(e) => Some(e),
+                _ => None,
+            }),
+            Some("error_banana".into())
+        );
+    }
+
+    #[test]
+    fn grok_errors_let_a_retry_find_the_last_prompt() {
+        // A failed Grok turn adds a Role::System message with the error reason, keeping
+        // the Role::User prompt untouched so Retry can find it.
+        use crate::harness::apply::{apply, Context};
+        use crate::store::{Message, Role, Session};
+        let lines = [
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"call-a-1","name":"write","input":{"file_path":"/w/x","content":""}}]}}"#,
+            r#"{"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"call-a-1","content":"[{\"type\":\"content\",\"content\":{\"type\":\"text\",\"text\":\"User cancelled the execution for tool `write`\"}}]","is_error":true}]}}"#,
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["cancelled"]}"#,
+        ];
+        let mut parser = ClaudeStream::new("/w");
+        let events: Vec<AgentEvent> = lines.iter().flat_map(|l| parser.feed(l)).collect();
+        let mut session = Session {
+            id: 1,
+            provider: "grok".into(),
+            ..Session::default()
+        };
+        session
+            .messages
+            .push(Message::new(Role::User, "simple node server"));
+        let cx = Context {
+            plain: false,
+            refused: &[],
+            model: None,
+        };
+        assert!(
+            apply(&mut session, events, &cx),
+            "the turn is marked failed"
+        );
+        // Retry resends the last Role::User message, which must still be reachable.
+        let last_prompt = session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.text.as_str());
+        assert_eq!(last_prompt, Some("simple node server"));
+        let error_text = session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::System)
+            .map(|m| m.text.as_str())
+            .unwrap_or_default();
+        assert!(error_text.contains("The turn was interrupted while a tool was running"));
+    }
+
+    #[test]
     fn grok_builds_partial_messages_stream_its_text_once() {
         // From a real Plan only run with `--include-partial-messages`, cut short: the
         // text arrives as deltas, then once more in the whole message, which is skipped.
@@ -1608,7 +1787,7 @@ mod tests {
             out,
             [
                 AgentEvent::Summary("900ms · 1 turn".into()),
-                AgentEvent::Error("error_max_turns".into())
+                AgentEvent::Error("The turn hit the maximum turn limit".into())
             ]
         );
     }
